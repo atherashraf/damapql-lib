@@ -14,7 +14,7 @@ APP_DIR = BASE_DIR / "app"
 MEDIA_DIR = BASE_DIR / "media"
 COG_DIR = BASE_DIR / "cog"
 
-IS_LOCAL = os.environ.get("IS_LOCAL") == "True"
+IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
 IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
 APP_NAME = os.getenv("APP_NAME", "WASA")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # e.g., "DEBUG", "ERROR"
@@ -28,7 +28,7 @@ DA_APPS = {
     "dch": {"path": "app.dch", "db_key": "default"},
 }
 
-DCH_DB_KEY = 'default'
+DEFAULT_DB_KEY = 'default'
 
 DATABASES = {
     "cache_db": {
@@ -58,7 +58,7 @@ MIDDLEWARES = []
 ACCESS_TOKEN_EXPIRE_MINUTES = 30  # 30 minutes
 REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 SECRET_KEY = os.getenv("SECRET_KEY")
-
+CRYPTO_KEY = os.getenv("CRYPTO_KEY")
 
 AWS_ACCESS_KEY_ID  = os.getenv("AWS_ACCESS_KEY_ID", None)
 AWS_SECRET_ACCESS_KEY= os.getenv("AWS_SECRET_ACCESS_KEY", None)

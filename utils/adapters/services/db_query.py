@@ -1,113 +1,220 @@
-from typing import Dict, Any, List, Optional, Union, Type
+"""
+DBQuery Utility
+---------------
+A high-performance query execution suite for SQLAlchemy 2.0.
+Bridges the gap between raw database results and high-level GIS/Data structures.
 
-import pandas as pd
-from sqlalchemy import text, Select, select, Table
-from sqlalchemy.exc import SQLAlchemyError, InvalidRequestError
-from sqlalchemy.orm import Session
+CORE CAPABILITIES:
+1. Postgres Turbo Path: Offloads GeoJSON and MVT aggregation to the database (C-level speed).
+2. Pydantic v2 Integration: Automatic ORM-to-Schema validation via __pydantic__ attributes.
+3. Spatial Analysis: Native support for GeoPandas (GDF) and Mapbox Vector Tiles (MVT).
+4. Safety: Enforced single-row fetching and result mapping to prevent data leaks.
+
+---
+
+### USAGE EXAMPLES:
+
+#### 1. Standard REST API (Pydantic)
+    stmt = select(User).where(User.is_active == True)
+    # Infers Pydantic model from User.__pydantic__
+    users = DBQuery.execute_query_all_as_pydantic(session, stmt)
+
+    # Ensures business logic integrity
+try:
+    user_data = DBQuery.execute_query_as_one(
+        session,
+        "SELECT * FROM users WHERE email=:e",
+        params={"e": "test@test.com"},
+        raise_if_multiple=True
+    )
+except ValueError as e:
+    # Triggers if a duplicate email exists in the DB
+    print(f"Data Integrity Error: {e}")
+
+#### 2. High-Performance Web Mapping (GeoJSON)
+    # Aggregated entirely in Postgres; returns a single FeatureCollection
+    geojson = DBQuery.execute_query_as_geojson(session, select(Parcel))
+
+#### 3. Tiled Web Mapping (MVT)
+    # Returns binary Protobuf data for Mapbox/Leaflet
+    tile_data = DBQuery.execute_query_as_mvt(db, stmt, z, x, y, layer_name="parcels")
+
+#### 4. Backend Spatial Analysis (GDF)
+    # Returns a GeoDataFrame with Shapely geometries
+    gdf = DBQuery.execute_query_as_gdf(session, select(CatchmentArea))
+
+#### 5. Data Science & Exports (Pandas)
+    # Returns a DataFrame with Enum values cleaned to strings
+    df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["status"])
+
+---
+@router.get("/tiles/{z}/{x}/{y}.pbf")
+def get_vector_tiles(z: int, x: int, y: int, db: Session = Depends(get_db)):
+    # Define the query for the data you want on the map
+    stmt = select(Parcel).where(Parcel.active == True)
+
+    tile_data = DBQuery.execute_query_as_mvt(
+        db, stmt, z, x, y,
+        layer_name="parcels",
+        geom_col="geom"
+    )
+
+    return Response(content=tile_data, media_type="application/x-protobuf")
+
+### OUTPUT FORMAT MAPPING:
+
+| Format    | Method                         | Primary Use Case                                   |
+| :-------- | :----------------------------- | :------------------------------------------------- |
+| Pydantic  | `execute_query_as_pydantic`    | Standard JSON REST API responses                   |
+| GeoJSON   | `execute_query_as_geojson`     | Web maps with small spatial datasets (<5MB)        |
+| MVT       | `execute_query_as_mvt`         | Massive spatial datasets (Slippy map tiles)        |
+| GDF       | `execute_query_as_gdf`         | Backend spatial analysis (Buffer, Join, Overlay)   |
+| DataFrame | `execute_stmt_as_df`           | Statistics, Pivot tables, and CSV/Excel exports    |
+"""
+
 import json
+import re
+from math import ceil
+import geopandas as gpd
+import pandas as pd
+from typing import Dict, Any, List, Optional, Union, Type, TypeVar
+
+from shapely import wkb
+from sqlalchemy import text, Select, select, Table, Engine, func
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
+# T represents the Pydantic Model type
+T = TypeVar("T")
 
 
 class DBQuery:
 
     @staticmethod
-    def execute_stmt_as_df(
-            self,
-            stmt: Union[str, Select, Table],
-            session: Optional[Session] = None,
-            enum_columns: Optional[List[str]] = None
-    ) -> pd.DataFrame:
+    def _infer_entity_from_select(query: Select) -> Optional[Type[Any]]:
+        # Works for standard ORM selects: select(MyModel) or select(MyModel).options(...)
         try:
-            with self.managed_session(session) as session:
-                if isinstance(stmt, Select):
-                    rs = session.execute(stmt)
-                elif isinstance(stmt, Table):
-                    stmt = select(stmt)
-                    rs = session.execute(stmt)
-                else:  # raw SQL string
-                    rs = session.execute(text(stmt))
-
-                df = pd.DataFrame(rs.fetchall())
-                if not df.empty:
-                    df.columns = rs.keys()
-
-                    if enum_columns:
-                        for col in enum_columns:
-                            if col in df.columns:
-                                df[col] = df[col].apply(
-                                    lambda x: [v.value if hasattr(v, 'value') else v for v in x] if isinstance(x, list)
-                                    else x.value if hasattr(x, 'value') else x
-                                )
-                return df
-        except SQLAlchemyError as e:
-            print(f"Error executing statement: {e}")
-            return pd.DataFrame()
+            desc = query.column_descriptions
+            if not desc:
+                return None
+            return desc[0].get("entity")
+        except Exception:
+            return None
 
     @staticmethod
-    def execute_query_as_dict(
+    def execute_stmt_as_df(
             session: Session,
-            query: Union[str, Select],
-            params: dict = None,
-            ensure_unique: bool = True
-    ) -> List[Dict[str, Any]]:
+            stmt: Union[str, Select, Table],
+            enum_columns: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """Executes a statement and returns a Pandas DataFrame."""
         try:
-            if isinstance(query, str):
-                rs = session.execute(text(query), params or {})
-            else:  # assume it's a SQLAlchemy Select or similar
-                rs = session.execute(query, params or {})
-                if ensure_unique:
-                    # Only apply unique() for ORM entity results; it's not applicable to
-                    # plain column/mapping results (especially with JSON/JSONB values).
-                    try:
-                        is_orm_result = getattr(rs, "_attributes", {}).get("is_orm", False)
-                        if is_orm_result:
-                            rs = rs.unique()
-                    except (TypeError, InvalidRequestError):
-                        # Non-hashable row values or unsupported uniqueness; proceed without filtering.
-                        pass
+            if isinstance(stmt, Select):
+                rs = session.execute(stmt)
+            elif isinstance(stmt, Table):
+                rs = session.execute(select(stmt))
+            else:
+                rs = session.execute(text(stmt))
 
-            rows = rs.mappings().all()
-            return [dict(r) for r in rows]
-        except Exception as e:
-            # Optionally log or re-raise
-            raise RuntimeError(f"Query execution failed: {e}") from e
+            df = pd.DataFrame(rs.mappings().all())
+
+            if not df.empty and enum_columns:
+                for col in enum_columns:
+                    if col in df.columns:
+                        df[col] = df[col].apply(lambda x: x.value if hasattr(x, 'value') else x)
+            return df
+        except SQLAlchemyError as e:
+            print(f"Error in execute_stmt_as_df: {e}")
+            return pd.DataFrame()
 
     @staticmethod
     def execute_query_as_geojson(
             session: Session,
             stmt: Union[str, Select],
             geom_col: str = "geom",
-            id_col: Optional[str] = None
+            id_col: str = "id"
     ) -> Dict[str, Any]:
         """
-        Execute a SQLAlchemy statement or raw SQL and return a GeoJSON FeatureCollection.
-        The query must include a geometry column (`geom_col`).
+        Returns a GeoJSON FeatureCollection.
+        If using PostgreSQL, it uses a high-speed recursive JSON builder.
         """
-        # Execute depending on type
-        if isinstance(stmt, str):
-            result = session.execute(text(stmt))
-        else:  # SQLAlchemy Select or similar
-            result = session.execute(stmt)
+        engine = session.get_bind()
 
-        features: List[Dict[str, Any]] = []
+        # --- HIGH SPEED POSTGRES PATH ---
+        if engine.dialect.name == 'postgresql':
+            # Wrap the existing query in a PostGIS GeoJSON builder
+            raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
+
+            pg_geojson_sql = f"""
+                SELECT jsonb_build_object(
+                    'type',     'FeatureCollection',
+                    'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+                )
+                FROM (
+                  SELECT jsonb_build_object(
+                    'type',       'Feature',
+                    'id',         {id_col},
+                    'geometry',   ST_AsGeoJSON({geom_col})::jsonb,
+                    'properties', to_jsonb(inputs) - '{geom_col}'
+                  ) AS feature
+                  FROM ({raw_sql}) inputs
+                ) features;
+            """
+            result = session.execute(text(pg_geojson_sql)).scalar()
+            return result if result else {"type": "FeatureCollection", "features": []}
+
+        # --- FALLBACK PATH (SQLite or other) ---
+        result = session.execute(text(stmt) if isinstance(stmt, str) else stmt)
+        features = []
         for row in result.mappings():
             geom = row.get(geom_col)
-            if geom is None:
-                continue
-            # ST_AsGeoJSON from SQL returns a JSON string, so parse it
-            if isinstance(geom, str):
-                geom = json.loads(geom)
-
-            feature = {
+            if not geom: continue
+            features.append({
                 "type": "Feature",
-                "geometry": geom,
-                "properties": {k: v for k, v in row.items() if k != geom_col}
-            }
-            if id_col and id_col in row:
-                feature["id"] = row[id_col]
-
-            features.append(feature)
-
+                "geometry": json.loads(geom) if isinstance(geom, str) else geom,
+                "properties": {k: v for k, v in row.items() if k != geom_col},
+                "id": row.get(id_col)
+            })
         return {"type": "FeatureCollection", "features": features}
+
+    @staticmethod
+    def _get_pydantic_model(orm_model: Type[Any]) -> Type[T]:
+        pydantic_cls = getattr(orm_model, "__pydantic__", None)
+        if not pydantic_cls:
+            raise ValueError(f"Model {orm_model.__name__} has no __pydantic__ attribute.")
+        return pydantic_cls
+
+    @staticmethod
+    def execute_query_as_pydantic(
+            session: Session,
+            query: Select,
+            model: Optional[Type[Any]] = None,
+            raise_if_none: bool = False
+    ) -> Optional[T]:
+        """Executes ORM query and validates against the model's __pydantic__ class."""
+        orm_model = model or query.column_descriptions[0].get("entity")
+        pydantic_cls = DBQuery._get_pydantic_model(orm_model)
+
+        obj = session.execute(query).scalars().first()
+        if obj is None:
+            if raise_if_none: raise ValueError("No record found.")
+            return None
+
+        return pydantic_cls.model_validate(obj, from_attributes=True)
+
+    @staticmethod
+    def execute_query_all_as_pydantic(
+            session: Session,
+            query: Select,
+            model: Optional[Type[Any]] = None
+    ) -> List[T]:
+        """Executes ORM query and returns a list of Pydantic instances."""
+        orm_model = model or query.column_descriptions[0].get("entity")
+        pydantic_cls = DBQuery._get_pydantic_model(orm_model)
+
+        objs = session.execute(query).scalars().all()
+        return [pydantic_cls.model_validate(o, from_attributes=True) for o in objs]
 
     # NEW: return exactly one row (as a dict) or None
     @staticmethod
@@ -160,81 +267,223 @@ class DBQuery:
         return dict(row)
 
     @staticmethod
-    def _infer_entity_from_select(query: Select) -> Optional[Type[Any]]:
-        # Works for standard ORM selects: select(MyModel) or select(MyModel).options(...)
+    async def execute_query_as_geojson_async(
+            session: AsyncSession,
+            stmt: Union[str, Select],
+            geom_col: str = "geom",
+            id_col: str = "id"
+    ) -> Dict[str, Any]:
+        """
+        Async version of the high-speed GeoJSON builder.
+        Optimized for PostgreSQL.
+        """
+        engine = session.get_bind()
+
+        if engine.dialect.name == 'postgresql':
+            raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
+
+            pg_geojson_sql = f"""
+                    SELECT jsonb_build_object(
+                        'type',     'FeatureCollection',
+                        'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+                    )
+                    FROM (
+                      SELECT jsonb_build_object(
+                        'type',       'Feature',
+                        'id',         {id_col},
+                        'geometry',   ST_AsGeoJSON({geom_col})::jsonb,
+                        'properties', to_jsonb(inputs) - '{geom_col}'
+                      ) AS feature
+                      FROM ({raw_sql}) inputs
+                    ) features;
+                """
+            result = await session.execute(text(pg_geojson_sql))
+            return result.scalar() or {"type": "FeatureCollection", "features": []}
+
+        # Fallback for Async SQLite
+        result = await session.execute(text(stmt) if isinstance(stmt, str) else stmt)
+        features = []
+        for row in result.mappings():
+            geom = row.get(geom_col)
+            if not geom: continue
+            features.append({
+                "type": "Feature",
+                "geometry": json.loads(geom) if isinstance(geom, str) else geom,
+                "properties": {k: v for k, v in row.items() if k != geom_col},
+                "id": row.get(id_col)
+            })
+        return {"type": "FeatureCollection", "features": features}
+
+    @staticmethod
+    def paginate_query(
+            session: Session,
+            query: Select,
+            page: int = 1,
+            page_size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        Wraps a query with Limit/Offset and calculates pagination metadata.
+        Returns a dict compatible with frontend pagination components.
+        """
+        if page < 1: page = 1
+
+        # 1. Get total count using a subquery for accuracy
+        count_stmt = select(func.count()).select_from(query.subquery())
+        total_items = session.execute(count_stmt).scalar() or 0
+
+        # 2. Apply Limit and Offset
+        total_pages = ceil(total_items / page_size) if total_items > 0 else 0
+        offset = (page - 1) * page_size
+
+        paginated_stmt = query.limit(page_size).offset(offset)
+
+        # 3. Fetch data (Inferring Pydantic if possible)
         try:
-            desc = query.column_descriptions
-            if not desc:
-                return None
-            return desc[0].get("entity")
-        except Exception:
-            return None
+            items = DBQuery.execute_query_all_as_pydantic(session, paginated_stmt)
+        except ValueError:
+            # Fallback to dicts if no Pydantic model is found
+            items = [dict(r) for r in session.execute(paginated_stmt).mappings().all()]
+
+        return {
+            "items": items,
+            "metadata": {
+                "total_items": total_items,
+                "total_pages": total_pages,
+                "current_page": page,
+                "page_size": page_size,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            }
+        }
 
     @staticmethod
-    def execute_query_as_pydantic(
+    def execute_query_as_gdf(
             session: Session,
-            query: Select,
-            *,
-            model: Optional[Type[Any]] = None,
-            raise_if_none: bool = False,
-            raise_if_multiple: bool = False
-    ) -> Optional[Any]:
+            stmt: Union[str, Select],
+            params: dict = None,  # Added params argument
+            geom_col: str = "geom",
+            crs: str = "EPSG:4326"
+    ) -> gpd.GeoDataFrame:
         """
-        Execute an ORM Select and return a single row as its __pydantic__ model.
-        Assumes the ORM model defines a __pydantic__ = <PydanticModelClass> attribute.
-
-        - If `model` is not provided, it will be inferred from the Select.
-        - If multiple rows are returned and `raise_if_multiple=True`, raises ValueError.
-        - If no row is returned and `raise_if_none=True`, raises ValueError.
+        Executes a query and returns a GeoPandas GeoDataFrame.
+        Supports bind parameters for SQL injection safety.
         """
-        orm_model = model or DBQuery._infer_entity_from_select(query)
-        if orm_model is None:
-            raise ValueError("Could not infer ORM model from Select; pass `model=` explicitly.")
+        # 1. Prepare statement and execute with params
+        executable_stmt = text(stmt) if isinstance(stmt, str) else stmt
+        rs = session.execute(executable_stmt, params or {})
 
-        pydantic_cls = getattr(orm_model, "__pydantic__", None)
-        if pydantic_cls is None:
-            raise ValueError(f"{orm_model.__name__} does not define __pydantic__.")
+        # 2. Convert to DataFrame using mappings
+        df = pd.DataFrame(rs.mappings().all())
 
-        result = session.execute(query)
-        scalars = result.scalars()
+        if df.empty:
+            return gpd.GeoDataFrame(columns=df.columns, crs=crs)
 
-        if raise_if_multiple:
-            objs: List[Any] = scalars.all()
-            if not objs:
-                if raise_if_none:
-                    raise ValueError("No rows returned for query.")
-                return None
-            if len(objs) > 1:
-                raise ValueError(f"Expected at most one row, got {len(objs)}.")
-            obj = objs[0]
+        # 3. Convert geometry column from WKB to Shapely
+        if geom_col in df.columns:
+            df[geom_col] = df[geom_col].apply(
+                lambda x: wkb.loads(bytes(x.data)) if hasattr(x, 'data') else wkb.loads(x) if isinstance(x,
+                                                                                                         bytes) else x
+            )
+            return gpd.GeoDataFrame(df, geometry=geom_col, crs=crs)
+
+        raise ValueError(f"Geometry column '{geom_col}' not found in query results.")
+
+    @staticmethod
+    def execute_query_as_mvt(
+            session: Session,
+            stmt: Union[str, Select],
+            z: int,
+            x: int,
+            y: int,
+            geom_col: str = "geom",
+            layer_name: str = "default_layer",
+            buffer: int = 64,
+            extent: int = 4096,
+            resolution: float = 0  # New Parameter
+    ) -> bytes:
+        """
+        High-speed MVT generation via PostGIS with geometry simplification.
+        """
+        engine = session.get_bind()
+        if engine.dialect.name != 'postgresql':
+            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
+
+        raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
+
+        # 1. Geometry logic: Apply simplification if resolution is provided
+        # We use ST_SnapToGrid or ST_Simplify to reduce vertex count based on resolution
+        if resolution > 0:
+            geom_expression = f'ST_Simplify("{geom_col}", {resolution})'
         else:
-            obj = scalars.one_or_none() if raise_if_none else scalars.first()
+            geom_expression = f'"{geom_col}"'
 
-        if obj is None:
-            if raise_if_none:
-                raise ValueError("No rows returned for query.")
-            return None
+        # 2. Optimized MVT Query
+        # Note: We use ST_Transform on the simplified geometry to move it to Web Mercator (3857)
+        mvt_sql = f"""
+            WITH 
+            bounds AS (
+              SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
+            ),
+            mvt_geoms AS (
+              SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform({geom_expression}, 3857), 
+                    bounds.envelope, 
+                    {extent}, 
+                    {buffer}, 
+                    true
+                ) AS mvt_geom,
+                t.*
+              FROM ({raw_sql}) AS t, bounds
+              WHERE ST_Intersects(ST_Transform("{geom_col}", 3857), bounds.envelope)
+            )
+            SELECT ST_AsMVT(mvt_geoms.*, '{layer_name}', {extent}, 'mvt_geom') FROM mvt_geoms;
+        """
 
-        # Pydantic v2: from_attributes=True pulls from SQLAlchemy attributes
-        return pydantic_cls.model_validate(obj, from_attributes=True)
+        result = session.execute(text(mvt_sql)).scalar()
+        return bytes(result) if result else b""
 
     @staticmethod
-    def execute_query_all_as_pydantic(
-            session: Session,
-            query: Select,
-            *,
-            model: Optional[Type[Any]] = None
-    ) -> List[Any]:
-        """
-        Execute an ORM Select and return ALL rows as a list of __pydantic__ instances.
-        """
-        orm_model = model or DBQuery._infer_entity_from_select(query)
-        if orm_model is None:
-            raise ValueError("Could not infer ORM model from Select; pass `model=` explicitly.")
+    async def execute_query_as_mvt_async(
+            session: AsyncSession,
+            stmt: Union[str, Select],
+            z: int,
+            x: int,
+            y: int,
+            geom_col: str = "geom",
+            layer_name: str = "default_layer",
+            buffer: int = 64,
+            extent: int = 4096
+    ) -> bytes:
+        """Async version of high-speed MVT generation via PostGIS."""
+        engine = session.get_bind()
+        if engine.dialect.name != 'postgresql':
+            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
 
-        pydantic_cls = getattr(orm_model, "__pydantic__", None)
-        if pydantic_cls is None:
-            raise ValueError(f"{orm_model.__name__} does not define __pydantic__.")
+        raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
 
-        objs = session.execute(query).scalars().all()
-        return [pydantic_cls.model_validate(o, from_attributes=True) for o in objs]
+        mvt_sql = f"""
+                WITH 
+                bounds AS (SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope),
+                mvt_geoms AS (
+                  SELECT 
+                    ST_AsMVTGeom(ST_Transform(t.{geom_col}, 3857), bounds.envelope, {extent}, {buffer}, true) AS mvt_geom,
+                    t.*
+                  FROM ({raw_sql}) AS t, bounds
+                  WHERE ST_Intersects(ST_Transform(t.{geom_col}, 3857), bounds.envelope)
+                )
+                SELECT ST_AsMVT(mvt_geoms.*, '{layer_name}', {extent}, 'mvt_geom') FROM mvt_geoms;
+            """
+
+        result = await session.execute(text(mvt_sql))
+        return bytes(result.scalar()) if result else b""
+
+    @classmethod
+    def safe_ident(cls, name: str) -> str:
+        """
+        Very small safety net for identifiers (table/column).
+        Allows schema.table, letters, digits, underscore.
+        """
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?", name):
+            raise ValueError(f"Unsafe SQL identifier: {name!r}")
+        return name
