@@ -12,7 +12,7 @@ from settings import MEDIA_DIR
 from utils.adapters.db import DBBase
 from utils.singletons import da_logger
 
-dch_tiles_router = APIRouter(prefix="/dch", tags=["dch"])
+dch_tiles_router = APIRouter(tags=["dch"])
 
 
 _UUID_TOKEN_RE = re.compile(r"^[0-9a-fA-F-]{32,36}$")

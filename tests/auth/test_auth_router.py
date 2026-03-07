@@ -24,7 +24,7 @@ def test_swagger_login_success(client, monkeypatch):
     monkeypatch.setattr(auth_router_module.AuthUtils, "create_access_token", lambda username: "access-token")
 
     response = client.post(
-        "/api/auth/swagger",   # <- adjust prefix
+        "/auth/swagger",   # <- adjust prefix
         data={"username": "ather", "password": "secret"}
     )
 
@@ -38,7 +38,7 @@ def test_swagger_login_invalid_username(client, monkeypatch):
     monkeypatch.setattr(auth_router_module.User, "get_user_info", lambda username: None)
 
     response = client.post(
-        "/api/auth/swagger",   # <- adjust prefix
+        "/auth/swagger",   # <- adjust prefix
         data={"username": "wrong", "password": "secret"}
     )
 
@@ -66,7 +66,7 @@ def test_swagger_login_invalid_password(client, monkeypatch):
     monkeypatch.setattr(auth_router_module.AuthUtils, "verify_password", lambda raw, enc: False)
 
     response = client.post(
-        "/api/auth/swagger",   # <- adjust prefix
+        "/auth/swagger",   # <- adjust prefix
         data={"username": "ather", "password": "wrong"}
     )
 
@@ -96,7 +96,7 @@ def test_login_json_success(client, monkeypatch):
     monkeypatch.setattr(auth_router_module.AuthUtils, "create_refresh_token", lambda username: "refresh-token")
 
     response = client.post(
-        "/api/auth/jwt/login/json",   # <- adjust prefix
+        "/auth/jwt/login/json",   # <- adjust prefix
         json={"username": "ather", "password": "secret"}
     )
 
@@ -111,7 +111,7 @@ def test_login_json_success(client, monkeypatch):
 def test_verify_token_success(client, monkeypatch):
     monkeypatch.setattr(auth_router_module.AuthUtils, "decode_token", lambda token: {"sub": "ather"})
 
-    response = client.post("/api/auth/jwt/token/verify", json={"token": "valid-token"})
+    response = client.post("/auth/jwt/token/verify", json={"token": "valid-token"})
     assert response.status_code == 200
     assert response.json()["detail"] == "Token is valid"
 
@@ -123,6 +123,6 @@ def test_verify_token_invalid(client, monkeypatch):
 
     monkeypatch.setattr(auth_router_module.AuthUtils, "decode_token", raise_error)
 
-    response = client.post("/api/auth/jwt/token/verify", json={"token": "invalid-token"})
+    response = client.post("/auth/jwt/token/verify", json={"token": "invalid-token"})
     assert response.status_code == 401
     assert "invalid or expired token" in response.json()["detail"].lower()

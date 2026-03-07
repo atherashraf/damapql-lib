@@ -25,7 +25,7 @@ def test_create_user_forbidden_for_non_admin(client):
     app.dependency_overrides[AuthUtils.get_current_user] = override_user
 
     response = client.post(
-        "/api/auth/create_user",   # <- adjust prefix
+        "/auth/create_user",   # <- adjust prefix
         json={
             "username": "newuser",
             "profile_name": "New User",
@@ -111,7 +111,7 @@ def test_create_user_success_for_app_manager(client, monkeypatch):
     )
 
     response = client.post(
-        "/api/auth/create_user",   # <- adjust prefix
+        "/auth/create_user",   # <- adjust prefix
         json={
             "username": "newuser",
             "profile_name": "New User",

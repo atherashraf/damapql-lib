@@ -1,0 +1,21 @@
+[13:32:47] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@139.162.1.117:5432/None'
+[13:35:02] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@139.162.1.117:5432/wasa'
+[13:36:56] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:39:15] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:40:40] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:45:29] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:47:49] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:49:08] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:52:04] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:53:37] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[13:56:12] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[14:00:13] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[14:02:11] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[14:03:22] [🐛 DEBUG] deps.py:206 - SQLAlchemy URL='postgresql+psycopg2://dafast:da7%256fast1%403map@localhost:5432/wasa'
+[12:39:27] [💥 EXCEPTION] db_manager.py:116 - Error creating SQLAlchemy engine: 'dict' object has no attribute 'engine_name'
+Traceback (most recent call last):
+  File "D:\DevProjects\DigitalArz\DAMapQL\.venv\Lib\site-packages\digitalarzengine\io\managers\db_manager.py", line 100, in create_sql_alchemy_engine
+    if config.engine_name == "sqlite":
+       ^^^^^^^^^^^^^^^^^^
+AttributeError: 'dict' object has no attribute 'engine_name'
+

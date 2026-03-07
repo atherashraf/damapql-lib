@@ -37,20 +37,12 @@ DATABASES = {
     },
     "default": {
         "engine": "postgresql",
-        "host": os.environ.get("DB_HOST") if not IS_LOCAL else localhost,
-        "name": os.environ.get("DB_NAME"),
-        "port": os.environ.get("DB_PORT"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD")
-    },
-    "wasa": {
-        "engine": "postgresql",
-        "host": os.environ.get("DB_HOST") if not IS_LOCAL else localhost,
-        "name": 'lbdc',
-        "port": os.environ.get("DB_PORT"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD")
-    },
+        "host": os.environ.get("DCH_HOST") if not IS_LOCAL else localhost,
+        "name": os.environ.get("DCH_NAME"),
+        "port": os.environ.get("DCH_PORT"),
+        "user": os.environ.get("DCH_USER"),
+        "password": os.environ.get("DCH_PASSWORD")
+    }
 
 }
 
