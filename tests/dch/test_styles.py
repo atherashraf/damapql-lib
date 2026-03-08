@@ -68,7 +68,7 @@ def test_save_style_allowed_for_app_manager(client, monkeypatch):
 
     assert response.status_code == 200
     assert "saved successfully" in response.json()["payload"].lower()
-    client.app.dependency_overrides()
+    client.app.dependency_overrides.clear()
 
 
 def test_save_style_forbidden_for_normal_user(client):

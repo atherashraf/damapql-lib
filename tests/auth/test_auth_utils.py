@@ -4,37 +4,43 @@ from app.auth.dtypes import UserInfo
 from app.auth.utils import AuthUtils
 
 
-def test_has_role_superuser():
-    user = UserInfo(
+def _fake_user(**overrides):
+    data = dict(
         id=1,
-        username="admin",
-        is_superuser=True,
-        is_staff=True,
-        roles=[],
-        department=None,
-        is_active=True,
-        is_verified=True,
-        name="Admin",
-        email="admin@example.com",
-        contact=None,
-    )
-
-    assert AuthUtils.has_role(user, "anything") is True
-
-
-def test_has_role_normalized_match():
-    user = UserInfo(
-        id=2,
         username="ather",
         is_superuser=False,
         is_staff=True,
-        roles=["app_manager", "data_editor"],
+        roles=["app_manager"],
+        organization="Digital Arz",
         department="survey",
         is_active=True,
         is_verified=True,
         name="Ather",
         email="ather@example.com",
         contact=None,
+    )
+    data.update(overrides)
+    return UserInfo(**data)
+
+
+def test_has_role_superuser():
+    user = _fake_user(
+        username="admin",
+        is_superuser=True,
+        roles=[],
+        organization=None,
+        department=None,
+        name="Admin",
+        email="admin@example.com",
+    )
+
+    assert AuthUtils.has_role(user, "anything") is True
+
+
+def test_has_role_normalized_match():
+    user = _fake_user(
+        id=2,
+        roles=["app_manager", "data_editor"],
     )
 
     assert AuthUtils.has_role(user, "APP_MANAGER") is True
@@ -43,18 +49,9 @@ def test_has_role_normalized_match():
 
 
 def test_require_role_allows_matching_user():
-    user = UserInfo(
+    user = _fake_user(
         id=2,
-        username="ather",
-        is_superuser=False,
-        is_staff=True,
         roles=["app_manager"],
-        department="survey",
-        is_active=True,
-        is_verified=True,
-        name="Ather",
-        email="ather@example.com",
-        contact=None,
     )
 
     checker = AuthUtils.require_role("app_manager")
@@ -63,18 +60,9 @@ def test_require_role_allows_matching_user():
 
 
 def test_require_role_blocks_non_matching_user():
-    user = UserInfo(
+    user = _fake_user(
         id=2,
-        username="ather",
-        is_superuser=False,
-        is_staff=True,
         roles=["data_editor"],
-        department="survey",
-        is_active=True,
-        is_verified=True,
-        name="Ather",
-        email="ather@example.com",
-        contact=None,
     )
 
     checker = AuthUtils.require_role("app_manager")
@@ -88,18 +76,13 @@ def test_require_role_blocks_non_matching_user():
 
 
 def test_require_department_allows_matching_user():
-    user = UserInfo(
+    user = _fake_user(
         id=3,
         username="user1",
-        is_superuser=False,
-        is_staff=True,
         roles=["data_editor"],
         department="survey",
-        is_active=True,
-        is_verified=True,
         name="User One",
         email="user1@example.com",
-        contact=None,
     )
 
     checker = AuthUtils.require_department("Survey")
@@ -108,18 +91,13 @@ def test_require_department_allows_matching_user():
 
 
 def test_require_department_blocks_non_matching_user():
-    user = UserInfo(
+    user = _fake_user(
         id=3,
         username="user1",
-        is_superuser=False,
-        is_staff=True,
         roles=["data_editor"],
         department="planning",
-        is_active=True,
-        is_verified=True,
         name="User One",
         email="user1@example.com",
-        contact=None,
     )
 
     checker = AuthUtils.require_department("survey")

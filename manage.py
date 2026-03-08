@@ -18,10 +18,9 @@ COMMAND USAGE GUIDE:
 
 4. Create Administrative Users & Access Control:
    $ python manage.py createsuperuser
-   $ python manage.py create_app_user --role_name manager --department_name sales
-   $ python manage.py create_role --name editor --description "Can edit records"
-   $ python manage.py create_department --name engineering --description "Core Dev Team"
-
+   $ python manage.py create_organization --name "Digital Arz"
+   $ python manage.py create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core Development Team"
+   $ python manage.py create_app_user --role_name manager --organization_name "Digital Arz" --department_name "GeoAI development"
 5. Data Portability (JSON):
    $ python manage.py dumpdata --app_label auth --model User --output users_backup.json
    $ python manage.py loaddata --app_label auth --file users_backup.json
@@ -52,7 +51,7 @@ from cryptography.fernet import Fernet
 from settings import APP_DIR, DA_APPS, DEFAULT_DB_KEY
 from utils.adapters.db import DBBase, metadata_obj
 from utils.crypto import CryptoUtils
-from app.auth.models import Profile, User, Role, Department
+from app.auth.models import Profile, User, Role, Department, Organization
 from app.auth.dtypes import EmailValidator
 
 manage_router = APIRouter(
@@ -110,6 +109,14 @@ def parse_params(argv: List[str]) -> Dict[str, Any]:
         else:
             i += 1
     return params
+
+def _to_bool(value: Any) -> bool:
+    """Convert CLI/string values to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 # --- APP SCAFFOLDING ---
 
@@ -230,7 +237,7 @@ def loaddata(app_label: str, file: str):
             session.merge(obj)
 
         session.commit()
-        reset_pk_sequences(DBBase.get_engine(app_label), session, touched_models)
+        reset_pk_sequences(DBBase.get_engine(app_label=app_label), session, touched_models)
     print(f"📥 Loaded {len(records)} records from {file}")
 
 def reset_pk_sequences(engine, session, touched_models):
@@ -249,51 +256,221 @@ def reset_pk_sequences(engine, session, touched_models):
             session.execute(text("SELECT setval(:seq, :v)"), {"seq": seq, "v": max_id})
     session.commit()
 
-# --- AUTH, ROLES & DEPTS ---
+
+
+
+# --- AUTH, ROLES, ORGS & DEPTS ---
 
 def createsuperuser():
     """Interactive CLI to create a staff/superuser profile and account."""
     print("\n--- Create Superuser ---")
     email = _prompt_valid_email()
 
-    profile = Profile.get_by_email(email)
-    if not profile:
-        name = input("Full Name: ")
-        contact = input("Contact Number: ")
-        profile = Profile(name=name, email=email, contact=contact).save()
+    with DBBase.managed_session(app_label="auth") as session:
+        profile = session.query(Profile).filter(Profile.email == email).first()
 
-    username = _prompt_unique_username()
-    password = input("Password: ")
+        if not profile:
+            name = input("Full Name: ")
+            contact = input("Contact Number: ")
+            profile = Profile(name=name, email=email, contact=contact)
+            session.add(profile)
+            session.flush()
 
-    user = User(
-        username=username,
-        password=CryptoUtils().encrypt_txt(password),
-        profile_id=profile.id,
-        is_superuser=True,
-        is_staff=True,
-        is_active=True,
-        is_verified=True,
-    )
-    user.save()
+        existing_user = session.query(User).filter(User.profile_id == profile.id).first()
+        if existing_user:
+            print(f"❌ A user already exists for email '{email}'.")
+            return
+
+        username = _prompt_unique_username()
+        password = input("Password: ")
+
+        user = User(
+            username=username,
+            password=CryptoUtils().encrypt_txt(password),
+            profile_id=profile.id,
+            is_superuser=True,
+            is_staff=True,
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(user)
+
     print(f"✅ Superuser '{username}' created successfully.")
+
+def create_organization(name: str, description: str = None):
+    """Creates an organization."""
+    normalized_name = name.strip()
+
+    with DBBase.managed_session(app_label="auth") as session:
+        existing = session.query(Organization).filter(Organization.name == normalized_name).first()
+        if existing:
+            print(f"⚠️ Organization '{name}' already exists.")
+            return
+
+        session.add(Organization(name=normalized_name, description=description))
+
+    print(f"✅ Organization '{name}' created.")
+
+
+def create_department(organization_name: str, name: str, description: str = None):
+    """Creates an organizational department under an organization."""
+    normalized_org = organization_name.strip()
+    normalized_dept = name.strip().lower()
+
+    with DBBase.managed_session(app_label="auth") as session:
+        organization = session.query(Organization).filter(
+            Organization.name == normalized_org
+        ).first()
+
+        if not organization:
+            print(f"❌ Organization '{organization_name}' does not exist.")
+            return
+
+        existing = session.query(Department).filter(
+            Department.organization_id == organization.id,
+            Department.name == normalized_dept
+        ).first()
+
+        if existing:
+            print(
+                f"⚠️ Department '{name}' already exists in organization '{organization_name}'."
+            )
+            return
+
+        session.add(
+            Department(
+                name=normalized_dept,
+                description=description,
+                organization_id=organization.id,
+            )
+        )
+
+    print(f"✅ Department '{name}' created under '{organization_name}'.")
+
 
 def create_role(name: str, description: str = None):
     """Creates a security role."""
-    existing = Role.get_by_name(name)
-    if existing:
-        print(f"⚠️ Role '{name}' already exists.")
-        return
-    Role(name=name, description=description).save()
+    normalized_name = name.strip().lower()
+
+    with DBBase.managed_session(app_label="auth") as session:
+        existing = session.query(Role).filter(Role.name == normalized_name).first()
+        if existing:
+            print(f"⚠️ Role '{name}' already exists.")
+            return
+
+        session.add(Role(name=normalized_name, description=description))
+
     print(f"✅ Role '{name}' created.")
 
-def create_department(name: str, description: str = None):
-    """Creates an organizational department."""
-    existing = Department.get_by_name(name)
-    if existing:
-        print(f"⚠️ Department '{name}' already exists.")
-        return
-    Department(name=name, description=description).save()
-    print(f"✅ Department '{name}' created.")
+
+def create_app_user(
+    role_name: str,
+    organization_name: str = None,
+    department_name: str = None,
+    is_staff: bool = True,
+    is_superuser: bool = False,
+    is_active: bool = True,
+    is_verified: bool = True,
+):
+    """Interactive CLI to create an application user with optional organization and department."""
+    print("\n--- Create App User ---")
+
+    normalized_role = role_name.strip().lower()
+
+    with DBBase.managed_session(app_label="auth") as session:
+        role = session.query(Role).filter(Role.name == normalized_role).first()
+        if not role:
+            print(f"❌ Role '{role_name}' does not exist.")
+            return
+
+        organization = None
+        if organization_name:
+            organization = session.query(Organization).filter(
+                Organization.name == organization_name.strip()
+            ).first()
+            if not organization:
+                print(f"❌ Organization '{organization_name}' does not exist.")
+                return
+
+        department = None
+        if department_name:
+            dept_query = session.query(Department).filter(
+                Department.name == department_name.strip().lower()
+            )
+
+            if organization:
+                dept_query = dept_query.filter(
+                    Department.organization_id == organization.id
+                )
+
+            department = dept_query.first()
+
+            if not department:
+                if organization_name:
+                    print(
+                        f"❌ Department '{department_name}' does not exist in organization '{organization_name}'."
+                    )
+                else:
+                    print(f"❌ Department '{department_name}' does not exist.")
+                return
+
+            if not organization:
+                organization = session.query(Organization).filter(
+                    Organization.id == department.organization_id
+                ).first()
+
+        email = _prompt_valid_email()
+        profile = session.query(Profile).filter(Profile.email == email).first()
+
+        if not profile:
+            name = input("Full Name: ")
+            contact = input("Contact Number: ")
+            profile = Profile(
+                name=name,
+                email=email,
+                contact=contact,
+                organization_id=organization.id if organization else None,
+                department_id=department.id if department else None,
+            )
+            session.add(profile)
+            session.flush()
+        else:
+            existing_user = session.query(User).filter(User.profile_id == profile.id).first()
+            if existing_user:
+                print(f"❌ A user already exists for email '{email}'.")
+                return
+
+            if department and not organization:
+                organization = session.query(Organization).filter(
+                    Organization.id == department.organization_id
+                ).first()
+
+            if organization:
+                profile.organization_id = organization.id
+            if department:
+                profile.department_id = department.id
+
+        username = _prompt_unique_username()
+        password = input("Password: ")
+
+        user = User(
+            username=username,
+            password=CryptoUtils().encrypt_txt(password),
+            profile_id=profile.id,
+            is_superuser=_to_bool(is_superuser),
+            is_staff=_to_bool(is_staff),
+            is_active=_to_bool(is_active),
+            is_verified=_to_bool(is_verified),
+        )
+        session.add(user)
+        session.flush()
+
+        user.roles.append(role)
+
+    print(
+        f"✅ App user '{username}' created successfully "
+        f"with role '{role_name}'."
+    )
 
 def _prompt_valid_email() -> str:
     while True:

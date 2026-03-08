@@ -13,7 +13,7 @@ from typing_extensions import Annotated
 from jwt import ExpiredSignatureError, InvalidTokenError
 
 from app.auth.dtypes import UserInfo
-from app.auth.models import User, Profile, Role, Department
+from app.auth.models import User, Profile, Role, Department, Organization
 from utils.crypto import CryptoUtils
 from settings import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES
 
@@ -97,28 +97,69 @@ class AuthUtils:
         is_superuser: bool = False,
         is_staff: bool = False,
         roles: Optional[List[str]] = None,
+        organization: Optional[str] = None,
         department: Optional[str] = None,
         session: Optional[Session] = None,
     ) -> User:
         roles = roles or []
 
         with User.managed_session(session) as s:
-            profile = Profile(name=name, email=email, contact=contact)
-            saved_profile = profile.save(session=s)
+            organization_obj = None
+            if organization:
+                normalized_organization = organization.strip()
+                organization_obj = (
+                    s.query(Organization)
+                    .filter(
+                        Organization.name == normalized_organization,
+                        Organization.is_active.is_(True)
+                    )
+                    .first()
+                )
+                if not organization_obj:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Organization '{organization}' not found"
+                    )
 
             department_obj = None
             if department:
                 normalized_department = department.strip().lower()
-                department_obj = (
-                    s.query(Department)
-                    .filter(Department.name == normalized_department, Department.is_active.is_(True))
-                    .first()
+                query = s.query(Department).filter(
+                    Department.name == normalized_department,
+                    Department.is_active.is_(True)
                 )
+
+                if organization_obj:
+                    query = query.filter(Department.organization_id == organization_obj.id)
+
+                department_obj = query.first()
                 if not department_obj:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Department '{department}' not found"
                     )
+
+                if organization_obj and department_obj.organization_id != organization_obj.id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Department does not belong to the selected organization"
+                    )
+
+            if department_obj and not organization_obj:
+                organization_obj = (
+                    s.query(Organization)
+                    .filter(Organization.id == department_obj.organization_id)
+                    .first()
+                )
+
+            profile = Profile(
+                name=name,
+                email=email,
+                contact=contact,
+                organization_id=organization_obj.id if organization_obj else None,
+                department_id=department_obj.id if department_obj else None,
+            )
+            saved_profile = profile.save(session=s)
 
             role_objects = []
             if roles:
@@ -141,7 +182,6 @@ class AuthUtils:
                 username=username,
                 password=CryptoUtils().encrypt_txt(password),
                 profile_id=saved_profile.id,
-                department_id=department_obj.id if department_obj else None,
                 is_superuser=is_superuser,
                 is_staff=is_staff,
                 is_active=is_superuser,
@@ -224,12 +264,16 @@ class AuthUtils:
     def update_user_department(
         username: str,
         department: Optional[str],
+        organization: Optional[str] = None,
         session: Optional[Session] = None,
     ) -> bool:
         with User.managed_session(session) as s:
             user = (
                 s.query(User)
-                .options(selectinload(User.department))
+                .options(
+                    selectinload(User.profile).selectinload(Profile.department),
+                    selectinload(User.profile).selectinload(Profile.organization),
+                )
                 .filter(User.username == username)
                 .first()
             )
@@ -237,22 +281,47 @@ class AuthUtils:
             if not user:
                 raise ValueError(f"User '{username}' not found.")
 
+            if not user.profile:
+                raise ValueError(f"User '{username}' has no profile.")
+
             if not department:
-                user.department = None
+                user.profile.department_id = None
                 user.save(session=s)
                 return True
 
             normalized_department = department.strip().lower()
-            department_obj = (
-                s.query(Department)
-                .filter(Department.name == normalized_department, Department.is_active.is_(True))
-                .first()
+            query = s.query(Department).filter(
+                Department.name == normalized_department,
+                Department.is_active.is_(True)
             )
+
+            organization_obj = None
+            if organization:
+                organization_obj = (
+                    s.query(Organization)
+                    .filter(
+                        Organization.name == organization.strip(),
+                        Organization.is_active.is_(True)
+                    )
+                    .first()
+                )
+                if not organization_obj:
+                    raise ValueError(f"Organization '{organization}' not found.")
+
+                query = query.filter(Department.organization_id == organization_obj.id)
+
+            department_obj = query.first()
 
             if not department_obj:
                 raise ValueError(f"Department '{department}' not found.")
 
-            user.department = department_obj
+            user.profile.department_id = department_obj.id
+
+            if organization_obj:
+                user.profile.organization_id = organization_obj.id
+            elif not user.profile.organization_id:
+                user.profile.organization_id = department_obj.organization_id
+
             user.save(session=s)
             return True
 

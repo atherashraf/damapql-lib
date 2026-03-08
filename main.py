@@ -62,13 +62,13 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 auth_engine = get_async_engine_instance("default")
 
-# admin = Admin(
-#     app,
-#     auth_engine,
-#     base_url="/admin",
-#     # authentication_backend=AdminAuth(secret_key=SECRET_KEY, engine=auth_engine),
-#     title="DAFastMap Admin"
-# )
+admin = Admin(
+    app,
+    auth_engine,
+    base_url="/admin",
+    # authentication_backend=AdminAuth(secret_key=SECRET_KEY, engine=auth_engine),
+    title="DAFastMap Admin"
+)
 
 
 def register_routers(app: FastAPI):
@@ -95,7 +95,8 @@ def app_init():
 
 app_init()
 register_routers(app)
-
+# for route in app.routes:
+#     print(type(route).__name__, route.path)
 
 @app.exception_handler(ValueError)
 async def value_error_exception_handler(request: Request, exc: ValueError):

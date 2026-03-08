@@ -8,7 +8,7 @@ token refreshing, user verification, and user creation.
 import os
 import traceback
 from datetime import timedelta
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body, Form
 from fastapi.security import OAuth2PasswordRequestForm
@@ -203,6 +203,7 @@ def create_user(
                 is_superuser=False,
                 is_staff=True,
                 roles=user_data.roles,
+                organization=user_data.organization,
                 department=user_data.department,
                 session=session,
             )
@@ -280,12 +281,11 @@ def activate_account(data: dict = Body(...), session: Session = Depends(get_sync
 
 @auth_router.get("/user_list", response_model=UserListResponse)
 def get_user_list(current_user: UserInfo = Depends(AuthUtils.get_current_user)) -> UserListResponse:
-
     with User.managed_session() as session:
         query = session.query(User).options(
-            selectinload(User.profile),
+            selectinload(User.profile).selectinload(Profile.organization),
+            selectinload(User.profile).selectinload(Profile.department),
             selectinload(User.roles),
-            selectinload(User.department),
         )
 
         if current_user.is_superuser:
@@ -315,7 +315,10 @@ def set_user_roles(
     with User.managed_session() as session:
         user = (
             session.query(User)
-            .options(selectinload(User.roles))
+            .options(
+                selectinload(User.roles),
+                selectinload(User.profile).selectinload(Profile.department),
+            )
             .filter_by(username=payload.username)
             .first()
         )
@@ -324,13 +327,13 @@ def set_user_roles(
             raise HTTPException(status_code=404, detail="User not found")
 
         UserRoleManager.set_roles(session, user, payload.roles)
-
         session.refresh(user)
 
         return {
             "username": user.username,
             "roles": [role.name for role in user.roles],
-            "department": user.department.name if user.department else None,
+            "organization": user.profile.organization.name if user.profile and user.profile.organization else None,
+            "department": user.profile.department.name if user.profile and user.profile.department else None,
             "is_verified": user.is_verified,
         }
 

@@ -38,8 +38,8 @@ def test_get_all_map_info(client, monkeypatch):
         lambda df, pkCols=None: {"payload": df.to_dict(orient="records"), "pkCols": pkCols},
     )
 
-    # 4. PATH: Standardize the URL (Removed trailing slash to match router)
-    response = client.get("/dch/all_map_info")
+    # 4. PATH: Standardize the URL
+    response = client.get("/dch/all_map_info/")
 
     assert response.status_code == 200
     data = response.json()
