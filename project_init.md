@@ -62,6 +62,9 @@ python manage.py migrate --app_label auth
 
 # Create DCH tables
 python manage.py migrate --app_label dch
+python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layercategory.json
+python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layerqualitylevel.json
+                      
 ```
 
 ---

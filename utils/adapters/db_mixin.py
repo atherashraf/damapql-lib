@@ -33,10 +33,28 @@ class ModelHelpersMixin:
     # ----- internal Service Locator ----
 
     @classmethod
-    def get_engine(cls, app_label: str = None) -> Engine:
+    def get_engine(cls, app_label: str = None, db_key: str=None) -> Engine:
         """Returns the Sync Engine for this model's database key."""
-        db_key = cls.get_db_key(app_label)
+        if db_key is None:
+            db_key = cls.get_db_key(app_label)
         return get_sync_engine_instance(db_key)
+
+    @staticmethod
+    def engine_to_db_config(engine: Engine) -> dict:
+        """
+        Deconstructs an SQLAlchemy Engine into a configuration dictionary.
+        """
+        url = engine.url
+
+        # Extract components from the SQLAlchemy URL object
+        return {
+            "engine": url.drivername,
+            "host": url.host,
+            "port": url.port,
+            "name": url.database,
+            "user": url.username,
+            "password": url.password
+        }
 
     @classmethod
     def get_session(cls) -> Session:
@@ -92,18 +110,7 @@ class ModelHelpersMixin:
         # Safely get the config, falling back to 'default' if the key doesn't exist
         return DATABASES.get(key, DATABASES.get(DEFAULT_DB_KEY))
 
-    @classmethod
-    def get_engine(cls, app_label: str = None) -> Engine:
-        """
-        Returns the SQLAlchemy Engine instance for the resolved database key.
-        """
-        # 1. Resolve which DB key we are using (e.g., 'cache_db' or 'default')
-        db_key = cls.get_db_key(app_label)
 
-        # 2. Use your existing utility to get/create the engine instance
-        # This assumes get_sync_engine_instance is already set up to
-        # look at your DATABASES dict and create an engine.
-        return get_sync_engine_instance(db_key)
 
 
 

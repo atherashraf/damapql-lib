@@ -7,6 +7,8 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse, JSONResponse
 
+from app.damapql.auth.routers import auth_router
+from app.damapql.dch.routers import dch_router
 from utils.adapters.deps import (
     ExternalEngineRegistry,
     terminate_all_idle_connections,
@@ -16,13 +18,12 @@ from utils.adapters.deps import (
 )
 
 # from app.auth.admin_auth import AdminAuth
-from app.auth.routers import auth_router
-from app.dch.admin_routers import dch_admin_router
-from app.dch.routers import dch_router
+# from app.damapql.auth import auth_router
+# from app.damapql.dch import dch_router
 from middlewares.logger_middleware import LoggingMiddleware
 from utils.singletons import da_logger
 from manage import manage_router
-from settings import SECRET_KEY, DA_APPS, MIDDLEWARES, ALLOWED_ORIGINS
+from settings import SECRET_KEY, DA_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DEFAULT_DB_KEY
 
 
 @asynccontextmanager
@@ -60,7 +61,7 @@ app.add_middleware(
 app.add_middleware(LoggingMiddleware, log_response=False)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
-auth_engine = get_async_engine_instance("default")
+auth_engine = get_async_engine_instance(DEFAULT_DB_KEY)
 
 admin = Admin(
     app,
@@ -75,7 +76,7 @@ def register_routers(app: FastAPI):
     app.include_router(manage_router, prefix="/manage")
     app.include_router(auth_router, prefix="/auth")
     app.include_router(dch_router, prefix="/dch")
-    app.include_router(dch_admin_router, prefix="/dch/admin")
+    # app.include_router(dch_admin_router, prefix="/dch/admin")
 
 
 def app_init():

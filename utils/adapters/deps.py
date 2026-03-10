@@ -20,7 +20,7 @@ USAGE EXAMPLES:
 3. Standalone Script / Background Task (Sync):
     from deps import sync_session_scope
 
-    with sync_session_scope(key="default") as db:
+    with sync_session_scope(key=DEFAULT_DB_KEY) as db:
         user = db.query(User).first()
         # session is automatically closed/rolled back after block
 
@@ -63,9 +63,9 @@ try:
     from settings import DATABASES, DA_APPS, DEFAULT_DB_KEY
 except ImportError:
     # Fallback for demonstration if settings not found
-    DATABASES = {"default": {"engine": "sqlite", "file_path": "dev.db"}}
+    DATABASES = {DEFAULT_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
     DA_APPS = {}
-    DCH_DB_KEY = "default"
+    DCH_DB_KEY = DEFAULT_DB_KEY
 
 # --- Internal Registry for Connection Pooling ---
 _async_engines: dict[str, Any] = {}
@@ -105,7 +105,7 @@ def _build_db_url(db_config: dict, is_async: bool) -> str:
 
 
 # --- Engine & Factory Accessors ---
-def get_async_engine_instance(key: str = "default"):
+def get_async_engine_instance(key: str = DEFAULT_DB_KEY):
     if key not in _async_engines:
         db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=True)
@@ -122,7 +122,7 @@ def get_async_engine_instance(key: str = "default"):
     return _async_engines[key]
 
 
-def get_sync_engine_instance(key: str = "default"):
+def get_sync_engine_instance(key: str = DEFAULT_DB_KEY):
     if key not in _sync_engines:
         db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=False)
@@ -140,22 +140,18 @@ def get_sync_engine_instance(key: str = "default"):
 
 
 # --- Core Session Generators ---
-async def get_async_session(key: str = "default") -> AsyncGenerator[AsyncSession, None]:
-    """Base async session generator with rollback safety."""
+async def get_async_session(key: str = DEFAULT_DB_KEY) -> AsyncGenerator[AsyncSession, None]:
     get_async_engine_instance(key)
     factory = _async_session_factories[key]
     async with factory() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.rollback()
 
-
-def get_sync_session(key: str = "default") -> Generator[Session, None, None]:
-    """Base sync session generator with rollback safety."""
+def get_sync_session(key: str = DEFAULT_DB_KEY) -> Generator[Session, None, None]:
     get_sync_engine_instance(key)
     factory = _sync_session_factories[key]
     session = factory()
@@ -165,13 +161,11 @@ def get_sync_session(key: str = "default") -> Generator[Session, None, None]:
         session.rollback()
         raise
     finally:
-        session.rollback()
         session.close()
-
 
 # --- External Utilities ---
 @contextmanager
-def sync_session_scope(key: str = "default") -> Generator[Session, None, None]:
+def sync_session_scope(key: str = DEFAULT_DB_KEY) -> Generator[Session, None, None]:
     """Context manager for use in non-FastAPI scripts or background tasks."""
     yield from get_sync_session(key)
 
@@ -182,7 +176,7 @@ def get_db_key_from_path(request: Request) -> str:
     path = request.url.path.lstrip("/")
     app_name = path.split("/", 1)[0] if path else ""
     db_key = (DA_APPS.get(app_name) or {}).get("db_key") or DEFAULT_DB_KEY
-    return db_key if db_key in DATABASES else "default"
+    return db_key if db_key in DATABASES else DEFAULT_DB_KEY
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:
@@ -198,7 +192,7 @@ async def get_async_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-def get_db_url(db_key: str = "default") -> str:
+def get_db_url(db_key: str = DEFAULT_DB_KEY) -> str:
     db = DATABASES[db_key]
 
     user = db.get("user", "")

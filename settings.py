@@ -23,24 +23,35 @@ localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
 
 ALLOWED_ORIGINS = ["*"]
 
-DA_APPS = {
-    "auth": {"path": "app.auth", "db_key": "default"},
-    "dch": {"path": "app.dch", "db_key": "default"},
-}
 
-DEFAULT_DB_KEY = 'default'
+
+DEFAULT_DB_KEY = 'dch'
+DATA_DB_KEY = 'wasa_data'
+
+DA_APPS = {
+    "auth": {"path": "app.damapql.auth", "db_key": DEFAULT_DB_KEY},
+    "dch": {"path": "app.damapql.dch", "db_key": DEFAULT_DB_KEY},
+}
 
 DATABASES = {
     "cache_db": {
         "engine": "sqlite",
         "file_path": os.path.join(BASE_DIR, "dch_cache.sqlite")
     },
-    "default": {
+    "dch": {
         "engine": "postgresql",
         "host": os.environ.get("DCH_HOST") if not IS_LOCAL else localhost,
         "name": os.environ.get("DCH_NAME"),
         "port": os.environ.get("DCH_PORT"),
         "user": os.environ.get("DCH_USER"),
+        "password": os.environ.get("DCH_PASSWORD")
+    },
+    "wasa_data": {
+        "engine": "postgresql",
+        "host": os.environ.get("DATA_HOST") if not IS_LOCAL else localhost,
+        "name": os.environ.get("DATA_NAME"),
+        "port": os.environ.get("DATA_PORT"),
+        "user": os.environ.get("DATA_USER"),
         "password": os.environ.get("DCH_PASSWORD")
     }
 

@@ -12,15 +12,19 @@ COMMAND USAGE GUIDE:
 
 2. Initial Database Setup (Create all tables):
    $ python manage.py migrate --app_label auth
+   $ python manage.py migrate --app_label dch
+   $ python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layercategory.json
+   $ python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layerqualitylevel.json
 
 3. Update Schema (Add new columns without losing data):
    $ python manage.py sync_schema --app_label auth
 
 4. Create Administrative Users & Access Control:
    $ python manage.py createsuperuser
+   $ python manage.py create_role --name app_manager --description "Full access to manage DCH layers and DB connections"
    $ python manage.py create_organization --name "Digital Arz"
-   $ python manage.py create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core Development Team"
-   $ python manage.py create_app_user --role_name manager --organization_name "Digital Arz" --department_name "GeoAI development"
+   $ python manage.py create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core AI department"
+   $ python manage.py create_app_user --role_name app_manager --organization_name "Digital Arz" --department_name "GeoAI development"
 5. Data Portability (JSON):
    $ python manage.py dumpdata --app_label auth --model User --output users_backup.json
    $ python manage.py loaddata --app_label auth --file users_backup.json
@@ -48,16 +52,19 @@ from sqlalchemy_utils import ChoiceType
 from cryptography.fernet import Fernet
 
 # Project Imports
-from settings import APP_DIR, DA_APPS, DEFAULT_DB_KEY
+from settings import APP_DIR, DA_APPS
 from utils.adapters.db import DBBase, metadata_obj
 from utils.crypto import CryptoUtils
-from app.auth.models import Profile, User, Role, Department, Organization
-from app.auth.dtypes import EmailValidator
+from app.damapql.auth.models import Profile, User, Role, Department, Organization
+from app.damapql.auth.dtypes import EmailValidator
 
 manage_router = APIRouter(
     tags=["manage"],
     responses={404: {"description": "Not found"}},
 )
+
+
+
 
 # --- UTILS ---
 
@@ -212,33 +219,63 @@ def dumpdata(app_label: str, model: str, output: str = "data.json"):
         json.dump(data, f, indent=2, default=str)
     print(f"📤 Dumped {len(data)} records to {output}")
 
+
+
+
+
 def loaddata(app_label: str, file: str):
     """Loads records from JSON and resets Postgres SERIAL sequences."""
-    file_path = Path(file).resolve()
+    file_path = Path(file)
+
     if not file_path.exists():
-        print(f"❌ File {file_path} not found.")
+        file_path = file_path.resolve()
+
+    if not file_path.is_file():
+        print(f"❌ File not found at: {file_path}")
         return
 
-    with open(file_path, "r") as f:
+    ap = DA_APPS.get(app_label)
+    if not ap:
+        print(f"❌ App label '{app_label}' not found in DA_APPS.")
+        return
+
+    with open(file_path, "r", encoding="utf-8") as f:
         records = json.load(f)
 
-    ap = DA_APPS.get(app_label)
     module = importlib.import_module(f'{ap["path"]}.models')
     touched_models = set()
 
     with DBBase.managed_session(app_label=app_label) as session:
-        for entry in records:
-            model_class = getattr(module, entry["model"])
-            touched_models.add(model_class)
-            pk_name = model_class.__mapper__.primary_key[0].name
+        try:
+            for entry in records:
+                model_name = entry["model"]
+                pk_value = entry["pk"]
+                fields = entry.get("fields", {})
 
-            obj = model_class(**entry["fields"])
-            setattr(obj, pk_name, entry["pk"])
-            session.merge(obj)
+                model_class = getattr(module, model_name)
+                touched_models.add(model_class)
 
-        session.commit()
-        reset_pk_sequences(DBBase.get_engine(app_label=app_label), session, touched_models)
-    print(f"📥 Loaded {len(records)} records from {file}")
+                pk_name = model_class.__mapper__.primary_key[0].name
+
+                payload = dict(fields)
+                payload[pk_name] = pk_value
+
+                obj = model_class(**payload)
+                session.merge(obj)
+
+            session.commit()
+
+            reset_pk_sequences(
+                DBBase.get_engine(app_label=app_label),
+                session,
+                touched_models
+            )
+
+            print(f"📥 Loaded {len(records)} records from {file_path}")
+
+        except Exception:
+            session.rollback()
+            raise
 
 def reset_pk_sequences(engine, session, touched_models):
     """Fixes ID sequences to avoid PK collisions after bulk load."""
@@ -294,23 +331,33 @@ def createsuperuser():
             is_verified=True,
         )
         session.add(user)
+        session.commit()
+        session.refresh(user)
 
-    print(f"✅ Superuser '{username}' created successfully.")
+        print(f"✅ Superuser '{username}' created successfully with ID={user.id}.")
 
 def create_organization(name: str, description: str = None):
     """Creates an organization."""
     normalized_name = name.strip()
 
     with DBBase.managed_session(app_label="auth") as session:
-        existing = session.query(Organization).filter(Organization.name == normalized_name).first()
+        existing = session.query(Organization).filter(
+            Organization.name == normalized_name
+        ).first()
+
         if existing:
             print(f"⚠️ Organization '{name}' already exists.")
             return
 
-        session.add(Organization(name=normalized_name, description=description))
+        organization = Organization(
+            name=normalized_name,
+            description=description
+        )
+        session.add(organization)
+        session.commit()
+        session.refresh(organization)
 
-    print(f"✅ Organization '{name}' created.")
-
+        print(f"✅ Organization '{name}' created with ID={organization.id}.")
 
 def create_department(organization_name: str, name: str, description: str = None):
     """Creates an organizational department under an organization."""
@@ -337,16 +384,19 @@ def create_department(organization_name: str, name: str, description: str = None
             )
             return
 
-        session.add(
-            Department(
-                name=normalized_dept,
-                description=description,
-                organization_id=organization.id,
-            )
+        department = Department(
+            name=normalized_dept,
+            description=description,
+            organization_id=organization.id,
         )
+        session.add(department)
+        session.commit()
+        session.refresh(department)
 
-    print(f"✅ Department '{name}' created under '{organization_name}'.")
-
+        print(
+            f"✅ Department '{name}' created under '{organization_name}' "
+            f"with ID={department.id}."
+        )
 
 def create_role(name: str, description: str = None):
     """Creates a security role."""
@@ -358,10 +408,12 @@ def create_role(name: str, description: str = None):
             print(f"⚠️ Role '{name}' already exists.")
             return
 
-        session.add(Role(name=normalized_name, description=description))
+        role = Role(name=normalized_name, description=description)
+        session.add(role)
+        session.commit()
+        session.refresh(role)
 
-    print(f"✅ Role '{name}' created.")
-
+        print(f"✅ Role '{name}' created with ID={role.id}.")
 
 def create_app_user(
     role_name: str,
@@ -467,10 +519,13 @@ def create_app_user(
 
         user.roles.append(role)
 
-    print(
-        f"✅ App user '{username}' created successfully "
-        f"with role '{role_name}'."
-    )
+        session.commit()
+        session.refresh(user)
+
+        print(
+            f"✅ App user '{username}' created successfully "
+            f"with role '{role_name}' and ID={user.id}."
+        )
 
 def _prompt_valid_email() -> str:
     while True:
