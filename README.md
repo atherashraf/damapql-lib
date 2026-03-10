@@ -126,6 +126,49 @@ DATA_DB_KEY = 'data'
 
 These keys are used internally by DAMapQL modules to resolve database connections.
 
+# Running Tests
+
+DAMapQL includes unit tests written using **pytest**.
+
+Tests are located inside:
+
+```
+app/damapql/tests
+```
+
+Project structure:
+
+```
+app/damapql/tests
+├── auth
+│   └── test_*.py
+└── dch
+    └── test_*.py
+```
+
+### Run Authentication Tests
+
+```bash
+pytest -v app/damapql/tests/auth
+```
+
+### Run DCH Tests
+
+```bash
+pytest -v app/damapql/tests/dch
+```
+
+### Run All Tests
+
+```bash
+pytest -v app/damapql/tests
+```
+
+The `-v` flag runs pytest in **verbose mode**, showing each test result.
+
+---
+
+
 ---
 
 # Development Workflow
