@@ -1,13 +1,12 @@
 import importlib
-import traceback
 
 from digitalarzengine.io.managers.db_manager import GeoDBManager
 from sqlalchemy import insert
 
 
 
-from utils.adapters.db import DBBase
-from settings import DA_APPS
+from app.damapql.utils.adapters.db import DBBase
+from app.damapql.settings import DA_APPS
 
 
 class ModelUtils:

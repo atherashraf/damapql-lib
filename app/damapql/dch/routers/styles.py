@@ -1,6 +1,7 @@
 import io
 import json
 
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from matplotlib import pyplot as plt, colorbar
 from matplotlib.axes import Axes
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.models import LayerInfo, MapInfo, DataModel, COGRaster, BandProcess
-from utils.singletons import da_logger
+from app.damapql.dch.utils.dch_utils import DCHUtils
 
 dch_styles_router = APIRouter(tags=["dch"])
 

@@ -15,8 +15,8 @@ from geoalchemy2.shape import to_shape
 from shapely import wkb
 from datetime import date, datetime
 
-from settings import DATABASES, DA_APPS, DCH_DB_KEY
-from utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
+from app.damapql.settings import DATABASES, DA_APPS, DCH_DB_KEY
+from app.damapql.utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
 
 
 class AmbiguousGeometryError(Exception):
@@ -394,7 +394,7 @@ class ModelHelpersMixin:
             srid=target_srid
         )
 
-    from sqlalchemy import text, Select
+    from sqlalchemy import Select
     from sqlalchemy.orm import Query
 
     @classmethod

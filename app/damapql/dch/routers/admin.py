@@ -9,12 +9,12 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import create_engine, select, text
 
-from settings import MEDIA_DIR, DATA_DB_KEY
+from app.damapql.settings import MEDIA_DIR, DATA_DB_KEY
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 
-from app.damapql.dch.dtypes import DBConnectionCreate, DBConnectionType
+from app.damapql.dch.dtypes import DBConnectionCreate
 from app.damapql.dch.models import (
     AccessibilityType,
     DBConnection,
@@ -30,12 +30,11 @@ from app.damapql.dch.utils.dch_utils import DCHUtils
 
 from digitalarzengine.io.managers.db_manager import GeoDBManager
 
-from utils.adapters import db
-from utils.adapters.db import DBBase
-from utils.adapters.deps import get_sync_session
-from utils.adapters.model_utils import ModelUtils
-from utils.crypto import CryptoUtils
-from utils.singletons import da_logger
+from app.damapql.utils.adapters.db import DBBase
+from app.damapql.utils.adapters.deps import get_sync_session
+from app.damapql.utils.adapters.model_utils import ModelUtils
+from app.damapql.utils.crypto import CryptoUtils
+from digitalarzengine.utils.singletons import da_logger
 
 
 # ---------------------------------------------------------------------

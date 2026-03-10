@@ -9,10 +9,9 @@ load_dotenv()
 # rest of your imports
 
 
-BASE_DIR = Path(__file__).resolve().parent
-APP_DIR = BASE_DIR / "app"
-MEDIA_DIR = BASE_DIR / "media"
-COG_DIR = BASE_DIR / "cog"
+DCH_BASE_DIR = Path(__file__).resolve().parent
+MEDIA_DIR = DCH_BASE_DIR / "media"
+COG_DIR = DCH_BASE_DIR / "cog"
 
 IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
 IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
@@ -36,7 +35,7 @@ DA_APPS = {
 DATABASES = {
     "cache_db": {
         "engine": "sqlite",
-        "file_path": os.path.join(BASE_DIR, "dch_cache.sqlite")
+        "file_path": os.path.join(DCH_BASE_DIR, "../../dch_cache.sqlite")
     },
     "dch": {
         "engine": "postgresql",

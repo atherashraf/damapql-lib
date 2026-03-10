@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.models import MapInfo, DBQuery
-from utils.adapters.db import DBBase
-from utils.singletons import da_logger
+from app.damapql.utils.adapters.db import DBBase
+from digitalarzengine.utils.singletons import da_logger
 
 dch_navigation_router = APIRouter(tags=["dch"])
 

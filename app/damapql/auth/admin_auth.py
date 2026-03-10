@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.damapql.auth.models import User
 from app.damapql.auth.utils import AuthUtils
-from utils.adapters.deps import get_async_engine_instance
-from settings import DCH_DB_KEY
+
+from app.damapql.settings import DCH_DB_KEY
+from app.damapql.utils.adapters.deps import get_async_engine_instance
 
 
 class AdminAuth(AuthenticationBackend):

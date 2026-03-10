@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List
 
-from utils.adapters.services.base_services import BaseService, T
+from app.damapql.utils.adapters.services.base_services import BaseService, T
 
 
 class SpatialService(BaseService[T]):

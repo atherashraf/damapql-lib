@@ -139,7 +139,7 @@ Example:
 
 ```python
 from fastapi import FastAPI
-from settings import SECRET_KEY, DCH_DB_KEY
+from app.damapql.settings import SECRET_KEY, DCH_DB_KEY
 from app.damapql.dch.admin_setup import create_dch_admin
 
 app = FastAPI()

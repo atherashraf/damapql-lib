@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from app.damapql.dch.models import LayerInfo
 
-from utils.singletons import da_logger
+from app.damapql.utils.singletons import da_logger
 
 
 class MVTUtils:

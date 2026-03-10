@@ -1,7 +1,7 @@
 import sys
 
-from settings import DATABASES
-from utils.crypto import CryptoUtils
+from app.damapql.settings import DATABASES
+from app.damapql.utils.crypto import CryptoUtils
 
 
 def list_of_active_connection():

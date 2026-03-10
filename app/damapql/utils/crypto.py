@@ -7,9 +7,9 @@ from cryptography.fernet import Fernet
 
 from dotenv import load_dotenv
 
-from settings import BASE_DIR
+from app.damapql.settings import DCH_BASE_DIR
 
-env_path = os.path.join(BASE_DIR, ".env")
+env_path = os.path.join(DCH_BASE_DIR, ".env")
 load_dotenv(env_path)
 class CryptoUtils:
     def __init__(self):

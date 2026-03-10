@@ -2,6 +2,6 @@
 <project version="4">
   <component name="DataSourcePerFileMappings">
     <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/17e2e1b2-8888-40a9-92d3-493925d14357/console.sql" value="17e2e1b2-8888-40a9-92d3-493925d14357" />
-    <file url="file://$PROJECT_DIR$/utils/adapters/deps.py" value="25974178-41c2-4f89-8715-5a8baf6dda9d" />
+    <file url="file://$PROJECT_DIR$/app/damapql/utils/adapters/deps.py" value="25974178-41c2-4f89-8715-5a8baf6dda9d" />
   </component>
 </project>

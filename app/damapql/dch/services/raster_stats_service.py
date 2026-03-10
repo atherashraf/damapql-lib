@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import HTTPException
 
 from app.damapql.dch.models import LayerInfo, DataModel
@@ -9,7 +10,6 @@ from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from digitalarzengine.io.cog_raster import COGRaster
 from digitalarzengine.io.rio_raster import RioRaster
 from digitalarzengine.processing.raster.band_process import BandProcess
-from utils.singletons import da_logger
 
 
 @dataclass

@@ -1,37 +1,55 @@
 """
-@project DigitalArz FastAPI Engine
-@module Management Utilities
+DAMapQL Management Utilities
 
-To see a list of all available commands and their descriptions:
-    $ python manage.py help
+This module provides CLI-style management commands for DAMapQL-based FastAPI
+projects. It supports application scaffolding, schema creation, additive schema
+sync, fixture import/export, access-control setup, and security key generation.
 
-COMMAND USAGE GUIDE:
+Run commands using:
 
-1. Scaffold a new application:
-   $ python manage.py startapp --app_label survey_app
+    python -m app.damapql.manage <command> [--key value]
 
-2. Initial Database Setup (Create all tables):
-   $ python manage.py migrate --app_label auth
-   $ python manage.py migrate --app_label dch
-   $ python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layercategory.json
-   $ python manage.py loaddata --app_label dch  --file /app/dch/fixtures/layerqualitylevel.json
+Examples
+--------
+Show all available commands:
 
-3. Update Schema (Add new columns without losing data):
-   $ python manage.py sync_schema --app_label auth
+    python -m app.damapql.manage help
 
-4. Create Administrative Users & Access Control:
-   $ python manage.py createsuperuser
-   $ python manage.py create_role --name app_manager --description "Full access to manage DCH layers and DB connections"
-   $ python manage.py create_organization --name "Digital Arz"
-   $ python manage.py create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core AI department"
-   $ python manage.py create_app_user --role_name app_manager --organization_name "Digital Arz" --department_name "GeoAI development"
-5. Data Portability (JSON):
-   $ python manage.py dumpdata --app_label auth --model User --output users_backup.json
-   $ python manage.py loaddata --app_label auth --file users_backup.json
+Create a new app scaffold:
 
-6. Security:
-   $ python manage.py generate_crypto_key
-   $ python manage.py generate_secret_key_hex --length 64
+    python -m app.damapql.manage startapp --app_label inventory
+
+Create database tables:
+
+    python -m app.damapql.manage migrate --app_label auth
+    python -m app.damapql.manage migrate --app_label dch
+
+Load fixture data:
+
+    python -m app.damapql.manage loaddata --app_label dch --file dch/fixtures/layercategory.json
+    python -m app.damapql.manage loaddata --app_label dch --file dch/fixtures/layerqualitylevel.json
+
+Add newly defined columns to existing tables:
+
+    python -m app.damapql.manage sync_schema --app_label auth
+
+Create security and access-control records:
+
+    python -m app.damapql.manage createsuperuser
+    python -m app.damapql.manage create_role --name app_manager --description "Full access to manage DCH layers and DB connections"
+    python -m app.damapql.manage create_organization --name "Digital Arz"
+    python -m app.damapql.manage create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core AI department"
+    python -m app.damapql.manage create_app_user --role_name app_manager --organization_name "Digital Arz" --department_name "GeoAI development"
+
+Export and import JSON data:
+
+    python -m app.damapql.manage dumpdata --app_label auth --model User --output users_backup.json
+    python -m app.damapql.manage loaddata --app_label auth --file users_backup.json
+
+Generate security keys:
+
+    python -m app.damapql.manage generate_crypto_key
+    python -m app.damapql.manage generate_secret_key_hex --length 64
 """
 import os
 import sys
@@ -51,10 +69,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy_utils import ChoiceType
 from cryptography.fernet import Fernet
 
+from app.damapql.settings import DA_APPS, DCH_BASE_DIR
+from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
-from settings import APP_DIR, DA_APPS
-from utils.adapters.db import DBBase, metadata_obj
-from utils.crypto import CryptoUtils
+
+
+from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.auth.models import Profile, User, Role, Department, Organization
 from app.damapql.auth.dtypes import EmailValidator
 
@@ -129,7 +149,7 @@ def _to_bool(value: Any) -> bool:
 
 def startapp(app_label: str):
     """Creates a new app directory with boilerplate files."""
-    dir_path = os.path.join(APP_DIR, app_label)
+    dir_path = os.path.join(DCH_BASE_DIR, app_label)
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
@@ -224,14 +244,27 @@ def dumpdata(app_label: str, model: str, output: str = "data.json"):
 
 
 def loaddata(app_label: str, file: str):
-    """Loads records from JSON and resets Postgres SERIAL sequences."""
+    """
+    Load records from a JSON fixture file and reset PostgreSQL SERIAL sequences.
+
+    The file path may be either:
+    - an absolute path
+    - a relative path (resolved against DCH_BASE_DIR)
+
+    Example:
+        python -m app.damapql.manage loaddata --app_label dch --file fixtures/layercategory.json
+    """
+
     file_path = Path(file)
 
-    if not file_path.exists():
-        file_path = file_path.resolve()
+    # Resolve relative paths against DCH_BASE_DIR
+    if not file_path.is_absolute():
+        file_path = Path(DCH_BASE_DIR) / file_path
 
-    if not file_path.is_file():
-        print(f"❌ File not found at: {file_path}")
+    file_path = file_path.resolve()
+
+    if not file_path.exists() or not file_path.is_file():
+        print(f"❌ Fixture file not found: {file_path}")
         return
 
     ap = DA_APPS.get(app_label)
@@ -239,8 +272,12 @@ def loaddata(app_label: str, file: str):
         print(f"❌ App label '{app_label}' not found in DA_APPS.")
         return
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        records = json.load(f)
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            records = json.load(f)
+    except Exception as e:
+        print(f"❌ Failed to read JSON file: {file_path}")
+        raise e
 
     module = importlib.import_module(f'{ap["path"]}.models')
     touched_models = set()
@@ -275,7 +312,9 @@ def loaddata(app_label: str, file: str):
 
         except Exception:
             session.rollback()
+            print("❌ Data loading failed. Rolling back transaction.")
             raise
+
 
 def reset_pk_sequences(engine, session, touched_models):
     """Fixes ID sequences to avoid PK collisions after bulk load."""

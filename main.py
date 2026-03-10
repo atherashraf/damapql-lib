@@ -9,16 +9,17 @@ from starlette.responses import RedirectResponse, JSONResponse
 from app.damapql.auth.routers import auth_router
 from app.damapql.dch.routers import dch_router
 from app.damapql.dch.admin_setup import create_dch_admin
-from utils.adapters.deps import (
+from app.damapql.middlewares.logger_middleware import LoggingMiddleware
+from app.damapql.utils.adapters.deps import (
     ExternalEngineRegistry,
     terminate_all_idle_connections,
     _async_engines,
     _sync_engines,
 )
-from middlewares.logger_middleware import LoggingMiddleware
-from utils.singletons import da_logger
-from manage import manage_router
-from settings import SECRET_KEY, DA_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
+
+from digitalarzengine.utils.singletons import da_logger
+from app.damapql.manage import manage_router
+from app.damapql.settings import SECRET_KEY, DA_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
 
 
 

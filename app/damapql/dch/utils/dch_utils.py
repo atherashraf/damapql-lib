@@ -7,15 +7,16 @@ import uuid
 from typing import Optional, Union
 
 import lxml.etree as ET
+from digitalarzengine.utils.singletons import da_logger
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 
 from app.damapql.dch.api_enum import DataModel, ModelType
 from app.damapql.dch.models import LayerInfo, LayerAccessibility, DBConnection
-from utils.adapters.db import DBBase
-from utils.adapters.services.spatial_db import SpatialDB
-from utils.adapters.services.db_query import DBQuery
-from utils.singletons import da_logger
+from app.damapql.utils.adapters.db import DBBase
+from app.damapql.utils.adapters.services.spatial_db import SpatialDB
+from app.damapql.utils.adapters.services.db_query import DBQuery
+
 
 
 class DCHUtils:

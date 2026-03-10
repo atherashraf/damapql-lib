@@ -4,7 +4,6 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from utils.loggers import DALogger  # adjust import path if needed
 
 SENSITIVE_KEYS = {"password", "token", "access", "refresh"}
 
@@ -13,6 +12,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp, log_response: bool = False):
         super().__init__(app)
         self.log_response = log_response
+        from digitalarzengine.utils.loggers import DALogger
         self.logger = DALogger(name="LoggingMiddleware")
 
     async def dispatch(self, request: Request, call_next):

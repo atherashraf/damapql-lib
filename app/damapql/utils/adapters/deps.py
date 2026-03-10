@@ -37,17 +37,14 @@ from __future__ import annotations
 
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import Request
-from typing import Generator, AsyncGenerator, Any
-from urllib.parse import quote_plus
+from typing import Generator, AsyncGenerator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, Session
 
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import text
-from typing import Dict, Any
+from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -55,12 +52,12 @@ from urllib.parse import quote_plus
 from typing import Dict
 import os
 
-from utils.crypto import CryptoUtils
-from settings import IS_LOCAL
+from app.damapql.utils.crypto import CryptoUtils
+from app.damapql.settings import IS_LOCAL
 
 # Expected structure from your settings.py
 try:
-    from settings import DATABASES, DA_APPS, DCH_DB_KEY
+    from app.damapql.settings import DATABASES, DA_APPS, DCH_DB_KEY
 except ImportError:
     # Fallback for demonstration if settings not found
     DATABASES = {DCH_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
