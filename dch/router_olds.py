@@ -38,15 +38,15 @@ from starlette.requests import Request
 
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-from utils.adapters.db import DBBase
+from app.damapql.utils.adapters.db import DBBase
 
-from utils.adapters.deps import get_sync_session
+from app.damapql.utils.adapters.deps import get_sync_session
 
-from utils.adapters.model_utils import ModelUtils
-from utils.adapters.services.db_query import DBQuery
-from utils.singletons import da_logger
+from app.damapql.utils.adapters.model_utils import ModelUtils
+from app.damapql.utils.adapters.services.db_query import DBQuery
+from app.damapql.utils.singletons import da_logger
 
-from settings import MEDIA_DIR, APP_NAME, DATA_DB_KEY
+from app.damapql.settings import MEDIA_DIR, APP_NAME, DATA_DB_KEY
 
 import pandas as pd
 from typing import Optional, Union

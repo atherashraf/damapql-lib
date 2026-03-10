@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Optional
 
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
@@ -17,8 +18,8 @@ from app.damapql.dch.models import (
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from digitalarzengine.io.cog_raster import COGRaster
 from digitalarzengine.io.rio_raster import RioRaster
-from settings import APP_NAME, MEDIA_DIR
-from utils.singletons import da_logger
+from app.damapql.settings import APP_NAME, MEDIA_DIR
+
 
 
 @dataclass

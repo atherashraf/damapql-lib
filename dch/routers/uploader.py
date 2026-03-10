@@ -3,9 +3,9 @@ import uuid
 import shutil
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from settings import MEDIA_DIR
-from utils.adapters.db import DBBase
-from utils.singletons import da_logger
+from app.damapql.settings import MEDIA_DIR
+from app.damapql.utils.adapters.db import DBBase
+from digitalarzengine.utils.singletons import da_logger
 
 # Import your models and services
 
@@ -96,7 +96,7 @@ async def finalize_upload(
 async def process_vector_upload(file_path, upload_id, filename, category_id, title):
     # Logic: Read with GeoPandas -> to_postgis -> Register LayerInfo
     # Note: If .shp, ensure all sidecar files were uploaded in the chunks!
-    from settings import DATA_DB_KEY
+    from app.damapql.settings import DATA_DB_KEY
 
     # 1. Load Data
     import geopandas as gpd

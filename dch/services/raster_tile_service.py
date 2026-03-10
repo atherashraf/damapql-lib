@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from app.damapql.dch.models import LayerInfo, AccessibilityType, DataModel
 from digitalarzengine.io.cog_raster import COGRaster
-from utils.singletons import da_logger
+from digitalarzengine.utils.singletons import da_logger
 
 
 @dataclass

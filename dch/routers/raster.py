@@ -7,7 +7,7 @@ from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.dtypes import UploadRasterResponse
 from app.damapql.dch.services.raster_ingest_service import RasterIngestService
 from app.damapql.dch.services.raster_stats_service import RasterStatsService
-from utils.adapters.deps import get_sync_session
+from app.damapql.utils.adapters.deps import get_sync_session
 
 dch_raster_router = APIRouter(tags=["dch"])
 

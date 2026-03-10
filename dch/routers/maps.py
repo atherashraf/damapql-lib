@@ -1,3 +1,4 @@
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import case, func, literal, select
 
@@ -8,7 +9,7 @@ from app.damapql.dch.dtypes import LayerInfoListResponse, MapInfoResponse
 from app.damapql.dch.models import LayerInfo, LayerAccessibility, LayerCategory, MapInfo, DBQuery
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-from utils.singletons import da_logger
+
 
 dch_maps_router = APIRouter(tags=["dch"])
 

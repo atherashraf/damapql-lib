@@ -14,8 +14,8 @@ from jwt import ExpiredSignatureError, InvalidTokenError
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.models import User, Profile, Role, Department, Organization
-from utils.crypto import CryptoUtils
-from settings import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES
+from app.damapql.utils.crypto import CryptoUtils
+from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES
 
 
 JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]

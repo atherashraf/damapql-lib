@@ -3,7 +3,7 @@ from sqladmin import Admin
 from starlette.applications import Starlette
 
 from app.damapql.auth.admin_auth import AdminAuth
-from utils.adapters.deps import get_async_engine_instance
+from app.damapql.utils.adapters.deps import get_async_engine_instance
 
 _dch_admin = None
 

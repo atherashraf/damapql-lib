@@ -10,6 +10,7 @@ import traceback
 from datetime import timedelta
 from typing import List
 
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from jwt import ExpiredSignatureError, InvalidTokenError, DecodeError
@@ -19,10 +20,9 @@ from starlette import status
 from typing_extensions import Annotated
 from pydantic import BaseModel, Field
 
-from settings import ACCESS_TOKEN_EXPIRE_MINUTES
-from utils.adapters.deps import get_sync_session
-from utils.crypto import CryptoUtils
-from utils.singletons import da_logger
+from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES
+from app.damapql.utils.adapters.deps import get_sync_session
+from app.damapql.utils.crypto import CryptoUtils
 
 from .dtypes import UserInfo, UserCreate
 from .manager.email_manager import EmailUtils

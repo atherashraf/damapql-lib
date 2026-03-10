@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Mapped, mapped_column, relationship, selectinload, validates
 
 from app.damapql.auth.dtypes import ProfileType, UserInfo
-from utils.adapters.db import DBBase
+from app.damapql.utils.adapters.db import DBBase
 
 
 user_role_association = db.Table(
