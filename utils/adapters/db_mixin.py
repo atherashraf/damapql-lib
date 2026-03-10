@@ -15,7 +15,7 @@ from geoalchemy2.shape import to_shape
 from shapely import wkb
 from datetime import date, datetime
 
-from settings import DATABASES, DA_APPS, DEFAULT_DB_KEY
+from settings import DATABASES, DA_APPS, DCH_DB_KEY
 from utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
 
 
@@ -99,7 +99,7 @@ class ModelHelpersMixin:
                 # Fallback: take the parent directory name of the model file
                 app_label = cls.__module__.split(".")[-2]
 
-        return DA_APPS.get(app_label, {}).get("db_key") or DEFAULT_DB_KEY
+        return DA_APPS.get(app_label, {}).get("db_key") or DCH_DB_KEY
 
     @classmethod
     def get_db_params(cls, app_label: str = None) -> Dict[str, Any]:
@@ -108,7 +108,7 @@ class ModelHelpersMixin:
         """
         key = cls.get_db_key(app_label)
         # Safely get the config, falling back to 'default' if the key doesn't exist
-        return DATABASES.get(key, DATABASES.get(DEFAULT_DB_KEY))
+        return DATABASES.get(key, DATABASES.get(DCH_DB_KEY))
 
 
 

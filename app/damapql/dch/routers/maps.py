@@ -13,9 +13,17 @@ from utils.singletons import da_logger
 dch_maps_router = APIRouter(tags=["dch"])
 
 
-def require_superuser(current_user: UserInfo):
-    if not current_user.is_superuser:
-        raise HTTPException(status_code=403, detail="Superuser privileges required")
+def require_dch_admin(current_user: UserInfo):
+    if getattr(current_user, "is_superuser", False):
+        return
+
+    if AuthUtils.has_role(current_user, "app_manager"):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail="Superuser or app_manager privileges required",
+    )
 
 
 @dch_maps_router.get(
@@ -67,7 +75,7 @@ async def save_map(
     payload: MapSaveRequest,
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
-    require_superuser(current_user)
+    require_dch_admin(current_user)
 
     with MapInfo.managed_session() as session:
         map_info = None
@@ -146,7 +154,7 @@ async def get_map_info(uuid: str, current_user: UserInfo = Depends(AuthUtils.get
 
 @dch_maps_router.delete("/delete_map/{uuid}/")
 async def delete_map(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
-    require_superuser(current_user)
+    require_dch_admin(current_user)
 
     with MapInfo.managed_session() as session:
         obj = session.execute(
@@ -163,7 +171,7 @@ async def delete_map(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_c
 
 @dch_maps_router.delete("/delete_layerinfo_row/{uuid}/")
 async def delete_layer_info_row(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
-    require_superuser(current_user)
+    require_dch_admin(current_user)
 
     with LayerInfo.managed_session() as session:
         obj = session.execute(

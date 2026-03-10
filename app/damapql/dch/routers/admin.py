@@ -14,7 +14,7 @@ from settings import MEDIA_DIR, DATA_DB_KEY
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 
-from app.damapql.dch.dtypes import DBConnectionCreate
+from app.damapql.dch.dtypes import DBConnectionCreate, DBConnectionType
 from app.damapql.dch.models import (
     AccessibilityType,
     DBConnection,
@@ -30,7 +30,9 @@ from app.damapql.dch.utils.dch_utils import DCHUtils
 
 from digitalarzengine.io.managers.db_manager import GeoDBManager
 
+from utils.adapters import db
 from utils.adapters.db import DBBase
+from utils.adapters.deps import get_sync_session
 from utils.adapters.model_utils import ModelUtils
 from utils.crypto import CryptoUtils
 from utils.singletons import da_logger
@@ -171,7 +173,7 @@ def add_db_connection(
 
 @dch_admin_router.get("/db_table_list/{db_id}/")
 async def db_table_list(
-    db_id: str,
+    db_id: str, db = Depends(get_sync_session),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
@@ -181,7 +183,10 @@ async def db_table_list(
     """
     require_dch_admin(current_user)
 
-    obj: DBConnection = DBConnection.query().filter_by(id=db_id).first()
+    # obj: DBConnection = DBConnection.query().filter_by(id=db_id).first()
+    qs = select(DBConnection).where(DBConnection.id == db_id)
+    result = db.execute(qs)
+    obj: DBConnection = result.scalar_one_or_none()
     if obj is None:
         raise HTTPException(status_code=404, detail="DB connection not found")
 
@@ -198,11 +203,12 @@ async def db_table_list(
         raise HTTPException(status_code=500, detail="Failed to fetch spatial table list")
 
 
-@dch_admin_router.post("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
+@dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
 async def save_db_layer_info(
     db_id: str,
     table_name: str,
     layer_category_id: str,
+    db = Depends(get_sync_session),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
@@ -212,7 +218,10 @@ async def save_db_layer_info(
     """
     require_dch_admin(current_user)
 
-    obj: DBConnection = DBConnection.query().filter_by(id=db_id).first()
+    # obj: DBConnection = DBConnection.query().filter_by(id=db_id).first()
+    qs = select(DBConnection).where(DBConnection.id == db_id)
+    result = db.execute(qs)
+    obj: DBConnection = result.scalar_one_or_none()
     if obj is None:
         raise HTTPException(status_code=404, detail="DB connection not found")
 

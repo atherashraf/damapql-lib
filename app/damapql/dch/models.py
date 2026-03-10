@@ -132,6 +132,7 @@ class DBConnection(DBBase):
 
 
     def get_sqlalchemy_engine(self) -> Engine:
+        self.params["password"] = CryptoUtils().decrypt_txt(self.params["password"])
         return ExternalEngineRegistry.get(self.name, self.params.copy())
 
 class LayerAccessibility(DBBase):

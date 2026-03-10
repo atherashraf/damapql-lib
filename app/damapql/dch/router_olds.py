@@ -9,6 +9,9 @@ from datetime import datetime
 from typing import List
 
 import jenkspy
+from digitalarzengine.io.cog_raster import COGRaster
+from digitalarzengine.io.rio_raster import RioRaster
+from digitalarzengine.processing.raster.band_process import BandProcess
 from matplotlib import pyplot as plt, colorbar
 from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap
@@ -21,10 +24,12 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.models import User
 
 from app.damapql.auth.utils import AuthUtils
+from app.damapql.dch.api_enum import DataModel, ModelType, AccessibilityType
 
 from app.damapql.dch.dch_map_schema import MapSaveRequest
 from app.damapql.dch.dtypes import LayerInfoListResponse, MapInfoResponse, AttributeTableResponse, \
     UploadRasterResponse
+from app.damapql.dch.models import LayerCategory, LayerInfo, MapInfo, LayerAccessibility, DBConnection
 
 from app.damapql.dch.utils.email_utils import EmailRequest, send_email
 
@@ -38,6 +43,7 @@ from utils.adapters.db import DBBase
 from utils.adapters.deps import get_sync_session
 
 from utils.adapters.model_utils import ModelUtils
+from utils.adapters.services.db_query import DBQuery
 from utils.singletons import da_logger
 
 from settings import MEDIA_DIR, APP_NAME, DATA_DB_KEY

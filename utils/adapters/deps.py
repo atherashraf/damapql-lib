@@ -60,12 +60,12 @@ from settings import IS_LOCAL
 
 # Expected structure from your settings.py
 try:
-    from settings import DATABASES, DA_APPS, DEFAULT_DB_KEY
+    from settings import DATABASES, DA_APPS, DCH_DB_KEY
 except ImportError:
     # Fallback for demonstration if settings not found
-    DATABASES = {DEFAULT_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
+    DATABASES = {DCH_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
     DA_APPS = {}
-    DCH_DB_KEY = DEFAULT_DB_KEY
+    DCH_DB_KEY = DCH_DB_KEY
 
 # --- Internal Registry for Connection Pooling ---
 _async_engines: dict[str, Any] = {}
@@ -105,7 +105,7 @@ def _build_db_url(db_config: dict, is_async: bool) -> str:
 
 
 # --- Engine & Factory Accessors ---
-def get_async_engine_instance(key: str = DEFAULT_DB_KEY):
+def get_async_engine_instance(key: str = DCH_DB_KEY):
     if key not in _async_engines:
         db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=True)
@@ -122,7 +122,7 @@ def get_async_engine_instance(key: str = DEFAULT_DB_KEY):
     return _async_engines[key]
 
 
-def get_sync_engine_instance(key: str = DEFAULT_DB_KEY):
+def get_sync_engine_instance(key: str = DCH_DB_KEY):
     if key not in _sync_engines:
         db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=False)
@@ -140,7 +140,7 @@ def get_sync_engine_instance(key: str = DEFAULT_DB_KEY):
 
 
 # --- Core Session Generators ---
-async def get_async_session(key: str = DEFAULT_DB_KEY) -> AsyncGenerator[AsyncSession, None]:
+async def get_async_session(key: str = DCH_DB_KEY) -> AsyncGenerator[AsyncSession, None]:
     get_async_engine_instance(key)
     factory = _async_session_factories[key]
     async with factory() as session:
@@ -151,7 +151,7 @@ async def get_async_session(key: str = DEFAULT_DB_KEY) -> AsyncGenerator[AsyncSe
             await session.rollback()
             raise
 
-def get_sync_session(key: str = DEFAULT_DB_KEY) -> Generator[Session, None, None]:
+def get_sync_session(key: str = DCH_DB_KEY) -> Generator[Session, None, None]:
     get_sync_engine_instance(key)
     factory = _sync_session_factories[key]
     session = factory()
@@ -165,7 +165,7 @@ def get_sync_session(key: str = DEFAULT_DB_KEY) -> Generator[Session, None, None
 
 # --- External Utilities ---
 @contextmanager
-def sync_session_scope(key: str = DEFAULT_DB_KEY) -> Generator[Session, None, None]:
+def sync_session_scope(key: str = DCH_DB_KEY) -> Generator[Session, None, None]:
     """Context manager for use in non-FastAPI scripts or background tasks."""
     yield from get_sync_session(key)
 
@@ -175,8 +175,8 @@ def get_db_key_from_path(request: Request) -> str:
     """Parses URL path to determine DB key; falls back to DCH_DB_KEY."""
     path = request.url.path.lstrip("/")
     app_name = path.split("/", 1)[0] if path else ""
-    db_key = (DA_APPS.get(app_name) or {}).get("db_key") or DEFAULT_DB_KEY
-    return db_key if db_key in DATABASES else DEFAULT_DB_KEY
+    db_key = (DA_APPS.get(app_name) or {}).get("db_key") or DCH_DB_KEY
+    return db_key if db_key in DATABASES else DCH_DB_KEY
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:
@@ -192,7 +192,7 @@ async def get_async_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-def get_db_url(db_key: str = DEFAULT_DB_KEY) -> str:
+def get_db_url(db_key: str = DCH_DB_KEY) -> str:
     db = DATABASES[db_key]
 
     user = db.get("user", "")
