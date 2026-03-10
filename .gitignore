@@ -3,3 +3,4 @@
 *.log
 
 media
+dch_cache.sqlite
