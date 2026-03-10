@@ -26,7 +26,7 @@ ALLOWED_ORIGINS = ["*"]
 
 
 DEFAULT_DB_KEY = 'dch'
-DATA_DB_KEY = 'wasa_data'
+DATA_DB_KEY = 'data'
 
 DA_APPS = {
     "auth": {"path": "app.damapql.auth", "db_key": DEFAULT_DB_KEY},
@@ -46,7 +46,7 @@ DATABASES = {
         "user": os.environ.get("DCH_USER"),
         "password": os.environ.get("DCH_PASSWORD")
     },
-    "wasa_data": {
+    "data": {
         "engine": "postgresql",
         "host": os.environ.get("DATA_HOST") if not IS_LOCAL else localhost,
         "name": os.environ.get("DATA_NAME"),
