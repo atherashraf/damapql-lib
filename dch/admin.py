@@ -1,36 +1,36 @@
 from sqladmin import ModelView
-from main import admin
+
+from .admin_setup import get_dch_admin
 from .models import *
 
 
-admin.engine = LayerCategory.get_engine()
-
+dch_admin = get_dch_admin()
 class LayerCategoryAdmin(ModelView, model=LayerCategory):
     icon = "fa-solid fa-layer-group"
     column_list = LayerCategory.get_fields()
 
-admin.add_view(LayerCategoryAdmin)
+dch_admin.add_view(LayerCategoryAdmin)
 
 
 class LayerQualityLevelAdmin(ModelView, model=LayerQualityLevel):
     icon = "fa-solid fa-star"
     column_list = LayerQualityLevel.get_fields()
 
-admin.add_view(LayerQualityLevelAdmin)
+dch_admin.add_view(LayerQualityLevelAdmin)
 
 
 class DBConnectionAdmin(ModelView, model=DBConnection, engine=LayerAccessibility.get_engine()):
     icon = "fa-solid fa-database"
     column_list = DBConnection.get_fields()
 
-admin.add_view(DBConnectionAdmin)
+dch_admin.add_view(DBConnectionAdmin)
 
 
 class LayerAccessibilityAdmin(ModelView, model=LayerAccessibility, engine=LayerAccessibility.get_engine()):
     icon = "fa-solid fa-universal-access"
     column_list = LayerAccessibility.get_fields()
 
-admin.add_view(LayerAccessibilityAdmin)
+dch_admin.add_view(LayerAccessibilityAdmin)
 
 
 class LayerInfoAdmin(ModelView, model=LayerInfo, engine=LayerInfo.get_engine()):
@@ -41,11 +41,11 @@ class LayerInfoAdmin(ModelView, model=LayerInfo, engine=LayerInfo.get_engine()):
     ])
     column_searchable_list = ['title']
 
-admin.add_view(LayerInfoAdmin)
+dch_admin.add_view(LayerInfoAdmin)
 
 
 class MapInfoAdmin(ModelView, model=MapInfo, engine=MapInfo.get_engine()):
     icon = "fa-solid fa-map"
     column_list = MapInfo.get_fields()
 
-admin.add_view(MapInfoAdmin)
+dch_admin.add_view(MapInfoAdmin)

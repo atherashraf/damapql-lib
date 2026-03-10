@@ -1,3 +1,4 @@
+---
 
 # DAMapQL
 
@@ -60,12 +61,12 @@ These modules are reusable across multiple FastAPI applications.
 The host application must define the following settings.
 
 ```python
-DEFAULT_DB_KEY = 'dch'
+DCH_DB_KEY = 'dch'
 DATA_DB_KEY = 'data'
 
 DA_APPS = {
-    "auth": {"path": "app.damapql.auth", "db_key": DEFAULT_DB_KEY},
-    "dch": {"path": "app.damapql.dch", "db_key": DEFAULT_DB_KEY},
+    "auth": {"path": "app.damapql.auth", "db_key": DCH_DB_KEY},
+    "dch": {"path": "app.damapql.dch", "db_key": DCH_DB_KEY},
 }
 ```
 
@@ -108,7 +109,7 @@ DATABASES = {
         "name": os.environ.get("DATA_NAME"),
         "port": os.environ.get("DATA_PORT"),
         "user": os.environ.get("DATA_USER"),
-        "password": os.environ.get("DCH_PASSWORD")
+        "password": os.environ.get("DATA_PASSWORD")
     }
 
 }
@@ -120,11 +121,46 @@ DATABASES = {
 * The key names **must match exactly**:
 
 ```
-DEFAULT_DB_KEY = 'dch'
+DCH_DB_KEY = 'dch'
 DATA_DB_KEY = 'data'
 ```
 
 These keys are used internally by DAMapQL modules to resolve database connections.
+
+---
+
+# Admin Initialization
+
+To enable the **SQLAdmin interface**, initialize it in your `main.py`.
+
+Add the following **immediately after FastAPI app creation**.
+
+Example:
+
+```python
+from fastapi import FastAPI
+from settings import SECRET_KEY, DCH_DB_KEY
+from app.damapql.dch.admin_setup import create_dch_admin
+
+app = FastAPI()
+
+port = 8998
+
+dch_admin = create_dch_admin(
+    app,
+    secret_key=SECRET_KEY,
+    port=port,
+    db_key=DCH_DB_KEY,
+)
+```
+
+After starting the server, the admin panel will be available at:
+
+```
+http://127.0.0.1:8998/api/dch_admin/
+```
+
+---
 
 # Running Tests
 
@@ -165,9 +201,6 @@ pytest -v app/damapql/tests
 ```
 
 The `-v` flag runs pytest in **verbose mode**, showing each test result.
-
----
-
 
 ---
 
