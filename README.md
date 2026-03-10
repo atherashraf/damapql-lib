@@ -1,15 +1,16 @@
 
 # DAMapQL
 
-Reusable **DAMap Query Layer** for FastAPI applications.
+Reusable **DAMap Query Layer** for **FastAPI applications**.
 
-This repository is maintained as a reusable library extracted from the main **DAMapQL** development repository.
+This repository provides shared modules used across multiple DAMap-based projects.
+It is extracted from the main **DAMapQL development repository** and maintained as a reusable library.
 
 ---
 
 # Installation
 
-Clone the library inside the `app` directory of your FastAPI project.
+Clone the library inside the **`app` directory** of your FastAPI project.
 
 ```bash
 cd app
@@ -39,6 +40,21 @@ from app.damapql.dch import routers
 
 ---
 
+# Module Overview
+
+Current modules included in DAMapQL:
+
+```
+damapql
+├── auth     → authentication and user management
+├── dch      → data catalog / map services
+└── tests
+```
+
+These modules are reusable across multiple FastAPI applications.
+
+---
+
 # Required Settings Configuration
 
 The host application must define the following settings.
@@ -60,6 +76,16 @@ DA_APPS = {
 Example configuration:
 
 ```python
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
+IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
+
+localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
+
 DATABASES = {
 
     "cache_db": {
@@ -90,8 +116,8 @@ DATABASES = {
 
 ### Notes
 
-* `dch` and `data` databases **may be the same or separate** depending on the project.
-* The key names **must match**:
+* `dch` and `data` databases **may be the same or separate** depending on the project architecture.
+* The key names **must match exactly**:
 
 ```
 DEFAULT_DB_KEY = 'dch'
@@ -104,9 +130,9 @@ These keys are used internally by DAMapQL modules to resolve database connection
 
 # Development Workflow
 
-This repository is automatically maintained from the main development project.
+This repository is maintained from the main development project.
 
-To push updates from the main repository (`DAMapQL`) to this library:
+To publish updates from the main **DAMapQL** repository to this library:
 
 ```bash
 git subtree push --prefix=app/damapql damapql-lib main
@@ -124,7 +150,7 @@ into this repository.
 
 # Updating the Library in a Project
 
-To get updates in a project that uses this library:
+To get the latest updates in a project that uses this library:
 
 ```bash
 cd app/damapql
@@ -137,6 +163,9 @@ git pull
 
 **Ather Ashraf**
 AI • GIS • Software Engineering
-atherashraf@gmail.com
-+923224785104/+966557252342
 
+📧 [atherashraf@gmail.com](mailto:atherashraf@gmail.com)
+📱 +92 322 4785104
+📱 +966 55 725 2342
+
+---
