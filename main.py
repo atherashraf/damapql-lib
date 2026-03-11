@@ -19,7 +19,7 @@ from app.damapql.utils.adapters.deps import (
 
 from digitalarzengine.utils.singletons import da_logger
 from app.damapql.manage import manage_router
-from app.damapql.settings import SECRET_KEY, DCH_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
+from app.damapql.settings import DCH_SECRET_KEY, DCH_APPS, DCH_MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
 
 
 
@@ -56,13 +56,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(LoggingMiddleware, log_response=False)
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+app.add_middleware(SessionMiddleware, secret_key=DCH_SECRET_KEY)
 
 port = 8998
 
 dch_admin = create_dch_admin(
     app,
-    secret_key=SECRET_KEY,
+    secret_key=DCH_SECRET_KEY,
     port=port,
     db_key=DCH_DB_KEY,
 )
@@ -75,7 +75,7 @@ def register_routers(app: FastAPI):
 
 
 def app_init():
-    for middleware in MIDDLEWARES:
+    for middleware in DCH_MIDDLEWARES:
         importlib.import_module(middleware)
 
     for key, ap in DCH_APPS.items():
