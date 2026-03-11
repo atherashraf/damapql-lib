@@ -57,7 +57,7 @@ from app.damapql.settings import IS_LOCAL
 
 # Expected structure from your settings.py
 try:
-    from app.damapql.settings import DCH_DATABASES, DA_APPS, DCH_DB_KEY
+    from app.damapql.settings import DCH_DATABASES, DCH_APPS, DCH_DB_KEY
 except ImportError:
     # Fallback for demonstration if settings not found
     DATABASES = {DCH_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
@@ -172,7 +172,7 @@ def get_db_key_from_path(request: Request) -> str:
     """Parses URL path to determine DB key; falls back to DCH_DB_KEY."""
     path = request.url.path.lstrip("/")
     app_name = path.split("/", 1)[0] if path else ""
-    db_key = (DA_APPS.get(app_name) or {}).get("db_key") or DCH_DB_KEY
+    db_key = (DCH_APPS.get(app_name) or {}).get("db_key") or DCH_DB_KEY
     return db_key if db_key in DCH_DATABASES else DCH_DB_KEY
 
 

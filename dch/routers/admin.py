@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import create_engine, select, text
 
-from app.damapql.settings import DCH_MEDIA_DIR, DATA_DB_KEY
+from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -589,7 +589,7 @@ async def upload_shp_file(
         # ------------------------------------------------------------------
         uuid = DCHUtils.get_uuid1()
         table_name = DCHUtils.short_table_name(filename_without_ext, li_uuid=uuid)
-        engine = DBBase.get_engine(db_key=DATA_DB_KEY)
+        engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
 
         # Define the schema explicitly (use "public" or your config)
         target_schema_name = "public"

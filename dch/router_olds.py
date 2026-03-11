@@ -46,7 +46,7 @@ from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.adapters.services.db_query import DBQuery
 from app.damapql.utils.singletons import da_logger
 
-from app.damapql.settings import DCH_MEDIA_DIR, DCH_APP_NAME, DATA_DB_KEY
+from app.damapql.settings import DCH_MEDIA_DIR, DCH_APP_NAME, DCH_DATA_DB_KEY
 
 import pandas as pd
 from typing import Optional, Union
@@ -573,7 +573,7 @@ async def upload_shp_file(
         table_name = DCHUtils.short_table_name(filename_without_ext)
 
         # UPDATED: Using DATA_DB_KEY instead of DEFAULT_DB_KEY
-        engine = DBBase.get_engine(DATA_DB_KEY)
+        engine = DBBase.get_engine(DCH_DATA_DB_KEY)
 
         # to_postgis handles the table creation and data insertion
         # Ensure the 'data' DB has PostGIS extension enabled
@@ -594,7 +594,7 @@ async def upload_shp_file(
                 "msg": "Shapefile uploaded and imported to DATA database successfully",
                 "uuid": uuid,
                 "table": table_name,
-                "database": DATA_DB_KEY
+                "database": DCH_DATA_DB_KEY
             }
         }
 
@@ -602,7 +602,7 @@ async def upload_shp_file(
         da_logger.exception(f"PostGIS Import Error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to import spatial data to {DATA_DB_KEY} database"
+            detail=f"Failed to import spatial data to {DCH_DATA_DB_KEY} database"
         )
 
 
