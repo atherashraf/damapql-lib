@@ -19,7 +19,7 @@ from app.damapql.utils.adapters.deps import (
 
 from digitalarzengine.utils.singletons import da_logger
 from app.damapql.manage import manage_router
-from app.damapql.settings import SECRET_KEY, DA_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
+from app.damapql.settings import SECRET_KEY, DCH_APPS, MIDDLEWARES, ALLOWED_ORIGINS, DCH_DB_KEY
 
 
 
@@ -78,7 +78,7 @@ def app_init():
     for middleware in MIDDLEWARES:
         importlib.import_module(middleware)
 
-    for key, ap in DA_APPS.items():
+    for key, ap in DCH_APPS.items():
         module_path = f'{ap["path"]}.admin'
         try:
             if importlib.util.find_spec(module_path):

@@ -25,9 +25,9 @@ ALLOWED_ORIGINS = ["*"]
 
 
 DCH_DB_KEY = 'dch'
-DATA_DB_KEY = 'data'
+DCH_DATA_DB_KEY = 'data'
 
-DA_APPS = {
+DCH_APPS = {
     "auth": {"path": "app.damapql.auth", "db_key": DCH_DB_KEY},
     "dch": {"path": "app.damapql.dch", "db_key": DCH_DB_KEY},
 }

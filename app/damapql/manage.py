@@ -69,7 +69,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy_utils import ChoiceType
 from cryptography.fernet import Fernet
 
-from app.damapql.settings import DA_APPS, DCH_BASE_DIR
+from app.damapql.settings import DCH_APPS, DCH_BASE_DIR
 from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
 
@@ -163,7 +163,7 @@ def startapp(app_label: str):
 
 def sync_schema(app_label: str):
     """Adds missing columns to existing tables using ALTER TABLE."""
-    ap = DA_APPS.get(app_label)
+    ap = DCH_APPS.get(app_label)
     if not ap:
         print(f"❌ App label '{app_label}' not found.")
         return
@@ -209,7 +209,7 @@ def sync_schema(app_label: str):
 
 def migrate(app_label: str):
     """Runs standard SQLAlchemy create_all."""
-    ap = DA_APPS.get(app_label)
+    ap = DCH_APPS.get(app_label)
     if not ap: return
 
     importlib.import_module(f'{ap["path"]}.models')
@@ -221,7 +221,7 @@ def migrate(app_label: str):
 
 def dumpdata(app_label: str, model: str, output: str = "data.json"):
     """Dumps model records to a JSON file, resolving ChoiceTypes."""
-    ap = DA_APPS.get(app_label)
+    ap = DCH_APPS.get(app_label)
     module = importlib.import_module(f'{ap["path"]}.models')
     model_class = getattr(module, model)
 
@@ -267,7 +267,7 @@ def loaddata(app_label: str, file: str):
         print(f"❌ Fixture file not found: {file_path}")
         return
 
-    ap = DA_APPS.get(app_label)
+    ap = DCH_APPS.get(app_label)
     if not ap:
         print(f"❌ App label '{app_label}' not found in DA_APPS.")
         return

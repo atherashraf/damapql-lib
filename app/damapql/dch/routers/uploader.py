@@ -96,7 +96,7 @@ async def finalize_upload(
 async def process_vector_upload(file_path, upload_id, filename, category_id, title):
     # Logic: Read with GeoPandas -> to_postgis -> Register LayerInfo
     # Note: If .shp, ensure all sidecar files were uploaded in the chunks!
-    from app.damapql.settings import DATA_DB_KEY
+    from app.damapql.settings import DCH_DATA_DB_KEY
 
     # 1. Load Data
     import geopandas as gpd
@@ -104,7 +104,7 @@ async def process_vector_upload(file_path, upload_id, filename, category_id, tit
 
     # 2. Generate Table Name
     table_name = f"usr_{upload_id.replace('-', '_')[:12]}"
-    engine = DBBase.get_engine(db_key=DATA_DB_KEY)
+    engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
 
     # 3. Save to PostGIS
     gdf.to_postgis(table_name, con=engine, if_exists="replace", index=False)

@@ -15,7 +15,7 @@ from geoalchemy2.shape import to_shape
 from shapely import wkb
 from datetime import date, datetime
 
-from app.damapql.settings import DCH_DATABASES, DA_APPS, DCH_DB_KEY
+from app.damapql.settings import DCH_DATABASES, DCH_APPS, DCH_DB_KEY
 from app.damapql.utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
 
 
@@ -99,7 +99,7 @@ class ModelHelpersMixin:
                 # Fallback: take the parent directory name of the model file
                 app_label = cls.__module__.split(".")[-2]
 
-        return DA_APPS.get(app_label, {}).get("db_key") or DCH_DB_KEY
+        return DCH_APPS.get(app_label, {}).get("db_key") or DCH_DB_KEY
 
     @classmethod
     def get_db_params(cls, app_label: str = None) -> Dict[str, Any]:
