@@ -46,7 +46,7 @@ from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.adapters.services.db_query import DBQuery
 from app.damapql.utils.singletons import da_logger
 
-from app.damapql.settings import MEDIA_DIR, APP_NAME, DATA_DB_KEY
+from app.damapql.settings import DCH_MEDIA_DIR, DCH_APP_NAME, DATA_DB_KEY
 
 import pandas as pd
 from typing import Optional, Union
@@ -316,7 +316,7 @@ async def get_layer_tms(uuid: str, z: int, x: int, y: int):
                 file_path = file_path[len("s3://"):]
                 is_media_rel = True
 
-            file_path = os.path.join(MEDIA_DIR, file_path) if is_media_rel else file_path
+            file_path = os.path.join(DCH_MEDIA_DIR, file_path) if is_media_rel else file_path
 
             cog_raster = COGRaster.open_from_local(file_path)
             cm = COGRaster.create_color_map(info.layer_styling) if info.layer_styling else None
@@ -546,7 +546,7 @@ async def upload_shp_file(
         filename = file.filename
         if file_dir is None:
             filename_without_ext = os.path.splitext(filename)[0]
-            file_dir = os.path.join(MEDIA_DIR, "uploads", filename_without_ext)
+            file_dir = os.path.join(DCH_MEDIA_DIR, "uploads", filename_without_ext)
             os.makedirs(file_dir, exist_ok=True)
 
         file_path = os.path.join(file_dir, filename)
@@ -1248,7 +1248,7 @@ async def upload_raster_layer(
         raise HTTPException(status_code=400, detail="Invalid category ID")
 
     # Step 2: Build destination path
-    folder_path = os.path.join(MEDIA_DIR, APP_NAME, category.main, category.sub or "general")
+    folder_path = os.path.join(DCH_MEDIA_DIR, DCH_APP_NAME, category.main, category.sub or "general")
     os.makedirs(folder_path, exist_ok=True)
 
     # Step 3: Generate UUID and file path
@@ -1280,7 +1280,7 @@ async def upload_raster_layer(
 
     raster = RioRaster(cog_path)
     # Step 6: Create LayerAccessibility
-    relative_path = os.path.relpath(cog_path, MEDIA_DIR)
+    relative_path = os.path.relpath(cog_path, DCH_MEDIA_DIR)
     rad_res = raster.get_radiometric_resolution()
     access = LayerAccessibility(
         accessibility_type=AccessibilityType.File.name,

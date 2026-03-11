@@ -18,7 +18,7 @@ from app.damapql.dch.models import (
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from digitalarzengine.io.cog_raster import COGRaster
 from digitalarzengine.io.rio_raster import RioRaster
-from app.damapql.settings import APP_NAME, MEDIA_DIR
+from app.damapql.settings import DCH_APP_NAME, DCH_MEDIA_DIR
 
 
 
@@ -36,8 +36,8 @@ class RasterIngestService:
     @staticmethod
     def build_storage_folder(category: LayerCategory) -> str:
         folder_path = os.path.join(
-            MEDIA_DIR,
-            APP_NAME,
+            DCH_MEDIA_DIR,
+            DCH_APP_NAME,
             category.main,
             category.sub or "general",
         )
@@ -87,7 +87,7 @@ class RasterIngestService:
     @staticmethod
     def create_access_record(session: Session, cog_path: str) -> LayerAccessibility:
         raster = RioRaster(cog_path)
-        relative_path = os.path.relpath(cog_path, MEDIA_DIR)
+        relative_path = os.path.relpath(cog_path, DCH_MEDIA_DIR)
         rad_res = raster.get_radiometric_resolution()
 
         access = LayerAccessibility(
@@ -190,7 +190,7 @@ class RasterIngestService:
                 uuid=layer_info.uuid,
                 raster_path=raster_path,
                 cog_path=cog_path,
-                relative_path=os.path.relpath(cog_path, MEDIA_DIR),
+                relative_path=os.path.relpath(cog_path, DCH_MEDIA_DIR),
                 layer_info_id=layer_info.id,
                 layer_access_id=access.id,
             )

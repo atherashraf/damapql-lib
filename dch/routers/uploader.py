@@ -3,7 +3,7 @@ import uuid
 import shutil
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from app.damapql.settings import MEDIA_DIR
+from app.damapql.settings import DCH_MEDIA_DIR
 from app.damapql.utils.adapters.db import DBBase
 from digitalarzengine.utils.singletons import da_logger
 
@@ -12,7 +12,7 @@ from digitalarzengine.utils.singletons import da_logger
 upload_router = APIRouter(prefix="/upload", tags=["Uploader"])
 
 # Directory for storing chunks before assembly
-CHUNK_STORAGE = os.path.join(MEDIA_DIR, "temp_chunks")
+CHUNK_STORAGE = os.path.join(DCH_MEDIA_DIR, "temp_chunks")
 os.makedirs(CHUNK_STORAGE, exist_ok=True)
 
 
@@ -118,7 +118,7 @@ async def process_vector_upload(file_path, upload_id, filename, category_id, tit
 
 async def process_raster_upload(file_path, upload_id, filename, category_id, title):
     # Logic: Move to /rasters/ -> Register as AccessibilityType.File
-    dest_dir = os.path.join(MEDIA_DIR, "rasters", upload_id)
+    dest_dir = os.path.join(DCH_MEDIA_DIR, "rasters", upload_id)
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = os.path.join(dest_dir, filename)
     shutil.move(file_path, dest_path)

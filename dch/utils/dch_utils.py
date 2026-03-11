@@ -44,7 +44,7 @@ class DCHUtils:
         Produce a short, Postgres-safe table name so index names stay < 63 chars.
         """
         base = cls._slug(filename_without_ext)
-        base = f"geo_{base}"
+        base = f"damapql_{base}"
         cut = max_len - (len(base) + 1)
 
         if li_uuid is None:

@@ -10,12 +10,12 @@ load_dotenv()
 
 
 DCH_BASE_DIR = Path(__file__).resolve().parent
-MEDIA_DIR = DCH_BASE_DIR / "media"
-COG_DIR = DCH_BASE_DIR / "cog"
+DCH_MEDIA_DIR = DCH_BASE_DIR / "media"
+DCH_COG_DIR = DCH_BASE_DIR / "cog"
 
 IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
 IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
-APP_NAME = os.getenv("APP_NAME", "WASA")
+DCH_APP_NAME = os.getenv("APP_NAME", "DAMapQL")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # e.g., "DEBUG", "ERROR"
 
 localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
