@@ -47,10 +47,10 @@ DCH_DATABASES = {
     },
     "data": {
         "engine": "postgresql",
-        "host": os.environ.get("DATA_HOST") if not IS_LOCAL else localhost,
-        "name": os.environ.get("DATA_NAME"),
-        "port": os.environ.get("DATA_PORT"),
-        "user": os.environ.get("DATA_USER"),
+        "host": os.environ.get("DCH_DATA_HOST") if not IS_LOCAL else localhost,
+        "name": os.environ.get("DCH_DATA_NAME"),
+        "port": os.environ.get("DCH_DATA_PORT"),
+        "user": os.environ.get("DCH_DATA_USER"),
         "password": os.environ.get("DCH_PASSWORD")
     }
 
