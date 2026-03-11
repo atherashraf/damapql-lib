@@ -15,6 +15,8 @@ Show all available commands:
 
     python -m app.damapql.manage help
 
+Create a dch databases
+    python -m app.damapql.manage create_dch_databases
 Create a new app scaffold:
 
     python -m app.damapql.manage startapp --app_label inventory
@@ -64,19 +66,21 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 from pydantic import ValidationError
-from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect
+from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy_utils import ChoiceType
+from sqlalchemy.engine import URL
+
 from cryptography.fernet import Fernet
 
 from app.damapql.settings import DCH_APPS, DCH_BASE_DIR
 from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
 
-
 from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.auth.models import Profile, User, Role, Department, Organization
 from app.damapql.auth.dtypes import EmailValidator
+from app.damapql.settings import DCH_DATABASES
 
 manage_router = APIRouter(
     tags=["manage"],
@@ -85,6 +89,101 @@ manage_router = APIRouter(
 
 
 
+
+def create_dch_databases():
+    """
+    Create PostgreSQL databases defined in DCH_DATABASES.
+    If a database already exists it is skipped.
+
+    For newly created databases:
+        - owner is set to configured user
+        - PostGIS extensions are installed
+    """
+
+    for label, cfg in DCH_DATABASES.items():
+
+        engine_name = str(cfg.get("engine", "")).lower()
+
+        if engine_name != "postgresql":
+            print(f"⏭️  Skipping '{label}' (engine={engine_name})")
+            continue
+
+        host = cfg.get("host")
+        port = int(cfg.get("port") or 5432)
+        db_name = cfg.get("name")
+        db_user = cfg.get("user")
+        db_password = cfg.get("password")
+
+        if not all([host, db_name, db_user]):
+            print(f"❌ Invalid configuration for '{label}'")
+            continue
+
+        print(f"\n🛠️  Checking database '{db_name}' ({label})")
+
+        admin_url = URL.create(
+            drivername="postgresql+psycopg2",
+            username=db_user,
+            password=db_password,
+            host=host,
+            port=port,
+            database="postgres",
+        )
+
+        admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+
+        try:
+            with admin_engine.connect() as conn:
+
+                # Check if database exists
+                exists = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname=:name"),
+                    {"name": db_name}
+                ).scalar()
+
+                if exists:
+                    print(f"⏭️  Database '{db_name}' already exists — skipping.")
+                    continue
+
+                # Create database
+                conn.execute(
+                    text(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
+                )
+
+                print(f"✅ Database '{db_name}' created with owner '{db_user}'")
+
+        except Exception as e:
+            print(f"❌ Failed creating '{db_name}': {e}")
+            continue
+
+        # Connect to new DB to install PostGIS
+        db_url = URL.create(
+            drivername="postgresql+psycopg2",
+            username=db_user,
+            password=db_password,
+            host=host,
+            port=port,
+            database=db_name,
+        )
+
+        engine = create_engine(db_url, isolation_level="AUTOCOMMIT")
+
+        try:
+            with engine.connect() as conn:
+
+                extensions = [
+                    "postgis",
+                    "postgis_topology",
+                    "postgis_raster"
+                ]
+
+                for ext in extensions:
+                    conn.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{ext}"'))
+                    print(f"✅ Extension '{ext}' installed")
+
+            print(f"🎉 Database '{db_name}' ready.\n")
+
+        except Exception as e:
+            print(f"❌ Extension setup failed for '{db_name}': {e}")
 
 # --- UTILS ---
 

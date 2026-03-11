@@ -10,7 +10,7 @@ from app.damapql.settings import DCH_DB_KEY
 from app.damapql.utils.adapters.deps import get_async_engine_instance
 
 
-class AdminAuth(AuthenticationBackend):
+class DCHAdminAuth(AuthenticationBackend):
     def __init__(self, secret_key: str, engine=None):
         super().__init__(secret_key)
         self.engine = engine or get_async_engine_instance(DCH_DB_KEY)

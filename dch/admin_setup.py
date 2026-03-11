@@ -2,7 +2,7 @@ from digitalarzengine.utils.singletons import da_logger
 from sqladmin import Admin
 from starlette.applications import Starlette
 
-from app.damapql.auth.admin_auth import AdminAuth
+from app.damapql.auth.admin_auth import DCHAdminAuth
 from app.damapql.utils.adapters.deps import get_async_engine_instance
 
 _dch_admin = None
@@ -28,7 +28,7 @@ def create_dch_admin(
         app,
         auth_engine,
         base_url=base_url,
-        authentication_backend=AdminAuth(
+        authentication_backend=DCHAdminAuth(
             secret_key=secret_key,
             engine=auth_engine,
         ),
