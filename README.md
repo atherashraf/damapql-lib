@@ -214,6 +214,19 @@ To publish updates from the main **DAMapQL** repository to this library:
 git subtree push --prefix=app/damapql damapql-lib main
 ```
 
+To pull changes from the main **DAMapqL** repository to this libray 
+first set merge info editor (one time)
+```bash
+git config --global core.editor "'C:/Program Files/Notepad++/notepad++.exe' -multiInst -nosession"
+or 
+git config --global core.editor notepad
+```
+then pull code  using
+
+```bash
+git subtree pull --prefix=app/damapql damapql-lib main
+```
+
 This command publishes the contents of:
 
 ```
