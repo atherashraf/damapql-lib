@@ -227,6 +227,13 @@ then pull code  using
 git subtree pull --prefix=app/damapql damapql-lib main --squash
 ```
 
+some time it need to refresh
+```bash
+git update-index --refresh
+git diff-index --quiet HEAD --
+git fetch damapql-lib
+```
+
 This command publishes the contents of:
 
 ```
