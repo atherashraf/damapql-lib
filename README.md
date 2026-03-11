@@ -224,7 +224,7 @@ git config --global core.editor notepad
 then pull code  using
 
 ```bash
-git subtree pull --prefix=app/damapql damapql-lib main
+git subtree pull --prefix=app/damapql damapql-lib main --squash
 ```
 
 This command publishes the contents of:
