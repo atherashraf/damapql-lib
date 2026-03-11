@@ -32,7 +32,7 @@ DA_APPS = {
     "dch": {"path": "app.damapql.dch", "db_key": DCH_DB_KEY},
 }
 
-DATABASES = {
+DCH_DATABASES = {
     "cache_db": {
         "engine": "sqlite",
         "file_path": os.path.join(DCH_BASE_DIR, "../../dch_cache.sqlite")

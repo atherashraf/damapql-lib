@@ -1,6 +1,7 @@
 import sys
 
-from app.damapql.settings import DATABASES
+from app.damapql.dch.models import LayerAccessibility, DBConnection
+from app.damapql.settings import DCH_DATABASES
 from app.damapql.utils.crypto import CryptoUtils
 
 
@@ -19,9 +20,9 @@ def list_of_active_connection():
         db_conn = DBConnection.query().filter(DBConnection.name == con).one()
         conn = None
         if "pak" in db_conn.params['name']:
-            conn = DATABASES["pak"]
+            conn = DCH_DATABASES["pak"]
         elif "flood_forecast" in db_conn.params['name']:
-            conn = DATABASES['flood_forecast']
+            conn = DCH_DATABASES['flood_forecast']
         if conn is not None:
             crypto = CryptoUtils()
             '''
