@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import create_engine, select, text
 
-from app.damapql.settings import MEDIA_DIR, DATA_DB_KEY
+from app.damapql.settings import DCH_MEDIA_DIR, DATA_DB_KEY
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -51,7 +51,7 @@ dch_admin_router = APIRouter(prefix="/admin", tags=["dch admin"])
 #   3. commit_append_shp      -> append into EXISTING table
 # ---------------------------------------------------------------------
 append_service = DCHVectorAppendService(
-    media_dir=MEDIA_DIR,
+    media_dir=DCH_MEDIA_DIR,
     logger=da_logger,
 )
 
@@ -542,7 +542,7 @@ async def upload_shp_file(
         raise HTTPException(status_code=400, detail="layer_category_id is required")
 
     upload_service = DCHUploadSessionService(
-        media_dir=MEDIA_DIR,
+        media_dir=DCH_MEDIA_DIR,
         logger=da_logger,
     )
     package_service = DCHUploadPackageService(upload_service=upload_service)
@@ -591,10 +591,21 @@ async def upload_shp_file(
         table_name = DCHUtils.short_table_name(filename_without_ext, li_uuid=uuid)
         engine = DBBase.get_engine(db_key=DATA_DB_KEY)
 
+        # Define the schema explicitly (use "public" or your config)
+        target_schema_name = "public"
+
         # ------------------------------------------------------------------
         # Import to PostGIS
         # ------------------------------------------------------------------
-        gdf.to_postgis(table_name, con=engine, if_exists="replace", index=False)
+        # Use 'schema=' argument to ensure it goes exactly where you want
+        gdf.to_postgis(table_name, con=engine, schema=target_schema_name, if_exists="replace", index=False)
+
+        with engine.begin() as conn:
+            # Use double quotes for table name to handle special characters/case sensitivity
+            conn.execute(text(f"""
+                ALTER TABLE "{target_schema_name}"."{table_name}" 
+                ADD COLUMN dch_id SERIAL PRIMARY KEY;
+            """))
 
         # ------------------------------------------------------------------
         # Register vector layer metadata
@@ -652,7 +663,7 @@ async def preview_append_shp(
         raise HTTPException(status_code=400, detail="layerUUID is required")
 
     upload_service = DCHUploadSessionService(
-        media_dir=MEDIA_DIR,
+        media_dir=DCH_MEDIA_DIR,
         logger=da_logger,
     )
     package_service = DCHUploadPackageService(upload_service=upload_service)
@@ -789,19 +800,10 @@ async def commit_append_shp(
 
     Expected multipart/form-data:
       - upload_id
-      - target_table
-      - target_schema (optional, default='public')
+      - layer_uuid
+      - dch_id
       - final_mapping (JSON string: source -> target)
       - reproject_if_needed ("true"/"false")
-      - geojson (GeoJSON FeatureCollection string)
-
-    Behavior:
-      - parse GeoJSON sent from frontend
-      - validate manual/final mapping
-      - reproject if required and allowed
-      - drop unmapped source columns
-      - append compatible data into existing table
-      - keep DB schema intact
 
     Protected endpoint.
     """
@@ -862,6 +864,20 @@ async def commit_append_shp(
         appended_count = append_service.append_gdf_to_postgis(
             gdf=prepared_gdf, engine=engine, table_name=target_table, schema=target_schema_name
         )
+
+        # 5. Update Layer Extent
+        try:
+            # Calculate bounds of the newly added data
+            # returns (minx, miny, maxx, maxy)
+            new_bounds = prepared_gdf.total_bounds.tolist()
+
+            # Update the LayerInfo record with the combined extent
+            layer_info.update_extent(new_bounds)
+            da_logger.info(f"Updated extent for layer {layer_uuid}")
+        except Exception as extent_err:
+            # We log but don't fail the whole request,
+            # as the data is already committed to PostGIS
+            da_logger.error(f"Failed to update layer extent: {extent_err}")
 
         # Cleanup on success
         append_service.cleanup_upload_dir(file_dir)

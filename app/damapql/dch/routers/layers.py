@@ -4,12 +4,12 @@ import jenkspy
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.dtypes import AttributeTableResponse
-from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
+from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory, LayerAccessibility
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 
@@ -206,7 +206,13 @@ def get_layer_attributes(
     """
     with LayerInfo.managed_session() as session:
         info = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
+            select(LayerInfo)
+            .options(
+                selectinload(LayerInfo.layer_accessibility),
+                selectinload(LayerInfo.layer_category),
+                selectinload(LayerInfo.quality_level),
+            )
+            .where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
     if info is None:
@@ -255,6 +261,8 @@ async def get_feature_detail(
     return Response(status_code=204)
 
 
+
+
 @dch_layers_router.get("/get_feature_geometry/{uuid}/{pk_values}/")
 async def get_feature_geometry(
     uuid: str,
@@ -266,13 +274,18 @@ async def get_feature_geometry(
     """
     with LayerInfo.managed_session() as session:
         info = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
+            select(LayerInfo)
+            .options(
+                selectinload(LayerInfo.layer_accessibility)
+            )
+            .where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         return Response(status_code=204)
 
-    pk_cols = info.layer_accessibility.pk_cols or []
+    access = info.layer_accessibility
+    pk_cols = access.pk_cols or []
     vals = pk_values.split(",")
 
     if len(pk_cols) != len(vals):
@@ -280,6 +293,7 @@ async def get_feature_geometry(
 
     params = {}
     clauses = []
+
     for i, col in enumerate(pk_cols):
         pname = f"v{i}"
         clauses.append(f"{DBQuery.safe_ident(col)} = :{pname}")
@@ -287,7 +301,6 @@ async def get_feature_geometry(
 
     where_sql = " AND ".join(clauses)
 
-    access = info.layer_accessibility
     engine = access.get_external_engine()
     if not engine:
         return Response(status_code=204)

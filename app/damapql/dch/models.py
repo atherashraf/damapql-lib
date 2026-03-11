@@ -25,7 +25,7 @@ from app.damapql.utils.adapters.deps import ExternalEngineRegistry
 from app.damapql.utils.adapters.services.db_query import DBQuery
 from app.damapql.utils.crypto import CryptoUtils
 
-from app.damapql.settings import IS_LOCAL, MEDIA_DIR
+from app.damapql.settings import IS_LOCAL, DCH_MEDIA_DIR
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION_NAME
 
 
@@ -133,7 +133,7 @@ class DBConnection(DBBase):
 
 
     def get_sqlalchemy_engine(self) -> Engine:
-        self.params["password"] = CryptoUtils().decrypt_txt(self.params["password"])
+        # self.params["password"] = CryptoUtils().decrypt_txt(self.params["password"])
         return ExternalEngineRegistry.get(self.name, self.params.copy())
 
 class LayerAccessibility(DBBase):
@@ -157,7 +157,7 @@ class LayerAccessibility(DBBase):
             return None
 
         if (self.params or {}).get("is_path_media_rel", False):
-            fp = os.path.join(MEDIA_DIR, fp)
+            fp = os.path.join(DCH_MEDIA_DIR, fp)
 
         return fp
 
@@ -651,6 +651,35 @@ class LayerInfo(DBBase):
         except Exception as e:
             da_logger.exception(f"Error fetching row detail for {self.layer_name}: {e}")
             return []
+
+    def update_extent(self, new_bounds: list):
+        """
+        Merges existing extent with new bounds and saves to DB.
+        new_bounds: [minx, miny, maxx, maxy]
+        """
+        with self.managed_session() as session:
+            # Ensure we have the latest data from DB
+            session.add(self)
+
+            current_extent = self.extent  # [minx, miny, maxx, maxy]
+
+            if current_extent and len(current_extent) == 4:
+                # Merge logic: find the outermost corners
+                combined_extent = [
+                    min(current_extent[0], new_bounds[0]),  # min x
+                    min(current_extent[1], new_bounds[1]),  # min y
+                    max(current_extent[2], new_bounds[2]),  # max x
+                    max(current_extent[3], new_bounds[3])  # max y
+                ]
+            else:
+                combined_extent = new_bounds
+
+            self.extent = combined_extent
+
+            # Optional: If you use extent_3857, handle transformation here
+            # self.extent_3857 = ...
+
+            session.commit()
 
 
 

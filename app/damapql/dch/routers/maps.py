@@ -171,7 +171,8 @@ async def delete_map(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_c
 
 
 @dch_maps_router.delete("/delete_layerinfo_row/{uuid}/")
-async def delete_layer_info_row(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def delete_layer_info_row(uuid: str,
+                                current_user: UserInfo = Depends(AuthUtils.get_current_user)):
     require_dch_admin(current_user)
 
     with LayerInfo.managed_session() as session:
