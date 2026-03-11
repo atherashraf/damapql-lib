@@ -24,14 +24,6 @@ DCH_ENGINE=
 
 ### Example
 
-```bash
-DCH_HOST=localhost
-DCH_PORT=5432
-DCH_USER=postgres
-DCH_PASSWORD=your_password
-DCH_NAME=dch_database
-DCH_ENGINE=postgresql
-```
 
 ---
 
@@ -41,11 +33,11 @@ The application can optionally connect to an additional **DATA database**.
 If this database is not required, the system can operate using the **DCH database only**.
 
 ```bash
-DATA_HOST=
-DATA_PORT=
-DATA_USER=
-DATA_PASSWORD=
-DATA_NAME=
+DCH_DATA_HOST=localhost
+DCH_DATA_PORT=5432
+DCH_DATA_USER=
+DCH_DATA_PASSWORD=
+DCH_DATA_NAME=
 ```
 
 ---
