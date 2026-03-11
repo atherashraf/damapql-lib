@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 
 from dotenv import load_dotenv
 
-from app.damapql.settings import DCH_BASE_DIR
+from app.damapql.settings import DCH_BASE_DIR, DCH_CRYPTO_KEY
 
 env_path = os.path.join(DCH_BASE_DIR, ".env")
 load_dotenv(env_path)
@@ -21,7 +21,7 @@ class CryptoUtils:
             Fernet.generate_key().decode("utf-8")
         """
         self.encode_scheme = 'utf-8'
-        key = os.environ.get("CRYPTO_KEY")
+        key = DCH_CRYPTO_KEY
         self.fernet_key = key.encode(self.encode_scheme)
 
     def decode_base64_urlsafe(self, txt):
