@@ -57,7 +57,7 @@ from app.damapql.settings import IS_LOCAL
 
 # Expected structure from your settings.py
 try:
-    from app.damapql.settings import DATABASES, DA_APPS, DCH_DB_KEY
+    from app.damapql.settings import DCH_DATABASES, DA_APPS, DCH_DB_KEY
 except ImportError:
     # Fallback for demonstration if settings not found
     DATABASES = {DCH_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
@@ -104,7 +104,7 @@ def _build_db_url(db_config: dict, is_async: bool) -> str:
 # --- Engine & Factory Accessors ---
 def get_async_engine_instance(key: str = DCH_DB_KEY):
     if key not in _async_engines:
-        db_config = DATABASES[key]
+        db_config = DCH_DATABASES[key]
         db_url = _build_db_url(db_config, is_async=True)
         engine = create_async_engine(
             db_url,
@@ -121,7 +121,7 @@ def get_async_engine_instance(key: str = DCH_DB_KEY):
 
 def get_sync_engine_instance(key: str = DCH_DB_KEY):
     if key not in _sync_engines:
-        db_config = DATABASES[key]
+        db_config = DCH_DATABASES[key]
         db_url = _build_db_url(db_config, is_async=False)
         engine = create_engine(
             db_url,
@@ -173,7 +173,7 @@ def get_db_key_from_path(request: Request) -> str:
     path = request.url.path.lstrip("/")
     app_name = path.split("/", 1)[0] if path else ""
     db_key = (DA_APPS.get(app_name) or {}).get("db_key") or DCH_DB_KEY
-    return db_key if db_key in DATABASES else DCH_DB_KEY
+    return db_key if db_key in DCH_DATABASES else DCH_DB_KEY
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:
@@ -190,7 +190,7 @@ async def get_async_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
 
 
 def get_db_url(db_key: str = DCH_DB_KEY) -> str:
-    db = DATABASES[db_key]
+    db = DCH_DATABASES[db_key]
 
     user = db.get("user", "")
     password = quote_plus(db.get("password") or "")

@@ -15,7 +15,7 @@ from geoalchemy2.shape import to_shape
 from shapely import wkb
 from datetime import date, datetime
 
-from app.damapql.settings import DATABASES, DA_APPS, DCH_DB_KEY
+from app.damapql.settings import DCH_DATABASES, DA_APPS, DCH_DB_KEY
 from app.damapql.utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
 
 
@@ -108,7 +108,7 @@ class ModelHelpersMixin:
         """
         key = cls.get_db_key(app_label)
         # Safely get the config, falling back to 'default' if the key doesn't exist
-        return DATABASES.get(key, DATABASES.get(DCH_DB_KEY))
+        return DCH_DATABASES.get(key, DCH_DATABASES.get(DCH_DB_KEY))
 
 
 
