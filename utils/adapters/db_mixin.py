@@ -17,6 +17,7 @@ from datetime import date, datetime
 
 from app.damapql.settings import DCH_DATABASES, DCH_APPS, DCH_DB_KEY
 from app.damapql.utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
+from settings import DA_APPS
 
 
 class AmbiguousGeometryError(Exception):
@@ -98,8 +99,10 @@ class ModelHelpersMixin:
             else:
                 # Fallback: take the parent directory name of the model file
                 app_label = cls.__module__.split(".")[-2]
+                if app_label== "models":
+                    app_label = cls.__module__.split(".")[-3]
 
-        return DCH_APPS.get(app_label, {}).get("db_key") or DCH_DB_KEY
+        return DA_APPS.get(app_label, {}).get("db_key") or None
 
     @classmethod
     def get_db_params(cls, app_label: str = None) -> Dict[str, Any]:
@@ -116,136 +119,276 @@ class ModelHelpersMixin:
 
     # --- HYBRID SAVE & DELETE ---
     @classmethod
+    def get_conflict_fields(cls, unique_fields=None) -> List[str]:
+        """
+        Resolve the fields used to detect conflicts/upserts.
+
+        Priority:
+        1. explicitly passed unique_fields
+        2. cls._Meta.unique_fields
+        3. primary key fields
+        """
+        if unique_fields is None:
+            unique_fields = getattr(cls._Meta, "unique_fields", None)
+
+        if not unique_fields:
+            unique_fields = cls.get_primary_key_fields()
+
+        table_cols = cls.__table__.columns.keys()
+        return [f for f in unique_fields if f in table_cols]
+
+
+    @classmethod
     def bulk_save(
             cls,
             data: Union[List[Union[dict, Any]], pd.DataFrame, gpd.GeoDataFrame],
             unique_fields: List[str] = None,
-            app_label: str = None
-    ):
+            app_label: str = None,
+    ) -> int:
         """
-        High-speed bulk upsert.
-        Uses app_label to resolve the correct database engine, then applies
-        dialect-specific 'ON CONFLICT' logic.
-        """
-        if data is None or (isinstance(data, (pd.DataFrame, list)) and len(data) == 0):
-            return
+        Usage:
+            User.bulk_save([
+                {"username": "ather", "email": "a1@x.com", "is_active": True},
+                {"username": "admin", "email": "admin@x.com", "is_active": False},
+            ])
+        Bulk upsert:
+        - insert rows if they do not exist
+        - update rows if they conflict on conflict_fields
 
-        # 1. Prepare Data
-        if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)):
-            if isinstance(data, gpd.GeoDataFrame):
-                # Ensure geometry is WKT for PostGIS bulk compatibility
-                temp_df = data.copy()
-                geom_col = temp_df.geometry.name
-                temp_df[geom_col] = temp_df[geom_col].apply(lambda x: x.wkt if x and hasattr(x, 'wkt') else None)
-                processed_data = temp_df.to_dict('records')
-            else:
-                processed_data = data.to_dict('records')
+        Supports:
+        - list[dict]
+        - list[ORM objects / pydantic-like objects]
+        - pandas DataFrame
+        - GeoPandas GeoDataFrame
+        """
+        if data is None:
+            return 0
+
+        if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)) and data.empty:
+            return 0
+
+        if isinstance(data, list) and len(data) == 0:
+            return 0
+
+        table = cls.__table__
+        table_columns = {c.name for c in table.columns}
+        pk_fields = set(cls.get_primary_key_fields())
+        conflict_fields = cls.get_conflict_fields(unique_fields)
+
+        if not conflict_fields:
+            raise ValueError(
+                f"No conflict fields could be resolved for {cls.__name__}. "
+                f"Define _Meta.unique_fields or ensure a primary key exists."
+            )
+
+        # Normalize input into list[dict]
+        processed_data = []
+
+        if isinstance(data, gpd.GeoDataFrame):
+            temp_df = data.copy()
+            geom_col = temp_df.geometry.name if temp_df.geometry is not None else None
+
+            if geom_col and geom_col in temp_df.columns:
+                temp_df[geom_col] = temp_df[geom_col].apply(
+                    lambda g: g.wkt if g is not None and hasattr(g, "wkt") else None
+                )
+
+            processed_data = temp_df.to_dict("records")
+
+        elif isinstance(data, pd.DataFrame):
+            processed_data = data.to_dict("records")
+
         else:
-            processed_data = [
-                (item.model_dump() if hasattr(item, 'model_dump') else item)
-                for item in data
-            ]
+            for item in data:
+                if isinstance(item, dict):
+                    row = item.copy()
 
-        # 2. RESOLVE ENGINE VIA PARAMETERS
-        # We use the provided app_label or fall back to the model's default routing
+                elif hasattr(item, "model_dump"):
+                    row = item.model_dump()
+
+                elif hasattr(item, "to_object"):
+                    obj = item.to_object()
+                    row = obj.model_dump() if hasattr(obj, "model_dump") else dict(obj)
+
+                else:
+                    row = {
+                        col.name: getattr(item, col.name, None)
+                        for col in table.columns
+                    }
+
+                processed_data.append(row)
+
+        if not processed_data:
+            return 0
+
+        # Keep only actual table columns
+        processed_data = [
+            {k: v for k, v in row.items() if k in table_columns}
+            for row in processed_data
+        ]
+
         engine = cls.get_engine(app_label=app_label)
         dialect = engine.dialect.name
-        table = cls.__table__
 
-
-        # 3. Dialect-Specific Statement Construction
-        if dialect == 'postgresql':
+        if dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as pg_insert
-            stmt = pg_insert(table).values(processed_data)
 
-            if unique_fields:
-                update_dict = {
-                    c.name: stmt.excluded[c.name]
-                    for c in table.columns
-                    if c.name not in unique_fields and not c.primary_key
-                }
-                if update_dict:
-                    stmt = stmt.on_conflict_do_update(index_elements=unique_fields, set_=update_dict)
+            # Convert geometry WKT values to ST_GeomFromText for inserts
+            values_with_geom = []
+            for row in processed_data:
+                new_row = {}
+                for c in table.columns:
+                    if c.name not in row:
+                        continue
+
+                    val = row[c.name]
+
+                    if isinstance(c.type, Geometry) and val is not None:
+                        srid = getattr(c.type, "srid", None)
+                        if srid:
+                            new_row[c.name] = func.ST_GeomFromText(val, srid)
+                        else:
+                            new_row[c.name] = func.ST_GeomFromText(val)
+                    else:
+                        new_row[c.name] = val
+
+                values_with_geom.append(new_row)
+
+            stmt = pg_insert(table).values(values_with_geom)
+
+            update_dict = {}
+            for c in table.columns:
+                if c.name in pk_fields or c.name in conflict_fields:
+                    continue
+
+                if isinstance(c.type, Geometry):
+                    srid = getattr(c.type, "srid", None)
+                    if srid:
+                        update_dict[c.name] = func.ST_GeomFromText(stmt.excluded[c.name], srid)
+                    else:
+                        update_dict[c.name] = func.ST_GeomFromText(stmt.excluded[c.name])
                 else:
-                    stmt = stmt.on_conflict_do_nothing(index_elements=unique_fields)
+                    update_dict[c.name] = stmt.excluded[c.name]
 
-        elif dialect == 'sqlite':
+            if update_dict:
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=conflict_fields,
+                    set_=update_dict,
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=conflict_fields
+                )
+
+        elif dialect == "sqlite":
             from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
             stmt = sqlite_insert(table).values(processed_data)
-            if unique_fields:
-                update_dict = {
-                    c.name: stmt.excluded[c.name]
-                    for c in table.columns if c.name not in unique_fields
-                }
-                stmt = stmt.on_conflict_do_update(index_elements=unique_fields, set_=update_dict)
+
+            update_dict = {
+                c.name: stmt.excluded[c.name]
+                for c in table.columns
+                if c.name not in pk_fields and c.name not in conflict_fields
+            }
+
+            if update_dict:
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=conflict_fields,
+                    set_=update_dict,
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=conflict_fields
+                )
 
         else:
             from sqlalchemy import insert as base_insert
             stmt = base_insert(table).values(processed_data)
 
-        # 4. Execute via the resolved engine
-        # with engine.begin() as conn:
-        #     conn.execute(stmt)
+        with engine.begin() as conn:
+            result = conn.execute(stmt)
 
-        with engine.connect() as conn:
-            with conn.begin():
-                conn.execute(stmt)
+        return result.rowcount if result.rowcount is not None else 0
 
-    # ... inside ModelHelpersMixin ...
+    def save(
+            self,
+            session: Union[Session, AsyncSession] = None,
+            app_label: str = None,
+            unique_fields: List[str] = None,
+    ) -> Any:
+        """
+        Usage: upsert style
+            user = User(username="ather", email="new@x.com", is_active=False)
+            user.save()
+        Save one object using upsert semantics:
+        - insert if not found
+        - update if found by conflict fields
 
-    def save(self, session: Union[Session, AsyncSession] = None, app_label: str = None,
-             unique_fields: List[str] = None, allow_update: bool = False) -> Any:
-        # 1. Resolve defaults
-        if unique_fields is None:
-            unique_fields = getattr(self._Meta, "unique_fields", [])
+        Conflict fields come from:
+        1. passed unique_fields
+        2. _Meta.unique_fields
+        3. primary key
+        """
+        conflict_fields = self.get_conflict_fields(unique_fields)
+        pk_fields = self.get_primary_key_fields()
 
         with self.managed_session(session, app_label) as s:
             existing = None
 
-            # 2. Check Uniqueness
-            if unique_fields:
-                criteria = {f: getattr(self, f) for f in unique_fields if hasattr(self.__class__, f)}
-                existing = s.query(self.__class__).filter_by(**criteria).first()
+            # 1. Try finding existing record via conflict fields
+            if conflict_fields:
+                criteria = {
+                    f: getattr(self, f, None)
+                    for f in conflict_fields
+                }
 
-            if not existing:
-                pk_fields = self.get_primary_key_fields()
-                if pk_fields:
-                    pk_val = getattr(self, pk_fields[0], None)
-                    if pk_val: existing = s.get(self.__class__, pk_val)
+                # only query if at least one meaningful criterion exists
+                if criteria and any(v is not None for v in criteria.values()):
+                    existing = s.query(self.__class__).filter_by(**criteria).first()
 
-            # 3. Handle Conflicts
+            # 2. Fallback to PK lookup if conflict lookup found nothing
+            if not existing and pk_fields:
+                pk_vals = [getattr(self, f, None) for f in pk_fields]
+
+                # single-column PK
+                if len(pk_fields) == 1 and pk_vals[0] is not None:
+                    existing = s.get(self.__class__, pk_vals[0])
+
+                # composite PK
+                elif len(pk_fields) > 1 and all(v is not None for v in pk_vals):
+                    existing = s.get(self.__class__, tuple(pk_vals))
+
+            # 3. Update or Insert
             if existing:
-                if not allow_update:
-                    conflict_vals = {f: getattr(self, f) for f in unique_fields} or {"PK": pk_val}
-                    raise ValueError(
-                        f"CONFLICT: {self.__class__.__name__} {conflict_vals} exists. Use allow_update=True to overwrite.")
-
-                for attr in self.__table__.columns.keys():
-                    if attr not in self.get_primary_key_fields():
-                        setattr(existing, attr, getattr(self, attr))
-                target, is_add = existing, False
+                for col in self.__table__.columns.keys():
+                    if col not in pk_fields:
+                        setattr(existing, col, getattr(self, col, None))
+                target = existing
+                is_add = False
             else:
-                target, is_add = self, True
+                target = self
+                is_add = True
 
             if isinstance(s, AsyncSession):
                 return self._save_async(target, s, is_add)
             return self._save_sync(target, s, is_add)
 
-    @staticmethod
-    def _save_sync(obj, session, is_add):
-        if is_add: session.add(obj)
-        session.commit()
-        session.flush()
-        session.refresh(obj)
-        return obj.to_object()
 
     @staticmethod
-    async def _save_async(obj, session, is_add):
-        if is_add: session.add(obj)
+    def _save_sync(obj, session: Session, is_add: bool):
+        if is_add:
+            session.add(obj)
+        session.commit()
+        session.refresh(obj)
+        return obj.to_object() if hasattr(obj, "to_object") else obj
+
+    @staticmethod
+    async def _save_async(obj, session: AsyncSession, is_add: bool):
+        if is_add:
+            session.add(obj)
         await session.commit()
-        await session.flush()
         await session.refresh(obj)
-        return obj.to_object()
+        return obj.to_object() if hasattr(obj, "to_object") else obj
 
     def delete(self, session: Union[Session, AsyncSession] = None, app_label=None):
         with self.managed_session(session, app_label) as s:

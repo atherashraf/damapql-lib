@@ -1,10 +1,10 @@
 from sqladmin import ModelView
 
-from .admin_setup import get_dch_admin
+from main import dch_admin
 from .models import *
 
 
-dch_admin = get_dch_admin()
+
 class LayerCategoryAdmin(ModelView, model=LayerCategory):
     icon = "fa-solid fa-layer-group"
     column_list = LayerCategory.get_fields()

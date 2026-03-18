@@ -224,7 +224,7 @@ git config --global core.editor notepad
 then pull code  using
 
 ```bash
-git subtree pull --prefix=app/damapql damapql-lib main --squash
+    git subtree pull --prefix=app/damapql damapql-lib main --squash
 ```
 
 some time it need to refresh

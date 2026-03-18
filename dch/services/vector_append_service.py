@@ -655,7 +655,7 @@ class DCHVectorAppendService:
         if self.logger:
             self.logger.info(f"Append columns: {list(gdf.columns)}")
             self.logger.info(f"Append dtypes: {gdf.dtypes.astype(str).to_dict()}")
-
+        self.logger.debug(f"Engine {engine}")
         gdf.to_postgis(
             name=table_name,
             con=engine,

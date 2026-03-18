@@ -26,6 +26,10 @@ Create database tables:
     python -m app.damapql.manage migrate --app_label auth
     python -m app.damapql.manage migrate --app_label dch
 
+Add DB Connections:
+    python -m app.damapql.manage add_db_connection
+    python -m app.damapql.manage add_db_connection --db_key wasa_data
+    python -m app.damapql.manage update_db_connection_localhost --ip 139.16.34.33
 Load fixture data:
 
     python -m app.damapql.manage loaddata --app_label dch --file dch/fixtures/layercategory.json
@@ -62,18 +66,21 @@ import importlib
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter
 from pydantic import ValidationError
 from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy_utils import ChoiceType
 from sqlalchemy.engine import URL
+from sqlalchemy.orm.attributes import flag_modified
+
 
 from cryptography.fernet import Fernet
 
-from app.damapql.settings import DCH_APPS, DCH_BASE_DIR
+from app.damapql.dch.models import DBConnection
 from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
 
@@ -81,6 +88,7 @@ from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.auth.models import Profile, User, Role, Department, Organization
 from app.damapql.auth.dtypes import EmailValidator
 from app.damapql.settings import DCH_DATABASES
+from settings import DA_APPS, BASE_DIR, DATABASES
 
 manage_router = APIRouter(
     tags=["manage"],
@@ -185,6 +193,49 @@ def create_dch_databases():
         except Exception as e:
             print(f"❌ Extension setup failed for '{db_name}': {e}")
 
+
+def add_db_connection(db_key: Optional[str] = None):
+    with DBConnection.managed_session() as session:
+        source = DCH_DATABASES if db_key is None else DATABASES
+
+        keys = source.keys() if db_key is None else [db_key]
+
+        for key in keys:
+            da_logger.info(f"working on db_key :{key}")
+            if key not in source:
+                da_logger.info(f"db_key {key} does not exist.")
+                continue
+
+            existing = session.query(DBConnection).filter_by(name=key).first()
+            if existing:
+                da_logger.info(f"Database Connection {key} already exists.")
+                continue
+            if key not in source:
+                da_logger.info(f"Database Connection {key} does not exist.")
+            if "cache" not in key:
+                db_info = source[key]
+                name = f"{key}_{db_info['host']}"
+                if "password" in db_info:
+                    db_info["password"] = CryptoUtils().encrypt_txt(db_info["password"])
+                db_connection = DBConnection(name=name, params=db_info)
+                db_connection.save(session=session)
+
+
+def update_db_connection_localhost(ip: str):
+    LOCALHOST_VALUES = {"localhost", "127.0.0.1", "::1"}
+
+    with DBConnection.managed_session() as session:
+        for conn in session.query(DBConnection).all():
+            params = conn.params or {}
+            host = params.get("host")
+
+            if host in LOCALHOST_VALUES:
+                conn.params = {**params, "host": ip}
+                flag_modified(conn, "params")
+                da_logger.info(f"Updated {conn.name}: {host} -> {ip}")
+
+        session.commit()
+
 # --- UTILS ---
 
 def to_python_scalar(v: Any) -> Any:
@@ -248,7 +299,7 @@ def _to_bool(value: Any) -> bool:
 
 def startapp(app_label: str):
     """Creates a new app directory with boilerplate files."""
-    dir_path = os.path.join(DCH_BASE_DIR, app_label)
+    dir_path = os.path.join(BASE_DIR, app_label)
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
@@ -262,7 +313,7 @@ def startapp(app_label: str):
 
 def sync_schema(app_label: str):
     """Adds missing columns to existing tables using ALTER TABLE."""
-    ap = DCH_APPS.get(app_label)
+    ap = DA_APPS.get(app_label)
     if not ap:
         print(f"❌ App label '{app_label}' not found.")
         return
@@ -306,21 +357,35 @@ def sync_schema(app_label: str):
 
     print(f"✅ Schema sync for '{app_label}' complete.")
 
+
+def import_string(dotted_path: str):
+    module_path, attr_name = dotted_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, attr_name)
+
+
 def migrate(app_label: str):
-    """Runs standard SQLAlchemy create_all."""
-    ap = DCH_APPS.get(app_label)
-    if not ap: return
+    ap = DA_APPS.get(app_label)
+    if not ap:
+        return
 
     importlib.import_module(f'{ap["path"]}.models')
-    engine = DBBase.get_engine(app_label=app_label)
-    metadata_obj.create_all(engine)
+
+    if "base" not in ap:
+        BaseCls = DBBase
+    else:
+        BaseCls = import_string(ap["base"])
+
+    engine = BaseCls.get_engine(db_key=ap['db_key'])
+
+    BaseCls.metadata.create_all(engine)
     print(f"✅ Migration for '{app_label}' complete.")
 
 # --- DATA MANAGEMENT ---
 
 def dumpdata(app_label: str, model: str, output: str = "data.json"):
     """Dumps model records to a JSON file, resolving ChoiceTypes."""
-    ap = DCH_APPS.get(app_label)
+    ap = DA_APPS.get(app_label)
     module = importlib.import_module(f'{ap["path"]}.models')
     model_class = getattr(module, model)
 
@@ -358,7 +423,7 @@ def loaddata(app_label: str, file: str):
 
     # Resolve relative paths against DCH_BASE_DIR
     if not file_path.is_absolute():
-        file_path = Path(DCH_BASE_DIR) / file_path
+        file_path = Path(BASE_DIR) / file_path
 
     file_path = file_path.resolve()
 
@@ -366,7 +431,7 @@ def loaddata(app_label: str, file: str):
         print(f"❌ Fixture file not found: {file_path}")
         return
 
-    ap = DCH_APPS.get(app_label)
+    ap = DA_APPS.get(app_label)
     if not ap:
         print(f"❌ App label '{app_label}' not found in DA_APPS.")
         return
@@ -473,6 +538,9 @@ def createsuperuser():
         session.refresh(user)
 
         print(f"✅ Superuser '{username}' created successfully with ID={user.id}.")
+
+
+
 
 def create_organization(name: str, description: str = None):
     """Creates an organization."""

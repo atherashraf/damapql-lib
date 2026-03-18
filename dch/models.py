@@ -702,7 +702,7 @@ class MapInfo(DBBase):
         stmt = db.select(cls)
         if limit is not None:
             stmt = stmt.limit(limit)
-        with cls.manager().engine.connect() as con:
+        with cls.get_engine().connect() as con:
             rs = con.execute(stmt)
             df = pd.DataFrame(rs.fetchall())
             if not df.empty:

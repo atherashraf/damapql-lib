@@ -56,13 +56,8 @@ from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.settings import IS_LOCAL
 
 # Expected structure from your settings.py
-try:
-    from app.damapql.settings import DCH_DATABASES, DCH_APPS, DCH_DB_KEY
-except ImportError:
-    # Fallback for demonstration if settings not found
-    DATABASES = {DCH_DB_KEY: {"engine": "sqlite", "file_path": "dev.db"}}
-    DA_APPS = {}
-    DCH_DB_KEY = DCH_DB_KEY
+from app.damapql.settings import DCH_APPS, DCH_DB_KEY
+from settings import DATABASES
 
 # --- Internal Registry for Connection Pooling ---
 _async_engines: dict[str, Any] = {}
@@ -104,7 +99,7 @@ def _build_db_url(db_config: dict, is_async: bool) -> str:
 # --- Engine & Factory Accessors ---
 def get_async_engine_instance(key: str = DCH_DB_KEY):
     if key not in _async_engines:
-        db_config = DCH_DATABASES[key]
+        db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=True)
         engine = create_async_engine(
             db_url,
@@ -121,7 +116,7 @@ def get_async_engine_instance(key: str = DCH_DB_KEY):
 
 def get_sync_engine_instance(key: str = DCH_DB_KEY):
     if key not in _sync_engines:
-        db_config = DCH_DATABASES[key]
+        db_config = DATABASES[key]
         db_url = _build_db_url(db_config, is_async=False)
         engine = create_engine(
             db_url,
@@ -173,7 +168,7 @@ def get_db_key_from_path(request: Request) -> str:
     path = request.url.path.lstrip("/")
     app_name = path.split("/", 1)[0] if path else ""
     db_key = (DCH_APPS.get(app_name) or {}).get("db_key") or DCH_DB_KEY
-    return db_key if db_key in DCH_DATABASES else DCH_DB_KEY
+    return db_key if db_key in DATABASES else DCH_DB_KEY
 
 
 def get_db(request: Request) -> Generator[Session, None, None]:
@@ -190,7 +185,7 @@ async def get_async_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
 
 
 def get_db_url(db_key: str = DCH_DB_KEY) -> str:
-    db = DCH_DATABASES[db_key]
+    db = DATABASES[db_key]
 
     user = db.get("user", "")
     password = quote_plus(db.get("password") or "")
@@ -261,6 +256,12 @@ class ExternalEngineRegistry:
         Returns a cached Engine for a given connection key.
         """
         if key not in cls._engines:
+            if conn == {} and key in DATABASES:
+                if key not in DATABASES:
+                    raise ValueError(f"Unsupported DB key: {key} , params of DB key {key} doesnt exist")
+                conn = DATABASES[key]
+                conn["password"] = CryptoUtils().encrypt_txt(conn["password"])
+
             db_url = cls.build_url(conn)
 
             cls._engines[key] = create_engine(

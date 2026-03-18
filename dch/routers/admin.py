@@ -232,6 +232,7 @@ async def save_db_layer_info(
             table_name=table_name,
             layer_category_id=layer_category_id,
             user=current_user,
+            db_conn_name=obj.name
         )
 
         return {
