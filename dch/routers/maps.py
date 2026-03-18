@@ -131,7 +131,7 @@ async def save_map(
         map_info.extent = payload.extent
         map_info.srid = 3857
         map_info.units = "m"
-        map_info.save(session=session, allow_update=True)
+        map_info.save(session=session)
 
         return {"payload": {"msg": "Map saved successfully", "uuid": map_info.uuid}}
 
