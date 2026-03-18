@@ -1,427 +1,267 @@
+---
 
 # DAMapQL
 
-**DAMapQL** (DigitalArz Map Query Layer) is a **FastAPI-based geospatial backend** designed to power modern web GIS applications.
+Reusable **DAMap Query Layer** for **FastAPI applications**.
 
-It provides APIs for:
-
-* Map management
-* Layer management
-* Vector and raster data access
-* Vector tiles (MVT)
-* Raster tiles
-* Styling (JSON / SLD)
-* Navigation hierarchies
-* Spatial attribute queries
-* Raster analytics
-* Authentication and role management
-
-The project is part of the **DigitalArz platform** and is designed to work with **OpenLayers / DAMap React map components**.
+This repository provides shared modules used across multiple DAMap-based projects.
+It is extracted from the main **DAMapQL development repository** and maintained as a reusable library.
 
 ---
 
-# Architecture
+# Installation
 
-DAMapQL follows a **modular router architecture**.
+Clone the library inside the **`app` directory** of your FastAPI project.
 
-```
-app/
- ├── auth/          Authentication & authorization
- └── dch/           Digital Cartography Hub (GIS services)
-
-app/dch/routers/
- ├── maps.py        Map configuration APIs
- ├── layers.py      Vector layer metadata & attributes
- ├── styles.py      Layer styling APIs
- ├── tiles.py       Vector tile (MVT) and cache APIs
- ├── raster.py      Raster processing APIs
- ├── navigation.py  Administrative boundary navigation
- ├── admin.py       Administrative operations
- └── export.py      Export utilities
+```bash
+cd app
+git clone https://github.com/atherashraf/damapql-lib.git damapql
 ```
 
----
-
-# Key Features
-
-## Authentication
-
-User authentication and authorization are handled via:
+Your project structure should look like:
 
 ```
-app/auth/
+project-root
+│
+├── app
+│   ├── main.py
+│   ├── api
+│   └── damapql
+│       ├── auth
+│       ├── dch
+│       └── ...
 ```
 
-Capabilities:
+Then modules can be imported normally:
 
-* JWT authentication
-* Role-based access control
-* Department-based permissions
-* User role management
-
-Supported roles include:
-
-```
-superuser
-app_manager
-data_editor
-survey_manager
+```python
+from app.damapql.auth import models
+from app.damapql.dch import routers
 ```
 
 ---
 
-# GIS Capabilities
+# Module Overview
 
-## Map Management
+Current modules included in DAMapQL:
 
 ```
-/dch/all_map_info
-/dch/save_map
-/dch/get_map_info
-/dch/delete_map
+damapql
+├── auth     → authentication and user management
+├── dch      → data catalog / map services
+└── tests
 ```
 
-Allows:
-
-* Saving map configuration
-* Managing map layers
-* Layer ordering and visibility
-* Base layer configuration
+These modules are reusable across multiple FastAPI applications.
 
 ---
 
-## Layer Management
+# Required Settings Configuration
 
+The host application must define the following settings.
+
+```python
+DCH_DB_KEY = 'dch'
+DATA_DB_KEY = 'data'
+
+DA_APPS = {
+    "auth": {"path": "app.damapql.auth", "db_key": DCH_DB_KEY},
+    "dch": {"path": "app.damapql.dch", "db_key": DCH_DB_KEY},
+}
 ```
-/dch/all_layer_info
-/dch/layer_info
-/dch/get_all_layers
-/dch/layer_fields
-/dch/layer_attributes
-```
-
-Supports:
-
-* Vector metadata
-* Field inspection
-* Attribute table queries
-* Feature details
-* Distinct value classification
 
 ---
 
-## Styling System
+# Database Configuration
+
+Example configuration:
+
+```python
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
+IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
+
+localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
+
+DATABASES = {
+
+    "cache_db": {
+        "engine": "sqlite",
+        "file_path": os.path.join(BASE_DIR, "dch_cache.sqlite")
+    },
+
+    "dch": {
+        "engine": "postgresql",
+        "host": os.environ.get("DCH_HOST") if not IS_LOCAL else localhost,
+        "name": os.environ.get("DCH_NAME"),
+        "port": os.environ.get("DCH_PORT"),
+        "user": os.environ.get("DCH_USER"),
+        "password": os.environ.get("DCH_PASSWORD")
+    },
+
+    "data": {
+        "engine": "postgresql",
+        "host": os.environ.get("DATA_HOST") if not IS_LOCAL else localhost,
+        "name": os.environ.get("DATA_NAME"),
+        "port": os.environ.get("DATA_PORT"),
+        "user": os.environ.get("DATA_USER"),
+        "password": os.environ.get("DATA_PASSWORD")
+    }
+
+}
+```
+
+### Notes
+
+* `dch` and `data` databases **may be the same or separate** depending on the project architecture.
+* The key names **must match exactly**:
 
 ```
-/dch/get_style
-/dch/save_style
-/dch/upload_sld_style
-/dch/download_da_style
-/dch/get_legend_graphic
+DCH_DB_KEY = 'dch'
+DATA_DB_KEY = 'data'
 ```
 
-Supports:
-
-* JSON style definitions
-* SLD styles
-* Map-specific styling overrides
-* Legend generation
+These keys are used internally by DAMapQL modules to resolve database connections.
 
 ---
 
-## Vector Tiles (MVT)
+# Admin Initialization
 
-```
-/dch/layer_mvt/{uuid}/{z}/{x}/{y}
-```
+To enable the **SQLAdmin interface**, initialize it in your `main.py`.
 
-Features:
-
-* PostGIS vector tile generation
-* Tile caching
-* Column whitelisting
-* Resolution control
-
----
-
-## Raster Tiles
-
-```
-/dch/raster_tile/{uuid}/{z}/{x}/{y}
-```
-
-Supports:
-
-* Cloud Optimized GeoTIFF
-* Dynamic color mapping
-* On-the-fly tile generation
-
----
-
-## Raster Analytics
-
-```
-/dch/get_pixel_value
-/dch/get_raster_info
-```
-
-Capabilities:
-
-* Pixel value extraction
-* Band statistics
-* Raster metadata inspection
-
----
-
-## Navigation System
-
-```
-/dch/navigation_list
-/dch/navigation_geometry
-```
-
-Provides hierarchical spatial navigation:
+Add the following **immediately after FastAPI app creation**.
 
 Example:
 
-```
-Country
- └ Province
-     └ District
-         └ Tehsil
-```
+```python
+from fastapi import FastAPI
+from app.damapql.settings import DCH_SECRET_KEY, DCH_DB_KEY
+from app.damapql.dch.admin_setup import create_dch_admin
 
----
+app = FastAPI()
 
-# Vector Data Services
+port = 8998
 
-## WFS
-
-```
-/dch/wfs/{uuid}/{format}
-```
-
-Features:
-
-* GeoJSON output
-* Column selection
-* Pagination
-* CRS transformation
-
----
-
-# Layer Upload
-
-## Shapefile Upload
-
-```
-/dch/upload_shp_file
+dch_admin = create_dch_admin(
+    app,
+    secret_key=DCH_SECRET_KEY,
+    port=port,
+    db_key=DCH_DB_KEY,
+)
 ```
 
-Capabilities:
-
-* Upload shapefile components
-* Import into PostGIS
-* Auto metadata creation
-
----
-
-## Raster Upload
+After starting the server, the admin panel will be available at:
 
 ```
-/dch/add_raster_layer_info
-```
-
-Features:
-
-* Raster upload
-* Automatic COG conversion
-* Metadata registration
-
----
-
-# Tile Cache
-
-Vector tiles can be cached in a dedicated database.
-
-```
-/dch/clear_cache/{uuid}
-```
-
-Cache tables follow the naming convention:
-
-```
-{layer_uuid}_xyz
+http://127.0.0.1:8998/api/dch_admin/
 ```
 
 ---
 
-# Project Structure
+# Running Tests
+
+DAMapQL includes unit tests written using **pytest**.
+
+Tests are located inside:
 
 ```
-DAMapQL/
-│
-├── app/
-│   ├── auth/
-│   │   ├── manager/
-│   │   │   ├── email_manager.py
-│   │   │   └── role_manager.py
-│   │   ├── dtypes.py
-│   │   ├── models.py
-│   │   ├── routers.py
-│   │   ├── utils.py
-│   │   └── __init__.py
-│   │
-│   ├── dch/
-│   │   ├── fixtures/
-│   │   │   ├── layercategory.json
-│   │   │   └── layerqualitylevel.json
-│   │   │
-│   │   ├── routers/
-│   │   │   ├── admin.py
-│   │   │   ├── export.py
-│   │   │   ├── layers.py
-│   │   │   ├── maps.py
-│   │   │   ├── navigation.py
-│   │   │   ├── raster.py
-│   │   │   ├── styles.py
-│   │   │   ├── tiles.py
-│   │   │   └── __init__.py
-│   │   │
-│   │   ├── utils/
-│   │   │   ├── dch_utils.py
-│   │   │   ├── df_utils.py
-│   │   │   ├── email_utils.py
-│   │   │   ├── mvt_utils.py
-│   │   │   └── web_mercator_tiling.py
-│   │   │
-│   │   ├── api_enum.py
-│   │   ├── dch_map_schema.py
-│   │   ├── dtypes.py
-│   │   ├── models.py
-│   │   ├── scripts.py
-│   │   ├── tree.sql
-│   │   └── __init__.py
-│   │
-│   └── __init__.py
-│
-├── tests/
-│   ├── auth/
-│   ├── dch/
-│   └── conftest.py
-│
-├── main.py
-├── manage.py
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-├── pytest.ini
-└── README.md
+app/damapql/tests
 ```
 
----
+Project structure:
 
-# Testing
+```
+app/damapql/tests
+├── auth
+│   └── test_*.py
+└── dch
+    └── test_*.py
+```
 
-DAMapQL includes **pytest-based API tests**.
-
-Run tests:
+### Run Authentication Tests
 
 ```bash
-pytest -v
+pytest -v app/damapql/tests/auth
 ```
 
-Example output:
-
-```
-14 passed, 0 failed
-```
-
-Test folders:
-
-```
-tests/auth
-tests/dch
-```
-
-Tests include:
-
-* router testing
-* role permission validation
-* mocked database sessions
-* authentication override
-
----
-
-# Dependencies
-
-Core libraries used:
-
-```
-FastAPI
-SQLAlchemy
-GeoPandas
-Shapely
-Rasterio
-JenksPy
-Matplotlib
-PyProj
-Pandas
-```
-
----
-
-# Running the Application
-
-Install dependencies:
+### Run DCH Tests
 
 ```bash
-pip install -r requirements.txt
+pytest -v app/damapql/tests/dch
 ```
 
-Run server:
+### Run All Tests
 
 ```bash
-uvicorn app.main:app --reload
+pytest -v app/damapql/tests
 ```
 
-API documentation:
-
-```
-http://localhost:8000/docs
-```
+The `-v` flag runs pytest in **verbose mode**, showing each test result.
 
 ---
 
-# Future Enhancements
+# Development Workflow
 
-Planned improvements:
+This repository is maintained from the main development project.
 
-* Redis tile caching
-* Async DB queries
-* STAC support
-* Vector tile pre-generation
-* Layer permission system
-* OGC API Features
+To publish updates from the main **DAMapQL** repository to this library:
+
+```bash
+git subtree push --prefix=app/damapql damapql-lib main
+```
+
+To pull changes from the main **DAMapqL** repository to this libray 
+first set merge info editor (one time)
+```bash
+git config --global core.editor "'C:/Program Files/Notepad++/notepad++.exe' -multiInst -nosession"
+or 
+git config --global core.editor notepad
+```
+then pull code  using
+
+```bash
+git subtree pull --prefix=app/damapql damapql-lib main --squash
+```
+
+some time it need to refresh
+```bash
+git update-index --refresh
+git diff-index --quiet HEAD --
+git fetch damapql-lib
+```
+
+This command publishes the contents of:
+
+```
+app/damapql
+```
+
+into this repository.
 
 ---
 
-# License
+# Updating the Library in a Project
 
-Internal DigitalArz project.
+To get the latest updates in a project that uses this library:
+
+```bash
+cd app/damapql
+git pull
+```
 
 ---
 
 # Author
 
 **Ather Ashraf**
-Associate Professor – Software Engineering
-PUCIT – University of the Punjab
+AI • GIS • Software Engineering
 
-Specialization:
+📧 [atherashraf@gmail.com](mailto:atherashraf@gmail.com)
+📱 +92 322 4785104
+📱 +966 55 725 2342
 
-* GeoSpatial AI
-* Intelligent GIS
-* Spatial Data Infrastructure
-* Remote Sensing Analytics
-
+---
