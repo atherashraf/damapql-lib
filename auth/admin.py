@@ -2,8 +2,9 @@ from sqladmin import ModelView
 
 
 from app.damapql.auth.models import Organization, Department, Profile, Role, User
-from main import dch_admin
+from app.damapql.dch.admin_setup import get_dch_admin
 
+dch_admin = get_dch_admin()
 
 class OrganizationAdmin(ModelView, model=Organization):
     name = "Organization"
