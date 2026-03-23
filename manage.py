@@ -56,6 +56,9 @@ Generate security keys:
 
     python -m app.damapql.manage generate_crypto_key
     python -m app.damapql.manage generate_secret_key_hex --length 64
+
+Add Layer Info
+    python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
 """
 import os
 import sys
@@ -71,7 +74,7 @@ from typing import Any, Dict, List, Optional
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter
 from pydantic import ValidationError
-from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine
+from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy_utils import ChoiceType
 from sqlalchemy.engine import URL
@@ -80,7 +83,8 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from cryptography.fernet import Fernet
 
-from app.damapql.dch.models import DBConnection
+from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel
+from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
 
@@ -405,8 +409,6 @@ def dumpdata(app_label: str, model: str, output: str = "data.json"):
 
 
 
-
-
 def loaddata(app_label: str, file: str):
     """
     Load records from a JSON fixture file and reset PostgreSQL SERIAL sequences.
@@ -499,6 +501,126 @@ def reset_pk_sequences(engine, session, touched_models):
 
 
 
+def create_layerinfo_from_app_models(
+    app_label: str,
+    layer_category_id=None,
+    overwrite: bool = True,
+    include_non_spatial: bool = False,
+):
+    service = LayerInfoService()
+
+    with LayerInfo.managed_session() as session:
+        if layer_category_id is None:
+            qs = select(LayerCategory).where(LayerCategory.main == "Other")
+            result = session.execute(qs)
+            category = result.scalar_one_or_none()
+
+            if category is None:
+                raise ValueError("LayerCategory with main='Other' not found")
+
+            layer_category_id = category.id
+
+        qs = select(LayerQualityLevel).where(LayerQualityLevel.name == "Not Accessed")
+        result = session.execute(qs)
+        quality = result.scalar_one_or_none()
+
+        if quality is None:
+            raise ValueError("QualityLevel with name='Not Accessed' not found")
+
+        result = service.save_app_layer_infos(
+            db=session,
+            app_label=app_label,
+            layer_category_id=layer_category_id,
+            quality_level_id=quality.id,
+            user=None,
+            overwrite=overwrite,
+            include_non_spatial=include_non_spatial,
+        )
+
+        session.commit()
+
+    print(result)
+    return result
+
+
+"""
+Usage:
+    create_layerinfo_from_raster(
+        title="LULC 2024",
+        raster_path="media/rasters/lulc_2024.tif",
+    )
+    
+    create_layerinfo_from_raster(
+        title="DEM Lahore",
+        raster_path=r"D:\gis_data\dem\lahore_dem.tif",
+        temporal="static",
+        data_model_type="RASTER",
+        overwrite=True,
+    )
+"""
+def create_layerinfo_from_raster(
+    title: str,
+    raster_path: str,
+    layer_category_id=None,
+    temporal: str = None,
+    data_model_type: str = None,
+    overwrite: bool = False,
+    app_label: str = "dch",
+    layer_name: str = None,
+):
+    service = LayerInfoService()
+
+    with LayerInfo.managed_session() as session:
+        if layer_category_id is None:
+            qs = select(LayerCategory).where(LayerCategory.main == "Other")
+            result = session.execute(qs)
+            category = result.scalar_one_or_none()
+
+            if category is None:
+                raise ValueError("LayerCategory with main='Other' not found")
+
+            layer_category_id = category.id
+
+        qs = select(LayerQualityLevel).where(LayerQualityLevel.name == "Not Accessed")
+        result = session.execute(qs)
+        quality = result.scalar_one_or_none()
+
+        if quality is None:
+            raise ValueError("QualityLevel with name='Not Accessed' not found")
+
+        obj, changed = service.save_raster_layer_info(
+            db=session,
+            title=title,
+            raster_path=raster_path,
+            layer_category_id=layer_category_id,
+            temporal=temporal,
+            data_model_type=data_model_type,
+            user=None,
+            overwrite=overwrite,
+            app_label=app_label,
+            layer_name=layer_name,
+        )
+
+        if getattr(obj, "quality_level_id", None) is None:
+            obj.quality_level_id = quality.id
+
+        session.commit()
+
+    print(
+        {
+            "msg": "Raster layer info created/updated" if changed else "Raster layer already exists",
+            "uuid": getattr(obj, "uuid", None),
+            "layer_name": getattr(obj, "layer_name", None),
+            "title": getattr(obj, "title", None),
+            "path": (
+                obj.extra_metadata.get("cog_path")
+                if getattr(obj, "extra_metadata", None)
+                else raster_path
+            ),
+        }
+    )
+    return obj
+
 # --- AUTH, ROLES, ORGS & DEPTS ---
 
 def createsuperuser():
@@ -538,8 +660,6 @@ def createsuperuser():
         session.refresh(user)
 
         print(f"✅ Superuser '{username}' created successfully with ID={user.id}.")
-
-
 
 
 def create_organization(name: str, description: str = None):

@@ -55,12 +55,44 @@ class DCHUtils:
         # base = base[:max(cut, 1)]
         return f"{base}_{li_uuid}"
 
+    # @staticmethod
+    # def create_title(name: str) -> str:
+    #     title = name.title()
+    #     for val in ["_"]:
+    #         title = title.replace(val, " ")
+    #     return title
+
     @staticmethod
     def create_title(name: str) -> str:
-        title = name.title()
-        for val in ["_"]:
-            title = title.replace(val, " ")
-        return title
+        """
+        Converts snake_case or CamelCase to clean title.
+        Preserves uppercase acronyms (WASA, NA, PP).
+        """
+
+
+        def fix(word: str) -> str:
+            # keep acronyms (already uppercase)
+            if word.isupper():
+                return word
+
+            # force 2-letter words uppercase (NA, PP, UC)
+            if len(word) == 2:
+                return word.upper()
+
+            return word.capitalize()
+
+        # Handle snake_case
+        if "_" in name:
+            parts = [p for p in name.split("_") if p]
+            return " ".join(fix(p) for p in parts)
+
+        # Handle CamelCase
+        parts = re.findall(
+            r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+',
+            name
+        )
+
+        return " ".join(fix(p) for p in parts if p)
 
     @staticmethod
     def _resolve_engine(db: Union[str, Engine]) -> Engine:

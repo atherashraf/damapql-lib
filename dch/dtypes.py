@@ -5,16 +5,7 @@ from digitalarzengine.io.managers.db_manager import DBString
 from pydantic import BaseModel, RootModel, ConfigDict, field_validator, Field
 
 
-class Feature(BaseModel):
-    type: str  # e.g., "Feature"
-    properties: Optional[Dict[str, Any]] = {}  # Optional properties object
-    geometry: Dict[str, Any]  # Geometry object with "type" and "coordinates"
 
-
-class GeoJSON(BaseModel):
-    type: str
-    srs: Optional[str] = "EPSG:4326"
-    features: List[Feature]
 
 
 class DBConnectionCreate(BaseModel):

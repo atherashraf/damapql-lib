@@ -9,6 +9,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import create_engine, select, text
 
+from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 
 from app.damapql.auth.dtypes import UserInfo
@@ -245,6 +246,49 @@ async def save_db_layer_info(
         da_logger.exception(f"Failed to save DB layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save DB layer info")
 
+# @dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
+# async def save_db_layer_info(
+#     db_id: str,
+#     table_name: str,
+#     layer_category_id: str,
+#     db=Depends(get_sync_session),
+#     current_user: UserInfo = Depends(AuthUtils.get_current_user),
+# ):
+#     require_dch_admin(current_user)
+#
+#     qs = select(DBConnection).where(DBConnection.id == db_id)
+#     result = db.execute(qs)
+#     obj: DBConnection = result.scalar_one_or_none()
+#
+#     if obj is None:
+#         raise HTTPException(status_code=404, detail="DB connection not found")
+#
+#     try:
+#         service = LayerInfoService()
+#
+#         layer, changed = service.save_db_table_layer_info(
+#             db=db,
+#             engine=obj.get_sqlalchemy_engine(),
+#             table_name=table_name,
+#             layer_category_id=layer_category_id,
+#             user=current_user,
+#             db_conn_name=obj.name,
+#             overwrite=False,
+#         )
+#
+#         db.commit()
+#
+#         return {
+#             "payload": {
+#                 "msg": "Layer info created" if changed else "Layer info already exists",
+#                 "uuid": getattr(layer, "uuid", None) if layer else None,
+#             }
+#         }
+#
+#     except Exception as e:
+#         db.rollback()
+#         da_logger.exception(f"Failed to save DB layer info: {e}")
+#         raise HTTPException(status_code=500, detail="Failed to save DB layer info")
 
 # ---------------------------------------------------------------------
 # Generic model endpoints

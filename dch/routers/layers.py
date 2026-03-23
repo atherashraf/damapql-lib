@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.dtypes import AttributeTableResponse
-from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory, LayerAccessibility
+from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
+from app.damapql.dch.schemas.geojson import GeoJSON
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 
@@ -42,6 +43,8 @@ async def layer_categories():
         ]
 
     return {"payload": payload}
+
+
 @dch_layers_router.get("/wfs/{uuid}/{format}/")
 async def get_wfs(
     uuid: str,
@@ -106,14 +109,16 @@ async def get_wfs(
     if gdf.empty:
         return Response(status_code=204)
 
-    geojson = gdf.to_crs(epsg=4326).to_json(default=handle_timestamp)
+    gdf_4326 = gdf.to_crs(epsg=4326)
+    geojson_obj = GeoJSON.from_gdf(gdf_4326)
+
     return {
-        "payload": DCHUtils.gzip_data(geojson),
+        "payload": DCHUtils.gzip_data(geojson_obj.model_dump_json(by_alias=True)),
         "meta": {
             "format": "geojson",
             "limit": limit,
             "offset": offset,
-            "count": len(gdf),
+            "count": len(gdf_4326),
         },
     }
 

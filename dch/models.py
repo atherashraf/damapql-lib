@@ -13,7 +13,7 @@ from geopandas import GeoDataFrame
 from sqlalchemy.exc import SQLAlchemyError
 
 
-from sqlalchemy import Column, func, select, Engine
+from sqlalchemy import Column, func, select, Engine, text
 from sqlalchemy.orm import mapped_column, Mapped, relationship, Session, selectinload
 from sqlalchemy_utils import ChoiceType
 from app.damapql.dch.api_enum import AccessibilityType, DataModel, ModelType
@@ -386,10 +386,24 @@ class LayerInfo(DBBase):
             )
             return session.execute(stmt).scalar_one_or_none()
 
-    def to_layer_gdf(self, g_col=None, extent_3857=None, where_clause=None) -> GeoDataFrame:
+    def to_layer_gdf(
+            self,
+            cols=(),
+            g_col: str | None = None,
+            extent_3857=None,
+            where_clause: str | None = None,
+            limit: int = -1,
+            offset: int = 0,
+            session: Session = None
+    ) -> GeoDataFrame:
         """
         Return GeoDataFrame for vector DB layers.
-        Supports optional SQL where clause and bbox filtering.
+
+        Supports:
+        - optional attribute column selection
+        - optional where_clause
+        - optional bbox filter
+        - SQL-level LIMIT / OFFSET
         """
         try:
             if not self.data_model or self.data_model.code != DataModel.V.name:
@@ -406,44 +420,75 @@ class LayerInfo(DBBase):
             if engine is None:
                 return GeoDataFrame()
 
-            g_col = access.geometry_col
+            g_col = g_col or access.geometry_col
             if not g_col or not access.table_name:
                 return GeoDataFrame()
 
             srid = self.srid or 4326
 
-            cols = set(access.pk_cols or [])
-            cols.update(
-                c for c in (access.cols_name or [])
-                if c and c.lower() not in {"extent", g_col.lower(), "geojson", "geom", "geometry"}
-            )
+            if not cols:
+                pk_cols = access.pk_cols or []
+                cols = list(pk_cols) + [
+                    c for c in (access.cols_name or [])
+                    if c and c.lower() not in {
+                        "extent",
+                        g_col.lower(),
+                        "geojson",
+                        "geom",
+                        "geometry",
+                    }
+                ]
 
-            select_cols = ", ".join(f'"{c}"' for c in cols) if cols else ""
-            if select_cols:
-                sql = f'SELECT "{g_col}", {select_cols} FROM {access.table_name}'
+            seen = set()
+            cols = [c for c in cols if c and not (c in seen or seen.add(c))]
+
+            safe_table = DBQuery.safe_ident(access.table_name)
+            safe_geom = DBQuery.safe_ident(g_col)
+
+            if cols:
+                safe_cols = ", ".join(DBQuery.safe_ident(c) for c in cols)
+                sql = f"SELECT {safe_geom}, {safe_cols} FROM {safe_table}"
             else:
-                sql = f'SELECT "{g_col}" FROM {access.table_name}'
+                sql = f"SELECT {safe_geom} FROM {safe_table}"
 
             where_clauses = []
+
             if where_clause:
-                where_clauses.append(f"({where_clause})")
+                clean_where = where_clause.strip()
+                if clean_where.lower().startswith("where"):
+                    clean_where = clean_where[5:].strip()
+                if clean_where:
+                    where_clauses.append(f"({clean_where})")
 
             is_postgres = engine.dialect.name == "postgresql"
 
-            if is_postgres and extent_3857 and isinstance(extent_3857, (tuple, list)) and len(extent_3857) == 4:
+            if (
+                    is_postgres
+                    and extent_3857
+                    and isinstance(extent_3857, (tuple, list))
+                    and len(extent_3857) == 4
+            ):
                 minx, miny, maxx, maxy = extent_3857
                 where_clauses.append(
-                    f'''ST_Intersects(
-                            "{g_col}",
-                            ST_Transform(
-                                ST_SetSRID(ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}), 3857),
-                                {srid}
-                            )
-                        )'''
+                    f"""
+                    ST_Intersects(
+                        {safe_geom},
+                        ST_Transform(
+                            ST_SetSRID(ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}), 3857),
+                            {srid}
+                        )
+                    )
+                    """.strip()
                 )
 
             if where_clauses:
                 sql += " WHERE " + " AND ".join(where_clauses)
+
+            if limit is not None and limit >= 0:
+                sql += f" LIMIT {int(limit)}"
+
+            if offset and offset > 0:
+                sql += f" OFFSET {int(offset)}"
 
             with Session(engine) as session:
                 gdf = DBQuery.execute_query_as_gdf(
@@ -453,34 +498,120 @@ class LayerInfo(DBBase):
                     crs=f"EPSG:{srid}"
                 )
 
-            if (not is_postgres) and extent_3857 and not gdf.empty:
-                from shapely.geometry import box
-
-                bbox = box(*extent_3857)
-                src_crs = gdf.crs
-                gdf_3857 = gdf.to_crs(epsg=3857)
-                gdf_3857 = gdf_3857[gdf_3857.geometry.intersects(bbox)]
-                gdf = gdf_3857.to_crs(src_crs) if src_crs else gdf_3857
-
             return gdf
 
         except Exception as e:
             da_logger.exception(f"Failed to load layer GDF for {self.layer_name}: {e}")
             return GeoDataFrame()
 
-    def to_layer_df(self, cols=(), where_clause=None) -> pd.DataFrame:
+    def count_layer_rows(
+            self,
+            where_clause: str | None = None,
+            extent_3857=None,
+            g_col: str | None = None,
+    ) -> int:
+        """
+        Return row/feature count for a vector DB layer.
+        Supports optional where_clause and bbox filtering.
+        """
+        try:
+            if not self.data_model or self.data_model.code != DataModel.V.name:
+                return 0
+
+            access = self.layer_accessibility
+            if not access or not access.accessibility_type:
+                return 0
+
+            if access.accessibility_type.code != AccessibilityType.DB.name:
+                return 0
+
+            engine = access.get_external_engine()
+            if engine is None or not access.table_name:
+                return 0
+
+            g_col = g_col or access.geometry_col
+            srid = self.srid or 4326
+            safe_table = DBQuery.safe_ident(access.table_name)
+
+            sql = f"SELECT COUNT(*) FROM {safe_table}"
+            where_clauses: list[str] = []
+
+            if where_clause:
+                clean_where = where_clause.strip()
+                if clean_where.lower().startswith("where"):
+                    clean_where = clean_where[5:].strip()
+                if clean_where:
+                    where_clauses.append(f"({clean_where})")
+
+            is_postgres = engine.dialect.name == "postgresql"
+
+            if (
+                    is_postgres
+                    and g_col
+                    and extent_3857
+                    and isinstance(extent_3857, (tuple, list))
+                    and len(extent_3857) == 4
+            ):
+                minx, miny, maxx, maxy = extent_3857
+                safe_geom = DBQuery.safe_ident(g_col)
+                where_clauses.append(
+                    f"""
+                    ST_Intersects(
+                        {safe_geom},
+                        ST_Transform(
+                            ST_SetSRID(ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}), 3857),
+                            {srid}
+                        )
+                    )
+                    """.strip()
+                )
+
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+
+            with Session(engine) as session:
+                result = session.execute(text(sql)).scalar_one()
+
+            return int(result or 0)
+
+        except Exception as e:
+            da_logger.exception(f"Error counting rows for layer {self.layer_name}: {e}")
+            return 0
+
+    def to_layer_df(
+            self,
+            cols=(),
+            where_clause: str | None = None,
+            limit: int = -1,
+            offset: int = 0,
+    ) -> pd.DataFrame:
         """
         Returns a DataFrame for:
         - Vector layers backed by DB tables
         - Raster layers backed by file access
+
+        Parameters
+        ----------
+        cols : iterable
+            Columns to select for vector layers.
+        where_clause : str | None
+            Optional SQL WHERE clause.
+            Can be:
+                "dist_id = 1"
+            or:
+                "WHERE dist_id = 1"
+        limit : int
+            -1 means no LIMIT (fetch all rows)
+        offset : int
+            SQL OFFSET value
         """
         try:
             if not self.data_model:
                 return pd.DataFrame()
 
-            # ---------------------------
-            # Vector (DB table)
-            # ---------------------------
+            # -------------------------------------------------
+            # Vector layer backed by DB
+            # -------------------------------------------------
             if self.data_model.code == DataModel.V.name:
                 access = self.layer_accessibility
                 if not access or not access.accessibility_type:
@@ -493,44 +624,53 @@ class LayerInfo(DBBase):
                 if engine is None or not access.table_name:
                     return pd.DataFrame()
 
+                # Default selected columns
                 if not cols:
                     pk_cols = access.pk_cols or []
                     cols = list(pk_cols) + [
                         info["name"]
                         for info in ((access.params or {}).get("columns") or [])
                         if info.get("name")
-                        and info["name"].lower() not in {
-                            "extent",
-                            (access.geometry_col or "").lower(),
-                            "geojson",
-                            "geom",
-                            "geometry",
-                        }
+                           and info["name"].lower() not in {
+                               "extent",
+                               (access.geometry_col or "").lower(),
+                               "geojson",
+                               "geom",
+                               "geometry",
+                           }
                     ]
 
-                # de-duplicate while preserving order
+                # De-duplicate while preserving order
                 seen = set()
                 cols = [c for c in cols if c and not (c in seen or seen.add(c))]
 
                 if not cols:
                     return pd.DataFrame()
 
-                select_cols = ", ".join(f'"{c}"' for c in cols)
-                sql = f'SELECT {select_cols} FROM {access.table_name}'
+                safe_table = DBQuery.safe_ident(access.table_name)
+                select_cols = ", ".join(DBQuery.safe_ident(c) for c in cols)
+                sql = f"SELECT {select_cols} FROM {safe_table}"
 
                 if where_clause:
+                    clean_where = where_clause.strip()
                     sql += (
-                        f" {where_clause}"
-                        if where_clause.strip().lower().startswith("where")
-                        else f" WHERE {where_clause}"
+                        f" {clean_where}"
+                        if clean_where.lower().startswith("where")
+                        else f" WHERE {clean_where}"
                     )
+
+                if limit is not None and limit >= 0:
+                    sql += f" LIMIT {int(limit)}"
+
+                if offset and offset > 0:
+                    sql += f" OFFSET {int(offset)}"
 
                 with Session(engine) as session:
                     return DBQuery.execute_stmt_as_df(session, sql)
 
-            # ---------------------------
-            # Raster (file)
-            # ---------------------------
+            # -------------------------------------------------
+            # Raster layer backed by file
+            # -------------------------------------------------
             if self.data_model.code == DataModel.R.name:
                 raster = self.to_raster()
                 if raster is None:
