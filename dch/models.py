@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 from sqlalchemy import Column, func, select, Engine, text
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import mapped_column, Mapped, relationship, Session, selectinload
 from sqlalchemy_utils import ChoiceType
 from app.damapql.dch.api_enum import AccessibilityType, DataModel, ModelType
@@ -136,6 +137,7 @@ class DBConnection(DBBase):
         # self.params["password"] = CryptoUtils().decrypt_txt(self.params["password"])
         return ExternalEngineRegistry.get(self.name, self.params.copy())
 
+
 class LayerAccessibility(DBBase):
     __tablename__ = "dch_layer_accessibility"
 
@@ -144,30 +146,52 @@ class LayerAccessibility(DBBase):
         ChoiceType(AccessibilityType.choices(), impl=db.VARCHAR(50)),
         nullable=False
     )
-    # accessibility_type = Column(SA_Enum(AccessibilityType), nullable=False)
     params = Column(db.JSON, nullable=False)
-    layer_info: Mapped["LayerInfo"] = relationship(back_populates="layer_accessibility")
+
+    layer_info: Mapped["LayerInfo"] = relationship(
+        back_populates="layer_accessibility"
+    )
 
     __pydantic__ = LayerAccessibilityType
 
+
     @property
     def file_path(self) -> str | None:
-        fp = (self.params or {}).get("file_path")
+        params = self.params or {}
+        fp = params.get("file_path")
         if not fp:
             return None
 
-        if (self.params or {}).get("is_path_media_rel", False):
-            fp = os.path.join(DCH_MEDIA_DIR, fp)
+        fp = str(fp).strip()
+        if not fp:
+            return None
 
+        # keep S3/object-store paths unchanged
+        if fp.startswith("s3://"):
+            return fp
+
+        # keep absolute local paths unchanged
+        if os.path.isabs(fp):
+            return fp
+
+        is_media_rel = params.get("is_path_media_rel", False)
+        if isinstance(is_media_rel, str):
+            is_media_rel = is_media_rel.strip().lower() in {"true", "1", "yes", "y"}
+
+        # join only when path is relative and explicitly marked media-relative
+        if is_media_rel:
+            return os.path.join(DCH_MEDIA_DIR, fp)
+
+        # plain relative path, leave unchanged
         return fp
 
     @classmethod
     def create_db_accessibility(
-            cls,
-            table_name: str,
-            db_conn: Union["DBConnection", str],
-            columns: dict,
-            pk_cols: list
+        cls,
+        table_name: str,
+        db_conn: Union["DBConnection", str],
+        columns: dict,
+        pk_cols: list
     ):
         cols = []
         g_col = None
@@ -193,8 +217,8 @@ class LayerAccessibility(DBBase):
 
         with cls.managed_session() as session:
             stmt = select(cls).filter(
-                cls.params.op("->>")("conn_name") == conn_name,
-                cls.params.op("->>")("table_name") == table_name
+                cls.conn_name == conn_name,
+                cls.table_name == table_name,
             )
 
             la = session.execute(stmt).scalars().first()
@@ -213,9 +237,21 @@ class LayerAccessibility(DBBase):
             session.refresh(la)
             return la
 
-    @property
-    def table_name(self):
+    @hybrid_property
+    def table_name(self) -> str | None:
         return (self.params or {}).get("table_name")
+
+    @table_name.expression
+    def table_name(cls):
+        return cls.params.op("->>")("table_name")
+
+    @hybrid_property
+    def conn_name(self) -> str | None:
+        return (self.params or {}).get("conn_name")
+
+    @conn_name.expression
+    def conn_name(cls):
+        return cls.params.op("->>")("conn_name")
 
     @property
     def pk_cols(self):
@@ -236,10 +272,13 @@ class LayerAccessibility(DBBase):
         return (self.params or {}).get("g_col")
 
     def get_external_engine(self):
-        if not self.accessibility_type or self.accessibility_type.code != AccessibilityType.DB.name:
+        if (
+            not self.accessibility_type
+            or self.accessibility_type.code != AccessibilityType.DB.name
+        ):
             return None
 
-        conn_name = (self.params or {}).get("conn_name")
+        conn_name = self.conn_name
         if not conn_name:
             return None
 
@@ -276,6 +315,21 @@ class LayerAccessibility(DBBase):
         # we can pass allow_update=True because we know our intent.
         return la.save(allow_update=True)
 
+    @hybrid_property
+    def url(self) -> str | None:
+        return (self.params or {}).get("url")
+
+    @url.expression
+    def url(cls):
+        return cls.params.op("->>")("url")
+
+    @hybrid_property
+    def url_type(self) -> str | None:
+        return (self.params or {}).get("url_type")
+
+    @url_type.expression
+    def url_type(cls):
+        return cls.params.op("->>")("url_type")
 
 class LayerQualityLevel(DBBase):
     __tablename__ = "dch_quality_level"

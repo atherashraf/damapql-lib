@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.dch.api_enum import AccessibilityType, DataModel
-from app.damapql.dch.models import LayerInfo, LayerCategory, DBQuery
+from app.damapql.dch.models import LayerInfo, LayerCategory, DBQuery, LayerAccessibility
 
 # Supported lookup modes for resolving a layer.
 LayerLookupBy = Literal["uuid", "layer_name", "table_name"]
@@ -29,46 +29,77 @@ class LayerQueryService:
       so they must NOT be eager loaded with selectinload().
     """
 
+    # @staticmethod
+    # def get_layer_info(identifier: str, by: LayerLookupBy = "uuid") -> LayerInfo:
+    #     """
+    #     Fetch a single layer by uuid, layer_name, or table_name.
+    #     """
+    #     with LayerInfo.managed_session() as session:
+    #         stmt = (
+    #             select(LayerInfo)
+    #             .options(
+    #                 # Only real relationships should be eager-loaded.
+    #                 selectinload(LayerInfo.layer_accessibility),
+    #                 selectinload(LayerInfo.layer_category),
+    #                 selectinload(LayerInfo.quality_level),
+    #             )
+    #         )
+    #
+    #         if by == "uuid":
+    #             stmt = stmt.where(LayerInfo.uuid == identifier)
+    #
+    #         elif by == "layer_name":
+    #             stmt = stmt.where(LayerInfo.layer_name == identifier)
+    #
+    #         elif by == "table_name":
+    #             stmt = stmt.where(
+    #                 LayerInfo.layer_accessibility.has(table_name=identifier)
+    #             )
+    #
+    #         else:
+    #             raise HTTPException(
+    #                 status_code=400,
+    #                 detail=f"Unsupported lookup type: {by}",
+    #             )
+    #
+    #         info = session.execute(stmt).scalar_one_or_none()
+    #
+    #     if not info:
+    #         raise HTTPException(
+    #             status_code=404,
+    #             detail=f"Layer not found: {identifier}",
+    #         )
+    #
+    #     return info
+
+    from sqlalchemy.orm import selectinload
+
     @staticmethod
-    def get_layer_info(identifier: str, by: LayerLookupBy = "uuid") -> LayerInfo:
-        """
-        Fetch a single layer by uuid, layer_name, or table_name.
-        """
-        with LayerInfo.managed_session() as session:
-            stmt = (
-                select(LayerInfo)
-                .options(
-                    # Only real relationships should be eager-loaded.
-                    selectinload(LayerInfo.layer_accessibility),
-                    selectinload(LayerInfo.layer_category),
-                    selectinload(LayerInfo.quality_level),
-                )
+    def get_layer_info(identifier: str, by: str):
+        with LayerInfo.managed_session() as db:
+            query = db.query(LayerInfo).options(
+                selectinload(LayerInfo.layer_accessibility)
             )
 
-            if by == "uuid":
-                stmt = stmt.where(LayerInfo.uuid == identifier)
+            if by == "table_name":
+                query = (
+                    query.join(LayerInfo.layer_accessibility)
+                    .filter(LayerAccessibility.table_name == identifier)
+                )
 
             elif by == "layer_name":
-                stmt = stmt.where(LayerInfo.layer_name == identifier)
+                query = query.filter(LayerInfo.layer_name == identifier)
 
-            elif by == "table_name":
-                stmt = stmt.where(
-                    LayerInfo.layer_accessibility.has(table_name=identifier)
-                )
+            elif by == "uuid":
+                query = query.filter(LayerInfo.uuid == identifier)
 
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported lookup type: {by}",
-                )
+                raise ValueError(f"Invalid lookup type: {by}")
 
-            info = session.execute(stmt).scalar_one_or_none()
+            info = query.first()
 
-        if not info:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Layer not found: {identifier}",
-            )
+            if not info:
+                raise ValueError(f"Layer not found: {identifier}")
 
         return info
 
@@ -419,7 +450,7 @@ class LayerQueryService:
 
         if field_name not in allowed_cols:
             raise HTTPException(status_code=400, detail="Invalid field name")
-
+        # pk_cols = info.layer_accessibility.pk_cols
         df = info.to_layer_df(
             cols=[field_name],
             where_clause=where_clause,

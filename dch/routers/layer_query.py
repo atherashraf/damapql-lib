@@ -162,7 +162,11 @@ def get_distinct_values(
     col_name: str = Query(..., description="Column name to fetch unique values for"),
     by: LayerLookupBy = Query(default="uuid"),
     where_clause: str | None = Query(default=None),
-    limit: int = Query(default=500, ge=1, le=5000),
+    limit: int = Query(
+        default=500,
+        le=5000,
+        description="Max values to return. Use -1 for all."
+    ),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
@@ -176,7 +180,7 @@ def get_distinct_values(
     - by: lookup type
     - col_name: column to fetch distinct values
     - where_clause (optional): SQL filter
-    - limit: max values (default 500)
+    - limit: max values (default 5000) -1 mean all
 
     Example:
     - Get tehsils of district 1:

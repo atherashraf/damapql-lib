@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, date
 from typing import Optional, Dict, Any, List, Union, Literal
 
@@ -50,33 +51,139 @@ class LayerCategoryType(BaseModel):
     sub: Optional[str]
     model_config = ConfigDict(from_attributes=True)
 
+class LayerColumnParam(BaseModel):
+    name: str
+    d_type: Optional[str] = None
+
+
+class DBAccessibilityParams(BaseModel):
+    conn_name: str
+    table_name: str
+    columns: List[LayerColumnParam] = []
+    g_col: Optional[str] = None
+    pk_cols: List[str] = []
+
+
+class URLAccessibilityParams(BaseModel):
+    url_type: Optional[str] = None
+    url: Optional[str] = None
+
+
+class FileAccessibilityParams(BaseModel):
+    file_path: str
+    is_path_media_rel: bool = False
+
+    @field_validator("is_path_media_rel", mode="before")
+    @classmethod
+    def parse_bool(cls, v):
+        if isinstance(v, bool):
+            return v
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return v.strip().lower() in {"true", "1", "yes", "y"}
+        return bool(v)
+
+    @property
+    def is_s3(self) -> bool:
+        return self.file_path.startswith("s3://")
+
+    @property
+    def is_absolute_local(self) -> bool:
+        if self.is_s3:
+            return False
+        return os.path.isabs(self.file_path)
+
+    @property
+    def is_media_relative(self) -> bool:
+        return (not self.is_s3) and (not self.is_absolute_local) and self.is_path_media_rel
+
+    def resolve_file_path(self, media_dir: str) -> str:
+        """
+        Returns a usable path string.
+
+        Rules:
+        - s3://... stays unchanged
+        - absolute local path stays unchanged
+        - relative path + is_path_media_rel=True => join with media_dir
+        - other relative path stays unchanged
+        """
+        fp = self.file_path
+        if not fp:
+            return fp
+
+        if self.is_s3:
+            return fp
+
+        if os.path.isabs(fp):
+            return fp
+
+        if self.is_path_media_rel:
+            return os.path.join(media_dir, fp)
+
+        return fp
+
+class LayerAccessibilityType(BaseModel):
+    id: int
+    accessibility_type: Optional[str]
+    params: Union[
+        DBAccessibilityParams,
+        URLAccessibilityParams,
+        FileAccessibilityParams,
+        Dict[str, Any],
+    ]
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("accessibility_type", mode="before")
+    @classmethod
+    def _coerce_choice(cls, v):
+        if v is None:
+            return None
+
+        code = getattr(v, "code", None)
+        if code is not None:
+            return code
+
+        name = getattr(v, "name", None)
+        if name is not None:
+            return name
+
+        return str(v)
+
+    @field_validator("params", mode="before")
+    @classmethod
+    def _coerce_params(cls, v, info):
+        if not isinstance(v, dict):
+            return v
+
+        data = info.data or {}
+        acc_type = data.get("accessibility_type")
+
+        if hasattr(acc_type, "code"):
+            acc_type = acc_type.code
+        elif hasattr(acc_type, "name"):
+            acc_type = acc_type.name
+        elif acc_type is not None:
+            acc_type = str(acc_type)
+
+        if acc_type == "DB":
+            return DBAccessibilityParams(**v)
+
+        if acc_type == "URL":
+            return URLAccessibilityParams(**v)
+
+        # file-like payloads
+        if "file_path" in v:
+            return FileAccessibilityParams(**v)
+
+        return v
 
 # class LayerAccessibilityType(BaseModel):
 #     id: int
 #     accessibility_type: Optional[str]
 #     params: Dict[str, Any]
 #     model_config = ConfigDict(from_attributes=True)
-
-class LayerAccessibilityType(BaseModel):
-    id: int
-    accessibility_type: Optional[str]  # we want a string in the API
-    params: Dict[str, Any]
-    model_config = ConfigDict(from_attributes=True)
-
-    # Accept sqlalchemy_utils.Choice and coerce it to a string (prefer .code)
-    @field_validator("accessibility_type", mode="before")
-    @classmethod
-    def _coerce_choice(cls, v):
-        if v is None:
-            return None
-        # sqlalchemy_utils Choice has .code and .value
-        code = getattr(v, "code", None)
-        if code is not None:
-            return code
-        name = getattr(v, "name", None)  # if you ever pass Enum
-        if name is not None:
-            return name
-        return str(v)
 
 
 class LayerQualityLevelType(BaseModel):
