@@ -553,7 +553,7 @@ async def save_layer_info(
                         value = DataModel.get_name(value)
                     setattr(obj, key, value)
 
-            obj.save(session=session, allow_update=True)
+            obj.save(session=session)
 
         return {"payload": {"status": "success", "updated": row_data}}
 

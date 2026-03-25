@@ -92,6 +92,7 @@ from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.auth.models import Profile, User, Role, Department, Organization
 from app.damapql.auth.dtypes import EmailValidator
 from app.damapql.settings import DCH_DATABASES
+from app.damapql.utils.helper_scripts.table_schema_update import TableSchemaUpdater
 from settings import DA_APPS, BASE_DIR, DATABASES
 
 manage_router = APIRouter(
@@ -315,49 +316,40 @@ def startapp(app_label: str):
 
 # --- SCHEMA & MIGRATIONS ---
 
-def sync_schema(app_label: str):
-    """Adds missing columns to existing tables using ALTER TABLE."""
+def sync_schema(app_label: str, rename_map: dict | None = None):
+    """
+    rename_map format:
+    {
+        "table_name": {
+            "old_col_name": "new_col_name"
+        }
+    }
+    """
+    rename_map = rename_map or {}
+
     ap = DA_APPS.get(app_label)
     if not ap:
         print(f"❌ App label '{app_label}' not found.")
         return
 
     importlib.import_module(f'{ap["path"]}.models')
-    engine = DBBase.get_engine(app_label=app_label)
-    inspector = inspect(engine)
 
-    app_tables = [t for name, t in metadata_obj.tables.items() if name.startswith(app_label)]
+    if "base" not in ap:
+        BaseCls = DBBase
+    else:
+        BaseCls = import_string(ap["base"]) if isinstance(ap["base"], str) else ap["base"]
+
+    engine = BaseCls.get_engine(db_key=ap["db_key"])
+    da_logger.info(engine)
+
+    updater = TableSchemaUpdater(engine=engine, logger=da_logger)
+
+    app_tables = [t for _, t in BaseCls.metadata.tables.items()]
+    da_logger.info(f"table_names {app_tables}")
 
     for table_obj in app_tables:
-        table_name = table_obj.name
-
-        if table_name not in inspector.get_table_names():
-            table_obj.create(engine)
-            print(f"📦 Created new table: {table_name}")
-            continue
-
-        existing_cols = {c['name'] for c in inspector.get_columns(table_name)}
-
-        for column in table_obj.columns:
-            if column.name not in existing_cols:
-                if engine.dialect.name == 'sqlite' and hasattr(column.type, 'item_type'):
-                    print(f"⚠️ Skipping Array column {column.name} - Not supported in SQLite")
-                    continue
-
-                # Standard compilation matches the 'migrate' (create_all) behavior
-                # Typically varchar(255) for ChoiceType unless 'impl' is set in models.py
-                col_type = column.type.compile(engine.dialect)
-                null_stmt = "NULL" if column.nullable else "NOT NULL"
-
-                default_val = ""
-                if column.server_default:
-                    default_val = f"DEFAULT {column.server_default.arg.text}"
-
-                alter_cmd = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type} {null_stmt} {default_val}'
-
-                with engine.begin() as conn:
-                    conn.execute(text(alter_cmd))
-                print(f"✨ Added column [{column.name}] (Type: {type(column.type).__name__}) to {table_name}")
+        table_rename_map = rename_map.get(table_obj.name, {})
+        updater.sync_table(table_obj, rename_map=table_rename_map)
 
     print(f"✅ Schema sync for '{app_label}' complete.")
 
@@ -371,6 +363,7 @@ def import_string(dotted_path: str):
 def migrate(app_label: str):
     ap = DA_APPS.get(app_label)
     if not ap:
+        raise Exception(f"the app {app_label} does not exist")
         return
 
     importlib.import_module(f'{ap["path"]}.models')
@@ -378,7 +371,7 @@ def migrate(app_label: str):
     if "base" not in ap:
         BaseCls = DBBase
     else:
-        BaseCls = import_string(ap["base"])
+        BaseCls = import_string(ap["base"]) if isinstance(ap["base"], str) else ap["base"]
 
     engine = BaseCls.get_engine(db_key=ap['db_key'])
 

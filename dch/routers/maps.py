@@ -33,6 +33,7 @@ def require_dch_admin(current_user: UserInfo):
     summary="Get All Layer Info"
 )
 async def get_all_layer_info(current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+    require_dch_admin(current_user)
     with LayerInfo.managed_session() as session:
         category_label = case(
             (LayerCategory.sub.is_(None), LayerCategory.main),
@@ -61,8 +62,27 @@ async def get_all_layer_info(current_user: UserInfo = Depends(AuthUtils.get_curr
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
         )
 
-        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model"])
 
+        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model"])
+        # enforce exact order from select list
+        column_order = [
+            "id",
+            "uuid",
+            "title",
+            "layer_name",
+            "category",
+            "table_name",
+            "srid",
+            "extent",
+            "extent_3857",
+            "data_model",
+            "geom_type",
+            "zoom_range",
+            "layer_styling",
+            "data_url",
+            "date_range_url",
+        ]
+        df = df[column_order]
     return ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])
 
 @dch_maps_router.get("/all_map_info/")

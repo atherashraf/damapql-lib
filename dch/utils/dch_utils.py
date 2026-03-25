@@ -8,6 +8,8 @@ from typing import Optional, Union
 
 import lxml.etree as ET
 from digitalarzengine.utils.singletons import da_logger
+from geopandas import GeoDataFrame
+from shapely.geometry import box
 from sqlalchemy import inspect, select
 from sqlalchemy.engine import Engine
 
@@ -16,7 +18,7 @@ from app.damapql.dch.models import LayerInfo, LayerAccessibility, DBConnection
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.services.spatial_db import SpatialDB
 from app.damapql.utils.adapters.services.db_query import DBQuery
-
+from settings import DEFAULT_EXTENT, DEFAULT_SRID
 
 
 class DCHUtils:
@@ -165,6 +167,39 @@ class DCHUtils:
             da_logger.exception(f"ERROR resolving DB connection: {str(e)}")
             return None
 
+    @staticmethod
+    def _transform_extent(extent, from_srid, to_srid):
+        """
+        Transform extent [minx, miny, maxx, maxy] from one SRID to another.
+        Returns the original extent if transformation fails.
+        """
+        try:
+            if not extent or len(extent) != 4:
+                da_logger.warning(f"Invalid extent for transformation: {extent}")
+                return extent
+
+            if from_srid in (None, 0, -1):
+                da_logger.warning(f"Invalid source SRID for extent transform: {from_srid}")
+                return extent
+
+            if to_srid in (None, 0, -1):
+                da_logger.warning(f"Invalid target SRID for extent transform: {to_srid}")
+                return extent
+
+            if int(from_srid) == int(to_srid):
+                return list(extent)
+
+            geom = box(*extent)
+            gdf = GeoDataFrame(geometry=[geom], crs=f"EPSG:{int(from_srid)}")
+            gdf = gdf.to_crs(epsg=int(to_srid))
+            return gdf.total_bounds.tolist()
+
+        except Exception as e:
+            da_logger.warning(
+                f"Extent transform failed from EPSG:{from_srid} to EPSG:{to_srid}: {e}"
+            )
+            return list(extent) if extent else extent
+
     @classmethod
     def create_vector_layer_info(
             cls,
@@ -224,7 +259,6 @@ class DCHUtils:
                     stmt = f'ALTER TABLE {quoted_table} ADD COLUMN "dch_id" SERIAL PRIMARY KEY'
                     spatial_db.execute_ddl(stmt)
                 else:
-                    # Only add PK if table has no PK already
                     stmt = f'ALTER TABLE {quoted_table} ADD PRIMARY KEY ("dch_id")'
                     spatial_db.execute_ddl(stmt)
 
@@ -246,8 +280,11 @@ class DCHUtils:
                     srid = spatial_db.get_geom_srid(table_name, geom_col.name)
 
             if srid in (-1, 0, None):
-                da_logger.error(f"Could not determine SRID for {table_name}.{geom_col.name}")
-                return False
+                da_logger.warning(
+                    f"Could not determine SRID for {table_name}.{geom_col.name}. "
+                    f"Using DEFAULT_SRID={DEFAULT_SRID}"
+                )
+                srid = DEFAULT_SRID
 
             query = f"SELECT * FROM {quoted_table}"
             gdf = spatial_db.execute_query_as_gdf(
@@ -255,10 +292,6 @@ class DCHUtils:
                 geom_col=geom_col.name,
                 srid=srid,
             )
-
-            if gdf.empty:
-                da_logger.error(f"Table {table_name} returned no rows.")
-                return False
 
             # Build layer name safely
             if uuid in table_name and "_" in table_name:
@@ -296,26 +329,65 @@ class DCHUtils:
             lf.category_id = int(layer_category_id) if layer_category_id is not None else None
             lf.quality_level_id = 5
 
-            try:
-                lf.srid = int(gdf.crs.to_epsg()) if gdf.crs and gdf.crs.to_epsg() else int(srid)
-            except Exception:
-                lf.srid = int(srid)
+            if gdf.empty:
+                da_logger.warning(
+                    f"Table {table_name} returned no rows. "
+                    f"Using DEFAULT_EXTENT transformed to SRID={srid}"
+                )
 
-            try:
-                lf.proj4 = gdf.crs.to_proj4() if gdf.crs else None
-            except Exception:
+                lf.srid = int(srid or DEFAULT_SRID)
                 lf.proj4 = None
 
-            lf.extent = gdf.total_bounds.tolist()
+                lf.extent = cls._transform_extent(
+                    DEFAULT_EXTENT,
+                    DEFAULT_SRID,
+                    lf.srid
+                )
 
-            try:
-                lf.extent_3857 = gdf.to_crs(crs=3857).total_bounds.tolist()
-            except Exception:
-                lf.extent_3857 = None
+                lf.extent_3857 = cls._transform_extent(
+                    DEFAULT_EXTENT,
+                    DEFAULT_SRID,
+                    3857
+                )
+
+                lf.geom_type = []
+
+            else:
+                try:
+                    lf.srid = int(gdf.crs.to_epsg()) if gdf.crs and gdf.crs.to_epsg() else int(srid)
+                except Exception:
+                    lf.srid = int(srid or DEFAULT_SRID)
+
+                try:
+                    lf.proj4 = gdf.crs.to_proj4() if gdf.crs else None
+                except Exception:
+                    lf.proj4 = None
+
+                try:
+                    lf.extent = gdf.total_bounds.tolist()
+                except Exception:
+                    lf.extent = cls._transform_extent(
+                        DEFAULT_EXTENT,
+                        DEFAULT_SRID,
+                        lf.srid
+                    )
+
+                try:
+                    lf.extent_3857 = gdf.to_crs(crs=3857).total_bounds.tolist()
+                except Exception:
+                    lf.extent_3857 = cls._transform_extent(
+                        DEFAULT_EXTENT,
+                        DEFAULT_SRID,
+                        3857
+                    )
+
+                try:
+                    lf.geom_type = list(set(gdf.geom_type.tolist()))
+                except Exception:
+                    lf.geom_type = []
 
             lf.data_model = DataModel.V.name
             lf.model_type = ModelType.Geom.name
-            lf.geom_type = list(set(gdf.geom_type.tolist()))
             lf.uploaded_by = cls._get_user_id(user)
 
             lf.save()

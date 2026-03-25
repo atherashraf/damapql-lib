@@ -543,12 +543,12 @@ class DCHVectorAppendService:
     # ------------------------------------------------------------------
 
     def prepare_gdf_for_append(
-        self,
-        gdf: gpd.GeoDataFrame,
-        final_mapping: Dict[str, str],
-        target_schema: Dict[str, Any],
-        reproject_if_needed: bool = True,
-        extra_values: Optional[Dict[str, Any]] = None,
+            self,
+            gdf: gpd.GeoDataFrame,
+            final_mapping: Dict[str, str],
+            target_schema: Dict[str, Any],
+            reproject_if_needed: bool = True,
+            extra_values: Optional[Dict[str, Any]] = None,
     ) -> gpd.GeoDataFrame:
         extra_values = {k.lower(): v for k, v in (extra_values or {}).items()}
 
@@ -588,16 +588,36 @@ class DCHVectorAppendService:
         for col_name, value in extra_values.items():
             gdf[col_name] = value
 
+        # keep mapped columns + geometry column
+        geom_col = gdf.geometry.name
+        cols_to_keep = [c for c in final_mapping.values() if c in gdf.columns]
+
+        if geom_col in gdf.columns and geom_col not in cols_to_keep:
+            cols_to_keep.append(geom_col)
+
+        # also keep injected extra values if present
+        for col_name in extra_values:
+            if col_name in gdf.columns and col_name not in cols_to_keep:
+                cols_to_keep.append(col_name)
+
+        gdf = gdf[cols_to_keep].copy()
+
         target_geom_col = target_schema["geometry_column"]
+        source_geom_col = gdf.geometry.name
 
         allowed_columns = {
             col["name"]
             for col in target_schema["columns"]
             if col["name"] not in self.PROTECTED_COLUMNS
         }
-        allowed_columns.add("geom")
+        allowed_columns.add(source_geom_col)
 
         gdf = gdf[[c for c in gdf.columns if c in allowed_columns]].copy()
+
+        # rename geometry column to geom BEFORE final ordering
+        if source_geom_col != "geom":
+            gdf = gdf.rename(columns={source_geom_col: "geom"})
+            gdf = gdf.set_geometry("geom")
 
         ordered_target_columns = []
 

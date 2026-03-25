@@ -151,6 +151,13 @@ class LayerInfoType(BaseModel):
             pass
         return v
 
+    # @field_validator("layer_styling", "layer_setting", "extra_metadata", mode="before")
+    # @classmethod
+    # def empty_str_to_none_for_dict_fields(cls, v):
+    #     if v == "":
+    #         return None
+    #     return v
+
 
 class LayerItem(BaseModel):
     uuid: str

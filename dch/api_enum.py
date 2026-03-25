@@ -5,6 +5,13 @@ class APIEnum(str, Enum):
     def choices(cls):
         return [(e.name, e.value) for e in cls]
 
+    @classmethod
+    def get_name(cls, value):
+        for e in cls:
+            if e.value == value:
+                return e.name
+        raise ValueError(f"{value} is not a valid value for {cls.__name__}")
+
 
 class AccessibilityType(APIEnum):
     File = 'File'

@@ -288,7 +288,7 @@ def test_get_column_value(client, monkeypatch):
     )
 
     response = client.post(
-        "/dch/layer-query/district/column-value?by=layer_name",
+        "a/dch/layer-query/district/column-value?by=layer_name",
         json={"pk_values": ["1"], "col_name": "status"},
     )
     assert response.status_code == 200

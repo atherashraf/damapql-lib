@@ -103,7 +103,7 @@ async def save_style(
 
             if obj:
                 obj.layer_styling = layer_styling
-                obj.save(session=session, allow_update=True)
+                obj.save(session=session)
                 return {"payload": "Global Layer style saved successfully"}
 
     return Response(status_code=204)
