@@ -1,19 +1,103 @@
 import os
 import re
-import json
 import uuid
 import shutil
 from typing import Dict, List, Optional, Tuple, Any
 
 import geopandas as gpd
+import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-
 class DCHVectorAppendService:
     """
-    Service class for shapefile-to-existing-table append workflow.
+    Generic Shapefile → PostGIS Append Service
+
+    This service provides a fully schema-driven pipeline to append vector data
+    (GeoDataFrame) into an existing PostGIS table safely and consistently across
+    multiple applications (e.g., WASA, Pulse, SOS, Flood, DCH, etc.).
+
+    ------------------------------------------------------------------------
+    🔑 Core Principles
+    ------------------------------------------------------------------------
+
+    1. Schema-Driven (No Hardcoding)
+       - All behavior is derived from target table schema (nullable, defaults, geometry, SRID).
+       - No table-specific logic is required.
+
+    2. Database Defaults Are Respected
+       - Columns with server-side defaults are NOT inserted if missing.
+       - This allows PostgreSQL to apply defaults automatically.
+
+    3. No NULL Injection
+       - Missing optional columns are NEVER filled with None.
+       - Columns are omitted instead.
+
+    4. Strict Validation for Required Fields
+       - Columns that are NOT NULL and have NO default must be provided.
+       - Validation happens before insertion.
+
+    5. Safe Handling of Default Columns
+       - If a column has a DB default:
+            • All values NULL → column is dropped → DB default applies
+            • Partial NULL values → rejected (ambiguous behavior)
+            • No NULL values → inserted normally
+
+    6. Geometry + CRS Safety
+       - Validates geometry compatibility (Polygon → MultiPolygon, etc.)
+       - Reprojects source CRS to match target SRID if needed
+
+    7. Bulk Insert Compatible
+       - Designed for GeoPandas `.to_postgis()` (COPY-based inserts)
+       - Ensures compatibility with PostgreSQL COPY behavior
+
+    ------------------------------------------------------------------------
+    ⚠️ Important PostgreSQL Behavior
+    ------------------------------------------------------------------------
+
+    PostgreSQL applies DEFAULT values ONLY when a column is omitted.
+
+        INSERT INTO table (col1) VALUES (...)
+        → default applies to missing columns
+
+        INSERT INTO table (col1, col2) VALUES (..., NULL)
+        → default is NOT applied (NULL is used)
+
+    This service ensures correct omission of columns to trigger defaults.
+
+    ------------------------------------------------------------------------
+    🧠 Column Rules Summary
+    ------------------------------------------------------------------------
+
+        db_nullable | has_default | behavior
+        ------------------------------------------
+        False       | False       → REQUIRED (must provide)
+        False       | True        → OPTIONAL (omit if missing)
+        True        | any         → OPTIONAL
+
+    ------------------------------------------------------------------------
+    🚀 Supported Features
+    ------------------------------------------------------------------------
+
+    - Auto column mapping (name + normalized matching)
+    - CRS validation + reprojection
+    - Geometry promotion (Polygon → MultiPolygon)
+    - Protected column filtering (id, uuid, timestamps, etc.)
+    - Default-aware column omission
+    - Bulk append using GeoPandas
+
+    ------------------------------------------------------------------------
+    🧩 Intended Use
+    ------------------------------------------------------------------------
+
+    This service is designed to be reused across:
+        - Multi-tenant GIS systems
+        - Data ingestion pipelines
+        - Admin upload tools
+        - ETL workflows
+
+    ------------------------------------------------------------------------
     """
 
     PROTECTED_COLUMNS = {
@@ -41,6 +125,10 @@ class DCHVectorAppendService:
         if self.logger:
             self.logger.info(msg)
 
+    def log_debug(self, msg: str) -> None:
+        if self.logger:
+            self.logger.debug(msg)
+
     def log_exception(self, msg: str) -> None:
         if self.logger:
             self.logger.exception(msg)
@@ -54,6 +142,25 @@ class DCHVectorAppendService:
 
     def get_upload_dir(self, upload_id: str) -> str:
         return os.path.join(self.temp_append_dir, upload_id)
+
+    def normalize_object_columns(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """
+        Normalize blank strings in all non-geometry object/string columns to pd.NA.
+
+        Important because Postgres COPY may treat empty fields as NULL, while pandas
+        may still consider them non-null unless normalized first.
+        """
+        gdf = gdf.copy()
+
+        for col in gdf.columns:
+            if col == gdf.geometry.name:
+                continue
+
+            series = gdf[col]
+            if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+                gdf[col] = series.replace(r"^\s*$", pd.NA, regex=True)
+
+        return gdf
 
     # ------------------------------------------------------------------
     # Upload / file handling
@@ -148,6 +255,8 @@ class DCHVectorAppendService:
         if cols_to_drop:
             gdf = gdf.drop(columns=cols_to_drop)
 
+        gdf = self.normalize_object_columns(gdf)
+
         return gdf
 
     def get_source_schema(self, gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
@@ -200,12 +309,18 @@ class DCHVectorAppendService:
 
         for col in columns:
             col_name = col["name"].lower()
+            db_nullable = col.get("nullable", True)
+            default = col.get("default")
+            has_default = default is not None
 
             table_cols.append({
                 "name": col_name,
                 "type": str(col["type"]),
-                "nullable": col.get("nullable", True),
-                "default": str(col.get("default")) if col.get("default") is not None else None,
+                "nullable": db_nullable,  # real DB truth
+                "default": str(default) if default is not None else None,
+                "has_default": has_default,
+                "input_required": (db_nullable is False and has_default is False),
+                "frontend_optional": (db_nullable is True or has_default is True),
             })
 
             if col_name in self.COMMON_GEOM_NAMES:
@@ -286,13 +401,13 @@ class DCHVectorAppendService:
         return mapping
 
     def get_missing_required_target_columns(
-        self,
-        target_schema: Dict[str, Any],
-        final_mapping: Dict[str, str],
-        extra_values: Optional[Dict[str, Any]] = None,
+            self,
+            target_schema: Dict[str, Any],
+            final_mapping: Dict[str, str],  # target -> source
+            extra_values: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         extra_values = {k.lower(): v for k, v in (extra_values or {}).items()}
-        satisfied_targets = set(final_mapping.values()) | set(extra_values.keys())
+        satisfied_targets = set(k.lower() for k in final_mapping.keys()) | set(extra_values.keys())
         geom_col = target_schema["geometry_column"]
 
         missing_required = []
@@ -306,19 +421,17 @@ class DCHVectorAppendService:
             if col_name in self.PROTECTED_COLUMNS:
                 continue
 
-            is_required = (col["nullable"] is False) and (col["default"] is None)
-
-            if is_required and col_name not in satisfied_targets:
+            if col["input_required"] and col_name not in satisfied_targets:
                 missing_required.append(col_name)
 
         return missing_required
 
     def validate_final_mapping(
-        self,
-        final_mapping: Dict[str, str],
-        source_schema: Dict[str, Any],
-        target_schema: Dict[str, Any],
-        extra_values: Optional[Dict[str, Any]] = None,
+            self,
+            final_mapping: Dict[str, str],  # target -> source
+            source_schema: Dict[str, Any],
+            target_schema: Dict[str, Any],
+            extra_values: Optional[Dict[str, Any]] = None,
     ) -> None:
         extra_values = {k.lower(): v for k, v in (extra_values or {}).items()}
 
@@ -328,9 +441,9 @@ class DCHVectorAppendService:
 
         seen_targets = set()
 
-        for src, tgt in final_mapping.items():
-            src = src.lower()
+        for tgt, src in final_mapping.items():
             tgt = tgt.lower()
+            src = src.lower()
 
             if src not in source_columns:
                 raise HTTPException(status_code=400, detail=f"Invalid source column in mapping: {src}")
@@ -353,7 +466,7 @@ class DCHVectorAppendService:
             if tgt in seen_targets:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Multiple source columns mapped to same target column: {tgt}"
+                    detail=f"Duplicate mapping for target column: {tgt}"
                 )
 
             seen_targets.add(tgt)
@@ -449,6 +562,7 @@ class DCHVectorAppendService:
 
             return geom
 
+        gdf = gdf.copy()
         gdf["geom"] = gdf["geom"].apply(_to_multi)
         return gdf
 
@@ -464,17 +578,32 @@ class DCHVectorAppendService:
     ) -> Dict[str, Any]:
         source_schema = self.get_source_schema(gdf)
 
-        auto_mapping = self.suggest_column_mapping(
+        # auto_mapping = self.suggest_column_mapping(
+        #     source_columns=source_schema["columns"],
+        #     target_columns=target_schema["column_names"],
+        #     target_geometry_column=target_schema["geometry_column"],
+        # )
+
+        auto_mapping_src_to_tgt = self.suggest_column_mapping(
             source_columns=source_schema["columns"],
             target_columns=target_schema["column_names"],
             target_geometry_column=target_schema["geometry_column"],
         )
 
+        auto_mapping = {tgt: src for src, tgt in auto_mapping_src_to_tgt.items()}
+
+        # unmatched_source_columns = [
+        #     c for c in source_schema["columns"] if c not in auto_mapping
+        # ]
+
+        mapped_sources = set(auto_mapping.values())
+
         unmatched_source_columns = [
-            c for c in source_schema["columns"] if c not in auto_mapping
+            c for c in source_schema["columns"] if c not in mapped_sources
         ]
 
-        mapped_target_columns = set(auto_mapping.values()) | set((extra_values or {}).keys())
+        # mapped_target_columns = set(auto_mapping.values()) | set((extra_values or {}).keys())
+        mapped_target_columns = set(auto_mapping.keys()) | set((extra_values or {}).keys())
 
         missing_target_columns = []
         for col in target_schema["columns"]:
@@ -545,12 +674,14 @@ class DCHVectorAppendService:
     def prepare_gdf_for_append(
             self,
             gdf: gpd.GeoDataFrame,
-            final_mapping: Dict[str, str],
             target_schema: Dict[str, Any],
-            reproject_if_needed: bool = True,
+            final_mapping: Dict[str, str],  # target -> source
             extra_values: Optional[Dict[str, Any]] = None,
+            reproject_if_needed: bool = True,
     ) -> gpd.GeoDataFrame:
         extra_values = {k.lower(): v for k, v in (extra_values or {}).items()}
+        final_mapping = {k.lower(): v.lower() for k, v in (final_mapping or {}).items()}
+        gdf = gdf.copy()
 
         source_schema = self.get_source_schema(gdf)
         source_epsg = source_schema["epsg"]
@@ -583,41 +714,30 @@ class DCHVectorAppendService:
         if geom_check["promotion_needed"]:
             gdf = self.promote_geometry_if_needed(gdf, target_schema["geometry_type"])
 
-        gdf = gdf.rename(columns=final_mapping)
+        gdf = self.normalize_object_columns(gdf)
 
-        for col_name, value in extra_values.items():
-            gdf[col_name] = value
-
-        # keep mapped columns + geometry column
-        geom_col = gdf.geometry.name
-        cols_to_keep = [c for c in final_mapping.values() if c in gdf.columns]
-
-        if geom_col in gdf.columns and geom_col not in cols_to_keep:
-            cols_to_keep.append(geom_col)
-
-        # also keep injected extra values if present
-        for col_name in extra_values:
-            if col_name in gdf.columns and col_name not in cols_to_keep:
-                cols_to_keep.append(col_name)
-
-        gdf = gdf[cols_to_keep].copy()
-
-        target_geom_col = target_schema["geometry_column"]
         source_geom_col = gdf.geometry.name
+        target_geom_col = target_schema["geometry_column"]
 
-        allowed_columns = {
-            col["name"]
-            for col in target_schema["columns"]
-            if col["name"] not in self.PROTECTED_COLUMNS
-        }
-        allowed_columns.add(source_geom_col)
+        # Build as plain DataFrame first, then convert to GeoDataFrame
+        prepared = pd.DataFrame(index=gdf.index)
+        prepared["geom"] = gdf[source_geom_col].values
+        prepared = gpd.GeoDataFrame(prepared, geometry="geom", crs=gdf.crs)
 
-        gdf = gdf[[c for c in gdf.columns if c in allowed_columns]].copy()
+        # Copy mapped target columns from selected source columns
+        for target_col, source_col in final_mapping.items():
+            if source_col not in gdf.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Mapped source column '{source_col}' not found for target '{target_col}'"
+                )
+            prepared[target_col] = gdf[source_col].values
 
-        # rename geometry column to geom BEFORE final ordering
-        if source_geom_col != "geom":
-            gdf = gdf.rename(columns={source_geom_col: "geom"})
-            gdf = gdf.set_geometry("geom")
+        # Inject explicit values
+        for col_name, value in extra_values.items():
+            prepared[col_name] = value
+
+        prepared = self.normalize_object_columns(prepared)
 
         ordered_target_columns = []
 
@@ -631,51 +751,81 @@ class DCHVectorAppendService:
                 ordered_target_columns.append("geom")
                 continue
 
-            is_required = (col["nullable"] is False) and (col["default"] is None)
+            input_required = col["input_required"]
+            has_default = col["has_default"]
 
-            if col_name not in gdf.columns:
-                if is_required:
+            if col_name not in prepared.columns:
+                if input_required:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Required target column '{col_name}' has no mapped or injected value"
                     )
-                gdf[col_name] = None
+                continue
+
+            series = prepared[col_name]
+
+            if input_required and series.isna().any():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Required target column '{col_name}' contains null/blank values"
+                )
+
+            if has_default and series.isna().all():
+                prepared = prepared.drop(columns=[col_name])
+                self.log_debug(f"Dropping column '{col_name}' to allow DB default to apply")
+                continue
+
+            if has_default and series.isna().any():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Column '{col_name}' has partial null/blank values. "
+                        f"Target default only works when the whole column is omitted. "
+                        f"Please provide values for all rows or omit this column entirely."
+                    )
+                )
 
             ordered_target_columns.append(col_name)
 
-        gdf = gdf[[c for c in ordered_target_columns if c in gdf.columns]].copy()
+        prepared = prepared[[c for c in ordered_target_columns if c in prepared.columns]].copy()
 
-        if gdf.geometry.name != "geom":
-            gdf = gdf.set_geometry("geom")
+        if "geom" not in prepared.columns:
+            raise HTTPException(
+                status_code=400,
+                detail="Prepared data is missing geometry column 'geom'"
+            )
 
-        return gdf
+        prepared = gpd.GeoDataFrame(prepared, geometry="geom", crs=gdf.crs)
 
+        return prepared
     # ------------------------------------------------------------------
     # Append execution
     # ------------------------------------------------------------------
 
     def append_gdf_to_postgis(
-            self,
-            gdf: gpd.GeoDataFrame,
-            engine: Engine,
-            table_name: str,
-            schema: str = "public",
+        self,
+        gdf: gpd.GeoDataFrame,
+        engine: Engine,
+        table_name: str,
+        schema: str = "public",
     ) -> int:
         row_count = len(gdf)
 
         if row_count == 0:
             raise HTTPException(status_code=400, detail="No rows available to append")
 
-        # --- Drop dch_id to allow PostGIS SERIAL to handle it ---
+        gdf = gdf.copy()
+
         if "dch_id" in gdf.columns:
-            if self.logger:
-                self.logger.info("Removing 'dch_id' from GeoDataFrame to allow database auto-increment.")
+            self.log_info("Removing 'dch_id' from GeoDataFrame to allow database auto-increment.")
             gdf = gdf.drop(columns=["dch_id"])
 
-        if self.logger:
-            self.logger.info(f"Append columns: {list(gdf.columns)}")
-            self.logger.info(f"Append dtypes: {gdf.dtypes.astype(str).to_dict()}")
-        self.logger.debug(f"Engine {engine}")
+        gdf = self.normalize_object_columns(gdf)
+
+        self.log_info(f"Append columns: {list(gdf.columns)}")
+        self.log_info(f"Append dtypes: {gdf.dtypes.astype(str).to_dict()}")
+        self.log_debug(f"Engine {engine}")
+
         gdf.to_postgis(
             name=table_name,
             con=engine,

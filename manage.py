@@ -372,7 +372,7 @@ def migrate(app_label: str):
         BaseCls = DBBase
     else:
         BaseCls = import_string(ap["base"]) if isinstance(ap["base"], str) else ap["base"]
-
+    da_logger.info(f"{app_label} migrate using {BaseCls.__name__}")
     engine = BaseCls.get_engine(db_key=ap['db_key'])
 
     BaseCls.metadata.create_all(engine)

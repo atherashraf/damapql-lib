@@ -818,6 +818,7 @@ async def preview_append_shp(
         analysis["preview_geojson"] = preview_geojson
         analysis["preview_geojson_zip"] = preview_geojson_zip
 
+
         return {"payload": analysis}
 
     except HTTPException:
@@ -847,7 +848,7 @@ async def commit_append_shp(
       - upload_id
       - layer_uuid
       - dch_id
-      - final_mapping (JSON string: source -> target)
+      - final_mapping (JSON string: target -> source)
       - reproject_if_needed ("true"/"false")
 
     Protected endpoint.
