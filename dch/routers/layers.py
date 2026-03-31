@@ -3,7 +3,8 @@ from typing import List, Optional, Union
 import jenkspy
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from mr_openapi import BaseModel
+from pydantic import BaseModel
+
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
