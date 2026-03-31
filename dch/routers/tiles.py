@@ -8,6 +8,7 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.models import LayerInfo, DBQuery
 from app.damapql.dch.services.raster_tile_service import RasterTileService
+from app.damapql.dch.utils.mvt_utils import MVTCache
 from app.damapql.utils.adapters.db import DBBase
 from digitalarzengine.utils.singletons import da_logger
 
@@ -42,30 +43,6 @@ def cache_table_name(uuid: str) -> str:
     return f'main."{token}_xyz"'
 
 
-def ensure_cache_table(session, uuid: str):
-    if not re.fullmatch(r"[A-Fa-f0-9]+", uuid):
-        raise ValueError("Invalid uuid")
-
-    table_name = f"{uuid}_xyz"
-    index_name = f"{table_name}_idx"
-
-    session.execute(text(f'''
-        CREATE TABLE IF NOT EXISTS "{table_name}" (
-            x INTEGER NOT NULL,
-            y INTEGER NOT NULL,
-            z INTEGER NOT NULL,
-            mvt BLOB NOT NULL,
-            PRIMARY KEY (x, y, z)
-        )
-    '''))
-
-    session.execute(text(f'''
-        CREATE INDEX IF NOT EXISTS "{index_name}"
-        ON "{table_name}" (z, x, y)
-    '''))
-
-    session.commit()
-    return f'"{table_name}"'
 
 @dch_tiles_router.get(
     "/raster_tile/{uuid}/{z}/{x}/{y}/",
@@ -103,22 +80,18 @@ async def get_layer_mvt(
     if not access:
         return Response(status_code=204)
 
-    cache_engine = DBBase.get_engine(db_key="cache_db")
-    da_logger.info(f"cache dialect: {cache_engine.dialect.name}")
     # 1) cache read
-    with Session(cache_engine) as cache_session:
-        xyz_table = ensure_cache_table(cache_session, uuid)
-
-        cached = cache_session.execute(
-            text(f"SELECT mvt FROM {xyz_table} WHERE x=:x AND y=:y AND z=:z"),
-            {"x": x, "y": y, "z": z},
-        ).scalar_one_or_none()
-
+    try:
+        cached = MVTCache.get_cached_tile(uuid, x, y, z)
         if cached:
             return Response(
                 content=bytes(cached),
                 media_type="application/vnd.mapbox-vector-tile"
             )
+    except Exception as cache_err:
+        da_logger.exception(
+            f"[MVTCacheReadError] uuid={uuid}, z={z}, x={x}, y={y} - {cache_err}"
+        )
 
     # 2) generate on cache miss
     try:
@@ -158,18 +131,12 @@ async def get_layer_mvt(
 
         # 3) cache write
         if mvt_bytes:
-            with Session(cache_engine) as cache_session:
-                xyz_table = ensure_cache_table(cache_session, uuid)
-
-                cache_session.execute(
-                    text(
-                        f"INSERT INTO {xyz_table} (x, y, z, mvt) "
-                        f"VALUES (:x, :y, :z, :mvt) "
-                        f"ON CONFLICT (x, y, z) DO UPDATE SET mvt = EXCLUDED.mvt"
-                    ),
-                    {"x": x, "y": y, "z": z, "mvt": mvt_bytes},
+            try:
+                MVTCache.set_cached_tile(uuid, x, y, z, mvt_bytes)
+            except Exception as cache_err:
+                da_logger.exception(
+                    f"[MVTCacheWriteError] uuid={uuid}, z={z}, x={x}, y={y} - {cache_err}"
                 )
-                cache_session.commit()
 
         return Response(
             content=mvt_bytes or b"",

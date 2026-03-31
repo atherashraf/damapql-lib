@@ -1,19 +1,21 @@
 import math
+import re
 
 import mercantile as mercantile
 import geopandas as gpd
 import numpy as np
 import shapely
 from digitalarzengine.io.managers.db_manager import GeoDBManager
+from digitalarzengine.utils.singletons import da_logger
 from shapely import transform
 from shapely.geometry import box, LineString, Point, MultiLineString, MultiPoint, mapping
 import mapbox_vector_tile
 from shapely.geometry.base import BaseGeometry
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.damapql.dch.models import LayerInfo
-
-from app.damapql.utils.singletons import da_logger
+from app.damapql.utils.adapters.db import DBBase
 
 
 class MVTUtils:
@@ -372,4 +374,87 @@ class MVTUtils:
         else:
             return b''  # No features to encode → return empty tile
 
+
+class MVTCache:
+    @staticmethod
+    def ensure_cache_table(session, uuid: str):
+        if not re.fullmatch(r"[A-Fa-f0-9]+", uuid):
+            raise ValueError("Invalid uuid")
+
+        table_name = f"{uuid}_xyz"
+        index_name = f"{table_name}_idx"
+
+        session.execute(text(f'''
+            CREATE TABLE IF NOT EXISTS "{table_name}" (
+                x INTEGER NOT NULL,
+                y INTEGER NOT NULL,
+                z INTEGER NOT NULL,
+                mvt BLOB NOT NULL,
+                PRIMARY KEY (x, y, z)
+            )
+        '''))
+
+        session.execute(text(f'''
+            CREATE INDEX IF NOT EXISTS "{index_name}"
+            ON "{table_name}" (z, x, y)
+        '''))
+
+        session.commit()
+        return f'"{table_name}"'
+
+    @classmethod
+    def get_cache_engine(cls):
+        return DBBase.get_engine(db_key="cache_db")
+
+    @classmethod
+    def get_cache_table(cls, session, layer_uuid: str):
+        return cls.ensure_cache_table(session, layer_uuid)
+
+    @classmethod
+    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int):
+        engine = cls.get_cache_engine()
+
+        with Session(engine) as session:
+            table = cls.get_cache_table(session, layer_uuid)
+
+            return session.execute(
+                text(f"SELECT mvt FROM {table} WHERE x=:x AND y=:y AND z=:z"),
+                {"x": x, "y": y, "z": z},
+            ).scalar_one_or_none()
+
+    @classmethod
+    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, mvt_bytes: bytes):
+        if not mvt_bytes:
+            return
+
+        engine = cls.get_cache_engine()
+
+        with Session(engine) as session:
+            table = cls.get_cache_table(session, layer_uuid)
+
+            session.execute(
+                text(
+                    f"INSERT INTO {table} (x, y, z, mvt) "
+                    f"VALUES (:x, :y, :z, :mvt) "
+                    f"ON CONFLICT (x, y, z) DO UPDATE SET mvt = EXCLUDED.mvt"
+                ),
+                {"x": x, "y": y, "z": z, "mvt": mvt_bytes},
+            )
+            session.commit()
+
+    @classmethod
+    def clear_layer_cache(cls, layer_uuid: str) -> int:
+        """
+        Clears ALL tiles for a layer.
+        """
+        engine = cls.get_cache_engine()
+
+        with Session(engine) as session:
+            table = cls.get_cache_table(session, layer_uuid)
+
+            result = session.execute(text(f"DELETE FROM {table}"))
+            session.commit()
+
+            da_logger.info(f"Cleared {result.rowcount} tiles for layer {layer_uuid}")
+            return result.rowcount or 0
 

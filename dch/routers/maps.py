@@ -32,7 +32,8 @@ def require_dch_admin(current_user: UserInfo):
     response_model=LayerInfoListResponse,
     summary="Get All Layer Info"
 )
-async def get_all_layer_info(current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def get_all_layer_info(current_user: UserInfo =
+                             Depends(AuthUtils.get_current_user)):
     require_dch_admin(current_user)
     with LayerInfo.managed_session() as session:
         category_label = case(

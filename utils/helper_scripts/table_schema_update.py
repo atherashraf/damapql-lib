@@ -1,5 +1,5 @@
+import sys
 from sqlalchemy import inspect, text
-
 
 
 class TableSchemaUpdater:
@@ -14,7 +14,20 @@ class TableSchemaUpdater:
             if callable(fn):
                 fn(msg)
                 return
-        print(msg)
+        print(f"[{level.upper()}] {msg}")
+
+    def ask_user(self, question):
+        """
+        Strictly requires 'Y' to proceed.
+        Anything else (y, yes, Y + space) is treated as 'No'.
+        """
+        if not sys.stdin.isatty():
+            self.log("Non-interactive terminal; skipping restricted action.", level="warning")
+            return False
+
+        print(f"\n❓ {question}", end=" ")
+        confirm = input("(Y/n): ")  # No .strip() or .lower() here
+        return confirm == "Y"
 
     def refresh_inspector(self):
         self.inspector = inspect(self.engine)
@@ -33,7 +46,6 @@ class TableSchemaUpdater:
     def server_default_sql(self, column):
         if not column.server_default:
             return ""
-
         arg = column.server_default.arg
         if hasattr(arg, "text"):
             return f"DEFAULT {arg.text}"
@@ -41,17 +53,13 @@ class TableSchemaUpdater:
 
     def column_def_sql(self, column, include_name=False):
         parts = []
-
         if include_name:
             parts.append(f'"{column.name}"')
-
         parts.append(self.column_type_sql(column))
         parts.append("NULL" if column.nullable else "NOT NULL")
-
         default_sql = self.server_default_sql(column)
         if default_sql:
             parts.append(default_sql)
-
         return " ".join(parts)
 
     def create_table(self, table_obj):
@@ -59,120 +67,95 @@ class TableSchemaUpdater:
         self.log(f"📦 Created new table: {table_obj.name}")
 
     def add_column(self, table_name, column):
-        if self.dialect == "sqlite" and hasattr(column.type, "item_type"):
-            self.log(f"⚠️ Skipping Array column {table_name}.{column.name} - Not supported in SQLite")
-            return
-
         col_def = self.column_def_sql(column, include_name=False)
         sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_def}'
-        self.log(sql, level="debug")
-
         with self.engine.begin() as conn:
             conn.execute(text(sql))
-
-        self.log(f"✨ Added column [{column.name}] (Type: {type(column.type).__name__}) to {table_name}")
+        self.log(f"✨ Added column [{column.name}] to {table_name}")
 
     def rename_column(self, table_name, old_name, new_name):
+        if not self.ask_user(f"RENAME '{table_name}.{old_name}' to '{new_name}'?"):
+            self.log(f"⏭️  Skipped rename for {old_name}")
+            return False
+
         if self.dialect in ("postgresql", "sqlite"):
             sql = f'ALTER TABLE "{table_name}" RENAME COLUMN "{old_name}" TO "{new_name}"'
+        elif self.dialect in ("mysql", "mariadb"):
+            sql = f'ALTER TABLE `{table_name}` RENAME COLUMN `{old_name}` TO `{new_name}`'
         else:
-            raise NotImplementedError(
-                f"Column rename not implemented for dialect: {self.dialect}"
-            )
+            raise NotImplementedError(f"Rename not supported for {self.dialect}")
 
         with self.engine.begin() as conn:
             conn.execute(text(sql))
-
         self.log(f"🔁 Renamed column {table_name}.{old_name} -> {new_name}")
+        return True
+
+    def drop_column(self, table_name, column_name):
+        if not self.ask_user(f"DROP column '{column_name}' from '{table_name}'?"):
+            self.log(f"⏭️  Skipped drop for {column_name}")
+            return False
+
+        if self.dialect in ("mysql", "mariadb"):
+            sql = f'ALTER TABLE `{table_name}` DROP COLUMN `{column_name}`'
+        else:
+            sql = f'ALTER TABLE "{table_name}" DROP COLUMN "{column_name}"'
+
+        with self.engine.begin() as conn:
+            conn.execute(text(sql))
+        self.log(f"🔥 Dropped column {table_name}.{column_name}")
+        return True
 
     def alter_nullable(self, table_name, column):
         if self.dialect == "postgresql":
-            if column.nullable:
-                sql = f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" DROP NOT NULL'
-            else:
-                sql = f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" SET NOT NULL'
-
+            action = "DROP NOT NULL" if column.nullable else "SET NOT NULL"
+            sql = f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" {action}'
         elif self.dialect in ("mysql", "mariadb"):
             null_stmt = "NULL" if column.nullable else "NOT NULL"
-            default_sql = self.server_default_sql(column)
-            sql = (
-                f'ALTER TABLE "{table_name}" MODIFY COLUMN "{column.name}" '
-                f'{self.column_type_sql(column)} {null_stmt} {default_sql}'
-            ).strip()
-
-        elif self.dialect == "sqlite":
-            self.log(
-                f"⚠️ SQLite cannot alter nullable directly for {table_name}.{column.name}; skipping."
-            )
-            return
-
+            sql = f'ALTER TABLE `{table_name}` MODIFY COLUMN `{column.name}` {self.column_type_sql(column)} {null_stmt}'
         else:
-            raise NotImplementedError(
-                f"Nullable alter not implemented for dialect: {self.dialect}"
-            )
+            return
 
         with self.engine.begin() as conn:
             conn.execute(text(sql))
-
-        self.log(f"🛠 Updated nullable for {table_name}.{column.name} -> {column.nullable}")
+        self.log(f"🛠 Updated nullable for {table_name}.{column.name}")
 
     def sync_table(self, table_obj, rename_map=None):
-        """
-        rename_map format:
-        {
-            "old_col_name": "new_col_name"
-        }
-        """
         rename_map = rename_map or {}
+        inverse_rename_map = {v: k for k, v in rename_map.items()}
         table_name = table_obj.name
 
-        self.log(f"Syncing table '{table_name}'")
-
-        if table_name not in self.get_table_names():
+        existing_cols = self.get_columns_info(table_name)
+        if not existing_cols:
             self.create_table(table_obj)
             return
 
-        existing_cols = self.get_columns_info(table_name)
+        # 1. RENAMES (MUST BE FIRST)
+        for column in table_obj.columns:
+            new_name = column.name
+            old_name = inverse_rename_map.get(new_name)
 
-        # 1) Rename columns
-        for old_name, new_name in rename_map.items():
-            if old_name in existing_cols and new_name not in existing_cols:
-                try:
-                    self.rename_column(table_name, old_name, new_name)
-                except Exception as e:
-                    self.log(
-                        f"❌ Failed renaming {table_name}.{old_name} -> {new_name}: {e}",
-                        level="error",
-                    )
+            # If the DB has the OLD name but NOT the NEW name
+            if old_name and (old_name in existing_cols) and (new_name not in existing_cols):
+                if self.rename_column(table_name, old_name, new_name):
+                    # Refresh state immediately so 'Add Missing' knows it's done
+                    existing_cols = self.get_columns_info(table_name)
 
-        existing_cols = self.get_columns_info(table_name)
-
-        # 2) Add missing columns
+        # 2. ADD MISSING
         for column in table_obj.columns:
             if column.name not in existing_cols:
-                try:
-                    self.add_column(table_name, column)
-                except Exception as e:
-                    self.log(
-                        f"❌ Failed adding column {table_name}.{column.name}: {e}",
-                        level="error",
-                    )
+                self.add_column(table_name, column)
+                existing_cols = self.get_columns_info(table_name)
 
-        existing_cols = self.get_columns_info(table_name)
-
-        # 3) Update nullable
+        # 3. NULLABLE
         for column in table_obj.columns:
-            if column.name not in existing_cols:
-                continue
-
-            db_nullable = existing_cols[column.name].get("nullable", True)
-            model_nullable = column.nullable
-
-            if db_nullable != model_nullable:
-                try:
+            if column.name in existing_cols:
+                db_null = existing_cols[column.name].get("nullable", True)
+                if db_null != column.nullable:
                     self.alter_nullable(table_name, column)
-                except Exception as e:
-                    self.log(
-                        f"❌ Failed updating nullable for {table_name}.{column.name}: {e}",
-                        level="error",
-                    )
+
+        # 4. CLEANUP ORPHANS
+        model_col_names = {c.name for c in table_obj.columns}
+        for db_col in list(existing_cols.keys()):
+            if db_col not in model_col_names:
+                # This will ask to drop 'area_acers' if it wasn't renamed
+                self.drop_column(table_name, db_col)

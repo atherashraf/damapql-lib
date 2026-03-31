@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple, Any
 import geopandas as gpd
 import pandas as pd
 from fastapi import HTTPException
+from shapely import wkb
+from shapely.geometry import shape, mapping
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
@@ -762,28 +764,41 @@ class DCHVectorAppendService:
                     )
                 continue
 
+
             series = prepared[col_name]
 
-            if input_required and series.isna().any():
+            # Normalize blanks → NA
+            if series.dtype == "object":
+                series = series.replace(r"^\s*$", pd.NA, regex=True)
+                prepared[col_name] = series
+
+            all_missing = series.isna().all()
+            any_missing = series.isna().any()
+
+            if input_required and any_missing:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Required target column '{col_name}' contains null/blank values"
                 )
 
-            if has_default and series.isna().all():
-                prepared = prepared.drop(columns=[col_name])
-                self.log_debug(f"Dropping column '{col_name}' to allow DB default to apply")
-                continue
+            if has_default:
+                if any_missing:
+                    default_value = col.get("default")  # assuming your schema has this
 
-            if has_default and series.isna().any():
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Column '{col_name}' has partial null/blank values. "
-                        f"Target default only works when the whole column is omitted. "
-                        f"Please provide values for all rows or omit this column entirely."
+                    if default_value is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Column '{col_name}' has null values but no default is defined"
+                        )
+
+                    # Fill only missing values
+                    prepared[col_name] = prepared[col_name].apply(
+                        lambda x: default_value if pd.isna(x) else x
                     )
-                )
+
+                    self.log_debug(
+                        f"Filled null values in column '{col_name}' with default '{default_value}'"
+                    )
 
             ordered_target_columns.append(col_name)
 
@@ -803,11 +818,11 @@ class DCHVectorAppendService:
     # ------------------------------------------------------------------
 
     def append_gdf_to_postgis(
-        self,
-        gdf: gpd.GeoDataFrame,
-        engine: Engine,
-        table_name: str,
-        schema: str = "public",
+            self,
+            gdf: gpd.GeoDataFrame,
+            engine: Engine,
+            table_name: str,
+            schema: str = "public",
     ) -> int:
         row_count = len(gdf)
 
@@ -816,11 +831,22 @@ class DCHVectorAppendService:
 
         gdf = gdf.copy()
 
+        if gdf.crs is None:
+            raise HTTPException(
+                status_code=400,
+                detail="CRS is missing. Cannot append GeoDataFrame to PostGIS."
+            )
+
         if "dch_id" in gdf.columns:
             self.log_info("Removing 'dch_id' from GeoDataFrame to allow database auto-increment.")
             gdf = gdf.drop(columns=["dch_id"])
 
         gdf = self.normalize_object_columns(gdf)
+
+        # force 2D like ST_Force2D
+        gdf[gdf.geometry.name] = gdf[gdf.geometry.name].apply(
+            lambda geom: wkb.loads(wkb.dumps(geom, output_dimension=2)) if geom else None
+        )
 
         self.log_info(f"Append columns: {list(gdf.columns)}")
         self.log_info(f"Append dtypes: {gdf.dtypes.astype(str).to_dict()}")

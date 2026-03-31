@@ -360,30 +360,36 @@ class DBQuery:
     def execute_query_as_gdf(
             session: Session,
             stmt: Union[str, Select],
-            params: dict = None,  # Added params argument
+            params: dict = None,
             geom_col: str = "geom",
             crs: str = "EPSG:4326"
     ) -> gpd.GeoDataFrame:
-        """
-        Executes a query and returns a GeoPandas GeoDataFrame.
-        Supports bind parameters for SQL injection safety.
-        """
-        # 1. Prepare statement and execute with params
+        # 1. Execute
         executable_stmt = text(stmt) if isinstance(stmt, str) else stmt
         rs = session.execute(executable_stmt, params or {})
 
-        # 2. Convert to DataFrame using mappings
+        # 2. Convert to DataFrame
         df = pd.DataFrame(rs.mappings().all())
 
         if df.empty:
             return gpd.GeoDataFrame(columns=df.columns, crs=crs)
 
-        # 3. Convert geometry column from WKB to Shapely
+        # 3. Robust Geometry Parsing
         if geom_col in df.columns:
-            df[geom_col] = df[geom_col].apply(
-                lambda x: wkb.loads(bytes(x.data)) if hasattr(x, 'data') else wkb.loads(x) if isinstance(x,
-                                                                                                         bytes) else x
-            )
+            def parse_geom(x):
+                if x is None: return None
+                # Handle MemoryView (SQLAlchemy/PostgreSQL binary)
+                if hasattr(x, 'data'):
+                    return wkb.loads(bytes(x.data))
+                # Handle Hex Strings (What you are seeing in your logs)
+                if isinstance(x, str):
+                    return wkb.loads(x, hex=True)
+                # Handle raw Bytes
+                if isinstance(x, bytes):
+                    return wkb.loads(x)
+                return x
+
+            df[geom_col] = df[geom_col].apply(parse_geom)
             return gpd.GeoDataFrame(df, geometry=geom_col, crs=crs)
 
         raise ValueError(f"Geometry column '{geom_col}' not found in query results.")

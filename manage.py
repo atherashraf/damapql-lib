@@ -347,8 +347,20 @@ def sync_schema(app_label: str, rename_map: dict | None = None):
     app_tables = [t for _, t in BaseCls.metadata.tables.items()]
     da_logger.info(f"table_names {app_tables}")
 
+    # for table_obj in app_tables:
+    #     table_rename_map = rename_map.get(table_obj.name, {})
+    #     updater.sync_table(table_obj, rename_map=table_rename_map)
+    existing_table_names = updater.get_table_names()
     for table_obj in app_tables:
-        table_rename_map = rename_map.get(table_obj.name, {})
+        table_name = table_obj.name
+
+        # 1. Check if the table needs to be created from scratch
+        if table_name not in existing_table_names:
+            updater.create_table(table_obj)
+            continue  # Move to the next table, nothing to sync yet
+
+        # 2. If table exists, perform the synchronization
+        table_rename_map = rename_map.get(table_name, {})
         updater.sync_table(table_obj, rename_map=table_rename_map)
 
     print(f"✅ Schema sync for '{app_label}' complete.")

@@ -6,10 +6,12 @@ import zipfile
 import base64
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import selectinload, Session
 
 from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.utils.mvt_utils import MVTCache
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 
 from app.damapql.auth.dtypes import UserInfo
@@ -939,3 +941,272 @@ async def commit_append_shp(
     except Exception as e:
         da_logger.exception(f"Append commit failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@dch_admin_router.post("/update_layer_attributes/{uuid}/")
+async def update_layer_attribute(
+        uuid: str,
+        payload: dict = Body(...),  # Expects {"pk_values": "val1__val2", "column": "col_name", "value": "new_val"}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Updates a single attribute for a feature in an external vector layer table.
+    Requires app_manager or superuser privileges.
+    """
+    # 1. Authority Check
+    require_dch_admin(current_user)
+
+    pk_val_str = payload.get("pk_values")
+    col_name = payload.get("column")
+    new_value = payload.get("value")
+
+    if not all([pk_val_str, col_name]):
+        raise HTTPException(status_code=400, detail="Missing pk_values or column name")
+
+    # 2. Fetch Layer Metadata & Accessibility
+    with LayerInfo.managed_session() as session:
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
+
+    if not info or not info.layer_accessibility:
+        raise HTTPException(status_code=404, detail="Layer not found or accessibility info missing")
+
+    access = info.layer_accessibility
+
+    # 3. Security Validation: Column check
+    # Ensure the column exists in the allowed columns list for this layer
+    allowed_cols = set(access.cols_name or [])
+    if col_name not in allowed_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Column '{col_name}' is not in the allowed list or is not editable."
+        )
+
+    # 4. Parse Primary Keys
+    pk_cols = access.pk_cols or []
+    # Match the React Frontend concat character (defaulting to "__")
+    split_char = info.pk_concat_char or "__"
+    pk_vals = pk_val_str.split(split_char)
+
+    if len(pk_cols) != len(pk_vals):
+        raise HTTPException(
+            status_code=400,
+            detail=f"PK mismatch. Expected {len(pk_cols)} values, got {len(pk_vals)}."
+        )
+
+    # 5. Build Dynamic SQL with Parameter Binding (SQL Injection Protection)
+    params = {"new_val": new_value}
+    clauses = []
+    for i, col in enumerate(pk_cols):
+        pname = f"pk{i}"
+        clauses.append(f"{DBQuery.safe_ident(col)} = :{pname}")
+        params[pname] = pk_vals[i]
+
+    where_sql = " AND ".join(clauses)
+
+    # 6. Get External Engine & Execute
+    engine = access.get_external_engine()
+    if not engine:
+        raise HTTPException(status_code=500, detail="External database engine could not be initialized")
+
+    table = DBQuery.safe_ident(access.table_name)
+    target_col = DBQuery.safe_ident(col_name)
+
+    # Optional: Use schema if defined in params
+    schema_name = (access.params or {}).get("schema", "public")
+    full_table_path = f"{DBQuery.safe_ident(schema_name)}.{table}"
+
+    update_query = text(f"UPDATE {full_table_path} SET {target_col} = :new_val WHERE {where_sql}")
+
+    try:
+        with Session(engine) as db_session:
+            result = db_session.execute(update_query, params)
+            db_session.commit()
+
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Update failed: No matching feature found in the database."
+                )
+
+            return {
+                "payload": {
+                    "status": "success",
+                    "message": f"Successfully updated '{col_name}'",
+                    "rows_affected": result.rowcount
+                }
+            }
+
+    except Exception as e:
+        # Log the detailed error but return a clean message to the UI
+        da_logger.exception(f"Attribute update failed for layer {uuid}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database Update Error: {str(e)}")
+
+
+# @dch_admin_router.post("/delete_layer_features/{uuid}/")
+# async def delete_layer_features(
+#     uuid: str,
+#     payload: dict = Body(...),  # Expects {"pk_list": ["id1__sub1", "id2__sub2"]}
+#     current_user: UserInfo = Depends(AuthUtils.get_current_user),
+# ):
+#     """
+#     Deletes multiple features from an external vector layer table
+#     and clears the layer MVT cache.
+#     """
+#     require_dch_admin(current_user)
+#
+#     pk_list = payload.get("pk_list", [])
+#     if not pk_list:
+#         raise HTTPException(status_code=400, detail="No primary keys provided")
+#
+#     # 1. Fetch Metadata
+#     with LayerInfo.managed_session() as session:
+#         info = session.execute(
+#             select(LayerInfo)
+#             .options(selectinload(LayerInfo.layer_accessibility))
+#             .where(LayerInfo.uuid == uuid)
+#         ).scalar_one_or_none()
+#
+#     if not info or not info.layer_accessibility:
+#         raise HTTPException(status_code=404, detail="Layer not found")
+#
+#     access = info.layer_accessibility
+#     pk_cols = access.pk_cols or []
+#     split_char = info.pk_concat_char or "__"
+#
+#     # 2. Parse PK List into Tuples
+#     try:
+#         parsed_values = [tuple(pk.split(split_char)) for pk in pk_list]
+#         for val in parsed_values:
+#             if len(val) != len(pk_cols):
+#                 raise ValueError("PK value count mismatch in list")
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Invalid PK format in list")
+#
+#     safe_pk_cols = [DBQuery.safe_ident(c) for c in pk_cols]
+#     pk_cols_sql = f"({', '.join(safe_pk_cols)})" if len(safe_pk_cols) > 1 else safe_pk_cols[0]
+#
+#     engine = access.get_external_engine()
+#     table = DBQuery.safe_ident(access.table_name)
+#     schema = DBQuery.safe_ident((access.params or {}).get("schema", "public"))
+#     full_path = f"{schema}.{table}"
+#
+#     delete_query = text(f"DELETE FROM {full_path} WHERE {pk_cols_sql} IN :values")
+#
+#     try:
+#         with Session(engine) as db_session:
+#             result = db_session.execute(delete_query, {"values": tuple(parsed_values)})
+#             db_session.commit()
+#
+#         cleared_tiles = 0
+#         try:
+#             cleared_tiles = MVTCache.clear_layer_cache(uuid)
+#         except Exception as cache_err:
+#             da_logger.exception(f"Cache clear failed for layer {uuid}: {cache_err}")
+#
+#         return {
+#             "payload": {
+#                 "status": "success",
+#                 "message": f"Successfully deleted {result.rowcount} features",
+#                 "rows_affected": result.rowcount,
+#                 "cache_cleared": True,
+#                 "tiles_cleared": cleared_tiles,
+#             }
+#         }
+#
+#     except Exception as e:
+#         da_logger.exception(f"Bulk delete failed for layer {uuid}: {e}")
+#         raise HTTPException(status_code=500, detail=f"Database Delete Error: {str(e)}")
+
+
+@dch_admin_router.post("/delete_layer_features/{uuid}/")
+async def delete_layer_features(
+        uuid: str,
+        payload: dict = Body(...),  # Expects {"pk_objects": [{"id": 1, "code": "A"}, ...]}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    require_dch_admin(current_user)
+
+    # 1. Get objects from payload
+    pk_objects = payload.get("pk_objects", [])
+    if not pk_objects:
+        raise HTTPException(status_code=400, detail="No feature data provided for deletion")
+
+    with LayerInfo.managed_session() as session:
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
+
+    if not info or not info.layer_accessibility:
+        raise HTTPException(status_code=404, detail="Layer not found")
+
+    access = info.layer_accessibility
+    pk_cols = access.pk_cols or []
+
+    if not pk_cols:
+        raise HTTPException(status_code=400, detail="Primary keys not defined for this layer")
+
+    # 2. Parse Objects into Ordered Tuples based on pk_cols definition
+    try:
+        parsed_values = []
+        for obj in pk_objects:
+            # Create a tuple of values in the order of the PK columns
+            row_tuple = tuple(obj.get(col) for col in pk_cols)
+
+            # Basic validation: Ensure no PK value is None
+            if any(v is None for v in row_tuple):
+                raise ValueError(f"Missing PK value in object: {obj}")
+
+            parsed_values.append(row_tuple)
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid data format: {str(e)}")
+
+    # 3. Construct the SQL
+    safe_pk_cols = [DBQuery.safe_ident(c) for c in pk_cols]
+
+    # Format for PostgreSQL: WHERE (col1, col2) IN ((val1, val2), (val3, val4))
+    if len(safe_pk_cols) > 1:
+        pk_cols_sql = f"({', '.join(safe_pk_cols)})"
+    else:
+        pk_cols_sql = safe_pk_cols[0]
+
+    engine = access.get_external_engine()
+    table = DBQuery.safe_ident(access.table_name)
+    # Get schema from params or default to public
+    schema_name = (access.params or {}).get("schema", "public")
+    full_path = f"{DBQuery.safe_ident(schema_name)}.{table}"
+
+    # Use tuple of tuples for the 'IN' parameter
+    delete_query = text(f"DELETE FROM {full_path} WHERE {pk_cols_sql} IN :values")
+
+    try:
+        with Session(engine) as db_session:
+            # We wrap the list in a tuple to ensure SQLAlchemy treats it as a single parameter for IN
+            result = db_session.execute(delete_query, {"values": tuple(parsed_values)})
+            db_session.commit()
+
+        # Clear Cache logic remains the same
+        cleared_tiles = 0
+        try:
+            cleared_tiles = MVTCache.clear_layer_cache(uuid)
+        except Exception:
+            pass
+
+        return {
+            "payload": {
+                "status": "success",
+                "rows_affected": result.rowcount,
+                "cache_cleared": True
+            }
+        }
+
+    except Exception as e:
+        da_logger.exception(f"Bulk delete failed: {e}")
+        raise HTTPException(status_code=500, detail="Database error during deletion")
