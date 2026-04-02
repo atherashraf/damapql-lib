@@ -346,7 +346,7 @@ class LayerInfo(DBBase):
     uuid = Column(db.VARCHAR(40), nullable=False, unique=True)
     app_label = Column(db.VARCHAR(100), nullable=False, default="dch")
     title = Column(db.String, nullable=False)
-    layer_name = Column(db.VARCHAR(100), nullable=False)
+    layer_name = Column(db.VARCHAR(100), nullable=False, unique=True)
 
     srid = Column(db.INTEGER, nullable=True)
     proj4 = Column(db.TEXT, nullable=True)
@@ -403,6 +403,7 @@ class LayerInfo(DBBase):
     layer_setting = Column(db.JSON, nullable=True)
     format = Column(db.VARCHAR(50), nullable=False, default="MVT")
     date_range_url = Column(db.TEXT, nullable=True)
+    model_name = Column(db.VARCHAR(100), nullable=True)
 
     __pydantic__ = LayerInfoType
 

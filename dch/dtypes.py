@@ -220,6 +220,7 @@ class LayerInfoType(BaseModel):
     layer_setting: Optional[Dict[str, Any]]
     format: str
     date_range_url: Optional[str]
+    model_name: Optional[str]
 
     # Relationships (optional or nested models if you want)
     layer_category: Optional[Union[LayerCategoryType, int]]

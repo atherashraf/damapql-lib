@@ -119,6 +119,48 @@ class TableSchemaUpdater:
             conn.execute(text(sql))
         self.log(f"🛠 Updated nullable for {table_name}.{column.name}")
 
+    def is_column_unique(self, table_name, column_name):
+        self.refresh_inspector()
+        uniques = self.inspector.get_unique_constraints(table_name)
+
+        for uq in uniques:
+            if column_name in uq.get("column_names", []):
+                return True
+
+        return False
+
+    def add_unique_constraint(self, table_name, column_name):
+        constraint_name = f"uq_{table_name}_{column_name}"
+
+        sql = f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{constraint_name}" UNIQUE ("{column_name}")'
+
+        with self.engine.begin() as conn:
+            conn.execute(text(sql))
+
+        self.log(f"🔒 Added UNIQUE constraint on {table_name}.{column_name}")
+
+    def drop_unique_constraint(self, table_name, column_name):
+        self.refresh_inspector()
+        uniques = self.inspector.get_unique_constraints(table_name)
+
+        for uq in uniques:
+            if column_name in uq.get("column_names", []):
+                constraint_name = uq.get("name")
+
+                if not self.ask_user(f"DROP UNIQUE constraint '{constraint_name}' on '{table_name}.{column_name}'?"):
+                    self.log(f"⏭️ Skipped UNIQUE drop for {column_name}")
+                    return False
+
+                sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{constraint_name}"'
+
+                with self.engine.begin() as conn:
+                    conn.execute(text(sql))
+
+                self.log(f"🧹 Dropped UNIQUE constraint {constraint_name}")
+                return True
+
+        return False
+
     def sync_table(self, table_obj, rename_map=None):
         rename_map = rename_map or {}
         inverse_rename_map = {v: k for k, v in rename_map.items()}
@@ -146,12 +188,25 @@ class TableSchemaUpdater:
                 self.add_column(table_name, column)
                 existing_cols = self.get_columns_info(table_name)
 
-        # 3. NULLABLE
+        # 3a. NULLABLE
         for column in table_obj.columns:
             if column.name in existing_cols:
                 db_null = existing_cols[column.name].get("nullable", True)
                 if db_null != column.nullable:
                     self.alter_nullable(table_name, column)
+
+        # 3b. UNIQUE CONSTRAINTS
+        for column in table_obj.columns:
+            col_name = column.name
+
+            model_unique = getattr(column, "unique", False)
+            db_unique = self.is_column_unique(table_name, col_name)
+
+            if model_unique and not db_unique:
+                self.add_unique_constraint(table_name, col_name)
+
+            elif not model_unique and db_unique:
+                self.drop_unique_constraint(table_name, col_name)
 
         # 4. CLEANUP ORPHANS
         model_col_names = {c.name for c in table_obj.columns}

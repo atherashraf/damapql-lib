@@ -58,6 +58,7 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.layer_styling,
                 LayerInfo.data_url,
                 LayerInfo.date_range_url,
+                LayerInfo.model_name
             )
             .join(LayerAccessibility, LayerAccessibility.id == LayerInfo.layer_access_id)
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
@@ -82,6 +83,7 @@ async def get_all_layer_info(current_user: UserInfo =
             "layer_styling",
             "data_url",
             "date_range_url",
+            "model_name"
         ]
         df = df[column_order]
     return ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])

@@ -216,6 +216,9 @@ class DBQuery:
         objs = session.execute(query).scalars().all()
         return [pydantic_cls.model_validate(o, from_attributes=True) for o in objs]
 
+
+
+
     # NEW: return exactly one row (as a dict) or None
     @staticmethod
     def execute_query_as_one(

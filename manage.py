@@ -25,6 +25,7 @@ Create database tables:
 
     python -m app.damapql.manage migrate --app_label auth
     python -m app.damapql.manage migrate --app_label dch
+     python -m app.damapql.manage sync_schema --app_label dch
 
 Add DB Connections:
     python -m app.damapql.manage add_db_connection

@@ -163,10 +163,10 @@ async def get_field_distinct_values(
             select(LayerInfo).where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
-    if obj is None:
-        return Response(status_code=204)
+        if obj is None:
+            return Response(status_code=204)
 
-    df = obj.to_layer_df(cols=[field_name])
+        df = obj.to_layer_df(cols=[field_name]  )
 
     if df.empty or field_name not in df.columns:
         return {"payload": []}

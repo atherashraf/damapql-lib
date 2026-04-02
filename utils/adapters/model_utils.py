@@ -7,15 +7,16 @@ from sqlalchemy import insert
 
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.settings import DCH_APPS
+from settings import DA_APPS
 
 
 class ModelUtils:
     @staticmethod
     def get_model(model_name):
-        for key in DCH_APPS:
+        for key in DA_APPS:
 
             try:
-                module = importlib.import_module(f'{DCH_APPS[key]["path"]}.models')
+                module = importlib.import_module(f'{DA_APPS[key]["path"]}.models')
                 for a in dir(module):
                     if a.lower() == model_name.lower():
                         cls = getattr(module, a)
