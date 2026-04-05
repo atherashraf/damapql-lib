@@ -881,11 +881,7 @@ class DCHVectorAppendService:
     # ------------------------------------------------------------------
 
     def append_gdf_to_postgis(
-            self,
-            gdf: gpd.GeoDataFrame,
-            engine: Engine,
-            table_name: str,
-            schema: str = "public",
+            self, gdf: gpd.GeoDataFrame, engine: Engine, table_name: str, schema: str = "public",
     ) -> int:
         row_count = len(gdf)
 

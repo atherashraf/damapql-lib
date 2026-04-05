@@ -10,12 +10,14 @@ from digitalarzengine.io.rio_raster import RioRaster
 from digitalarzengine.processing.raster.band_process import BandProcess
 from digitalarzengine.utils.singletons import da_logger
 from geopandas import GeoDataFrame
+from pyproj import Transformer
 from sqlalchemy.exc import SQLAlchemyError
 
 
 from sqlalchemy import Column, func, select, Engine, text
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import mapped_column, Mapped, relationship, Session, selectinload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy_utils import ChoiceType
 from app.damapql.dch.api_enum import AccessibilityType, DataModel, ModelType
 from app.damapql.dch.dtypes import LayerCategoryType, DBConnectionType, LayerAccessibilityType, LayerQualityLevelType, \
@@ -585,7 +587,7 @@ class LayerInfo(DBBase):
                 return 0
 
             g_col = g_col or access.geometry_col
-            srid = self.srid or 4326
+            srid = self.srid or 3857
             safe_table = DBQuery.safe_ident(access.table_name)
 
             sql = f"SELECT COUNT(*) FROM {safe_table}"
@@ -847,37 +849,58 @@ class LayerInfo(DBBase):
             da_logger.exception(f"Error fetching row detail for {self.layer_name}: {e}")
             return []
 
-    def update_extent(self, new_bounds: list):
+
+    def update_extent(self, new_bounds: list, overwrite: bool = False):
         """
-        Merges existing extent with new bounds and saves to DB.
-        new_bounds: [minx, miny, maxx, maxy]
+        Updates self.extent (native) and self.extent_3857 (Web Mercator).
+        new_bounds: [minx, miny, maxx, maxy] in the layer's native SRID.
         """
         with self.managed_session() as session:
-            # Ensure we have the latest data from DB
             session.add(self)
 
-            current_extent = self.extent  # [minx, miny, maxx, maxy]
+            # 1. Prepare New Bounds as Floats
+            new_b = [float(x) for x in new_bounds]
 
-            if current_extent and len(current_extent) == 4:
-                # Merge logic: find the outermost corners
-                combined_extent = [
-                    min(current_extent[0], new_bounds[0]),  # min x
-                    min(current_extent[1], new_bounds[1]),  # min y
-                    max(current_extent[2], new_bounds[2]),  # max x
-                    max(current_extent[3], new_bounds[3])  # max y
-                ]
+            # 2. Update Native Extent (self.extent)
+            if overwrite or not self.extent or len(self.extent) != 4:
+                self.extent = new_b
             else:
-                combined_extent = new_bounds
+                self.extent = [
+                    min(self.extent[0], new_b[0]),
+                    min(self.extent[1], new_b[1]),
+                    max(self.extent[2], new_b[2]),
+                    max(self.extent[3], new_b[3])
+                ]
 
-            self.extent = combined_extent
+            # 3. Handle EPSG:3857 Extent (self.extent_3857)
+            # Transform the newly calculated native extent to 3857
+            try:
+                native_srid = self.srid or 3857
+                if native_srid == 3857:
+                    self.extent_3857 = self.extent
+                else:
+                    # Create transformer from native SRID to 3857
+                    transformer = Transformer.from_crs(
+                        f"EPSG:{native_srid}",
+                        "EPSG:3857",
+                        always_xy=True
+                    )
+                    # Transform corners: (minx, miny) and (maxx, maxy)
+                    x1, y1 = transformer.transform(self.extent[0], self.extent[1])
+                    x2, y2 = transformer.transform(self.extent[2], self.extent[3])
 
-            # Optional: If you use extent_3857, handle transformation here
-            # self.extent_3857 = ...
+                    # Note: If transforming from 4326 to 3857, ensure coordinates
+                    # don't exceed Web Mercator limits (+/- 85.06 lat)
+                    self.extent_3857 = [x1, y1, x2, y2]
 
+            except Exception as tf_err:
+                da_logger.error(f"Failed to transform extent to 3857 for {self.layer_name}: {tf_err}")
+
+            # 4. Finalize
+            flag_modified(self, "extent")
+            flag_modified(self, "extent_3857")
             session.commit()
-
-
-
+            da_logger.info(f"Extent and Extent_3857 updated for {self.layer_name} (Overwrite: {overwrite})")
 
 class MapInfo(DBBase):
     __tablename__ = "dch_map_info"

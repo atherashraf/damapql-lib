@@ -8,6 +8,7 @@ from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -92,7 +93,8 @@ async def save_style(
                     new_layers.append(layer)
 
                 obj.layers = new_layers
-                obj.save(session=session, allow_update=True)
+                flag_modified(obj, "layers")
+                obj.save(session=session)
                 return {"payload": "Map Layer style saved successfully"}
 
     else:
@@ -106,6 +108,12 @@ async def save_style(
                 obj.save(session=session)
                 return {"payload": "Global Layer style saved successfully"}
 
+        # # Clear Cache logic remains the same
+        # cleared_tiles = 0
+        # try:
+        #     cleared_tiles = MVTCache.clear_layer_cache(uuid)
+        # except Exception:
+        #     pass
     return Response(status_code=204)
 
 

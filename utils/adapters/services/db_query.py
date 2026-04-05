@@ -81,6 +81,7 @@ import geopandas as gpd
 import pandas as pd
 from typing import Dict, Any, List, Optional, Union, Type, TypeVar
 
+from digitalarzengine.utils.singletons import da_logger
 from shapely import wkb
 from sqlalchemy import text, Select, select, Table, Engine, func
 from sqlalchemy.exc import SQLAlchemyError, ResourceClosedError
@@ -451,8 +452,11 @@ class DBQuery:
             )
             SELECT ST_AsMVT(mvt_geoms.*, '{layer_name}', {extent}, 'mvt_geom') FROM mvt_geoms;
         """
-
-        result = session.execute(text(mvt_sql)).scalar()
+        try:
+            result = session.execute(text(mvt_sql)).scalar()
+        except Exception as e:
+            da_logger.exception("Error to get data")
+            result = None
         return bytes(result) if result else b""
 
     @staticmethod

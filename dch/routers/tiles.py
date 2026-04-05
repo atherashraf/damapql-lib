@@ -80,6 +80,12 @@ async def get_layer_mvt(
     if not access:
         return Response(status_code=204)
 
+    if info.count_layer_rows() == 0:
+        return Response(
+            content=b"",
+            media_type="application/vnd.mapbox-vector-tile"
+        )
+
     # 1) cache read
     try:
         cached = MVTCache.get_cached_tile(uuid, x, y, z)

@@ -267,36 +267,44 @@ class LayerInfoType(BaseModel):
     #     return v
 
 
+from typing import List, Optional, Any, Dict
+from pydantic import BaseModel, Field, ConfigDict
+
+
 class LayerItem(BaseModel):
+    # Core identification
     uuid: str
     layerName: Optional[str] = None
+    title: Optional[str] = None  # Added to mirror frontend title
 
-    # make optional / defaulted so base layers validate
-    style: Optional[Any] = None
+    # State and Visualization
     visible: bool = True
+    opacity: float = 1.0
+    zIndex: int = 0  # CRITICAL: This stores your drag-and-drop order
+
+    # Styling and Constraints
+    style: Optional[Any] = None
     zoomRange: List[int] = Field(default_factory=lambda: [0, 30])
 
-    # soak up fields used by base/other layers without breaking validation
-    isBase: Optional[bool] = None
-    key: Optional[str] = None
-    opacity: float = 1.0
+    # Base Layer / Special Layer identifiers
+    isBase: bool = False
+    key: Optional[str] = None  # Stores the base layer title (e.g., 'Google Satellite')
 
-    # allow & keep unknown extra fields (e.g., params, type)
-    model_config = ConfigDict(extra='allow')
+    # Flexibility for WMS/WFS (params, type, etc.)
+    model_config = ConfigDict(extra='allow', from_attributes=True)
 
 
 class MapInfoType(BaseModel):
-    id: int
+    id: Optional[int] = None  # Optional because it's not present during initial creation
     uuid: str
     title: str
-    extent: List[float]  # [minX, minY, maxX, maxY] in map units
-    layers: List[LayerItem]  # JSON → Python dict
-    srid: int
-    units: str
+    extent: List[float]  # [minX, minY, maxX, maxY]
+    layers: List[LayerItem]  # This will now validate each item in the JSON array
+    srid: int = 3857
+    units: str = "m"
     description: Optional[str] = None
     navigation_setting: Optional[Dict[str, Any]] = None
 
-    # Tell Pydantic to build from SQLAlchemy objects
     model_config = ConfigDict(from_attributes=True)
 
 

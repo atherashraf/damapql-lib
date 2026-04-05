@@ -39,12 +39,19 @@ class OtherLayer(BaseModel):
     type: str
     params: Dict[str, Any] = Field(default_factory=dict)
 
+class LayerSaveSchema(BaseModel):
+    uuid: str
+    visible: bool
+    opacity: float
+    zIndex: int  # Added to capture the drag order
+    title: Optional[str] = None
+    style: Optional[Any] = None
+
 class MapSaveRequest(BaseModel):
-    baseLayer: str
-    daLayers: List[DALayer] = Field(default_factory=list)
-    # Pydantic v2: use Field(min_length=, max_length=) instead of conlist
-    extent: List[float] = Field(min_length=4, max_length=4)
+    uuid: str
     mapName: str
-    uuid: str = "-1"
-    # default to [] so you never hit KeyError
-    otherLayers: List[OtherLayer] = Field(default_factory=list)
+    extent: List[float]
+    baseLayer: str = "Google Hybrid"
+    daLayers: List[LayerSaveSchema]
+    otherLayers: List[Any] = []
+

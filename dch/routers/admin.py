@@ -909,23 +909,32 @@ async def commit_append_shp(
         )
 
         # 4. Transactional Append
+        # Check existing data count BEFORE we push new records
+        existing_row_count = layer_info.count_layer_rows()
+
         appended_count = append_service.append_gdf_to_postgis(
-            gdf=prepared_gdf, engine=engine, table_name=target_table, schema=target_schema_name
+            gdf=prepared_gdf,
+            engine=engine,
+            table_name=target_table,
+            schema=target_schema_name
         )
 
         # 5. Update Layer Extent
         try:
-            # Calculate bounds of the newly added data
-            # returns (minx, miny, maxx, maxy)
+            # total_bounds is [minx, miny, maxx, maxy]
             new_bounds = prepared_gdf.total_bounds.tolist()
+            da_logger.info(f"New bounds: {new_bounds}")
+            if new_bounds:
+                # If existing_row_count was 0, the current extent is the Province fallback.
+                # Overwrite it so the map 'snaps' to the new real data.
+                should_overwrite = (existing_row_count == 0)
 
-            # Update the LayerInfo record with the combined extent
-            layer_info.update_extent(new_bounds)
-            da_logger.info(f"Updated extent for layer {layer_uuid}")
+                layer_info.update_extent(new_bounds, overwrite=should_overwrite)
+                da_logger.info(f"Updated extent for layer {layer_uuid}. Overwrite: {should_overwrite}")
+
         except Exception as extent_err:
-            # We log but don't fail the whole request,
-            # as the data is already committed to PostGIS
-            da_logger.error(f"Failed to update layer extent: {extent_err}")
+            # We log but don't fail the request because the PostGIS data is already committed.
+            da_logger.exception(f"Failed to update layer extent metadata: {extent_err}")
 
         # Cleanup on success
         append_service.cleanup_upload_dir(file_dir)
