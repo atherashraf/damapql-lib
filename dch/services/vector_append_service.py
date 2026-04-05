@@ -673,6 +673,63 @@ class DCHVectorAppendService:
     # Prepare data for append
     # ------------------------------------------------------------------
 
+    def coerce_dataframe_to_target_types(
+            self,
+            gdf: gpd.GeoDataFrame,
+            target_schema: Dict[str, Any],
+    ) -> gpd.GeoDataFrame:
+        gdf = gdf.copy()
+        geom_col = gdf.geometry.name
+
+        for col_meta in target_schema["columns"]:
+            col_name = col_meta["name"]
+
+            if col_name not in gdf.columns:
+                continue
+
+            if col_name == target_schema["geometry_column"]:
+                continue
+
+            db_type = str(col_meta["type"]).lower()
+            s = gdf[col_name]
+
+            # normalize blanks again for safety
+            if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+                s = s.replace(r"^\s*$", pd.NA, regex=True)
+
+            # Integer types
+            if any(t in db_type for t in ["smallint", "integer", "bigint"]):
+                non_null = s.dropna()
+
+                # validate integer-like values first
+                bad = non_null[~non_null.astype(str).str.match(r"^-?\d+(\.0+)?$")]
+                if not bad.empty:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Column '{col_name}' contains non-integer values: {bad.head(5).tolist()}"
+                    )
+
+                # convert 0.0 -> 0 and preserve nulls
+                gdf[col_name] = pd.to_numeric(s, errors="coerce").astype("Int64")
+                continue
+
+            # Float / numeric / decimal
+            if any(t in db_type for t in ["numeric", "decimal", "real", "double precision", "float"]):
+                gdf[col_name] = pd.to_numeric(s, errors="coerce")
+                continue
+
+            # Boolean
+            if "boolean" in db_type:
+                gdf[col_name] = s.astype("boolean")
+                continue
+
+            # Text-ish
+            if any(t in db_type for t in ["character", "varchar", "text"]):
+                gdf[col_name] = s.astype("string")
+                continue
+
+        return gdf
+
     def prepare_gdf_for_append(
             self,
             gdf: gpd.GeoDataFrame,
@@ -781,23 +838,29 @@ class DCHVectorAppendService:
                     detail=f"Required target column '{col_name}' contains null/blank values"
                 )
 
+            # if has_default:
+            #     if any_missing:
+            #         default_value = col.get("default")  # assuming your schema has this
+            #
+            #         if default_value is None:
+            #             raise HTTPException(
+            #                 status_code=400,
+            #                 detail=f"Column '{col_name}' has null values but no default is defined"
+            #             )
+            #
+            #         # Fill only missing values
+            #         prepared[col_name] = prepared[col_name].apply(
+            #             lambda x: default_value if pd.isna(x) else x
+            #         )
+            #
+            #         self.log_debug(
+            #             f"Filled null values in column '{col_name}' with default '{default_value}'"
+            #         )
             if has_default:
                 if any_missing:
-                    default_value = col.get("default")  # assuming your schema has this
-
-                    if default_value is None:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Column '{col_name}' has null values but no default is defined"
-                        )
-
-                    # Fill only missing values
-                    prepared[col_name] = prepared[col_name].apply(
-                        lambda x: default_value if pd.isna(x) else x
-                    )
-
-                    self.log_debug(
-                        f"Filled null values in column '{col_name}' with default '{default_value}'"
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Column '{col_name}' has partial NULLs. Either fill explicitly or omit column to use DB default."
                     )
 
             ordered_target_columns.append(col_name)
@@ -811,7 +874,7 @@ class DCHVectorAppendService:
             )
 
         prepared = gpd.GeoDataFrame(prepared, geometry="geom", crs=gdf.crs)
-
+        prepared = self.coerce_dataframe_to_target_types(prepared, target_schema)
         return prepared
     # ------------------------------------------------------------------
     # Append execution

@@ -33,8 +33,8 @@ Add DB Connections:
     python -m app.damapql.manage update_db_connection_localhost --ip 139.16.34.33
 Load fixture data:
 
-    python -m app.damapql.manage loaddata --app_label dch --file dch/fixtures/layercategory.json
-    python -m app.damapql.manage loaddata --app_label dch --file dch/fixtures/layerqualitylevel.json
+    python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layercategory.json
+    python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layerqualitylevel.json
 
 Add newly defined columns to existing tables:
 
@@ -424,7 +424,7 @@ def loaddata(app_label: str, file: str):
     - a relative path (resolved against DCH_BASE_DIR)
 
     Example:
-        python -m app.damapql.manage loaddata --app_label dch --file fixtures/layercategory.json
+        python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layercategory.json
     """
 
     file_path = Path(file)

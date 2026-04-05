@@ -75,15 +75,18 @@ def get_vector_tiles(z: int, x: int, y: int, db: Session = Depends(get_db)):
 import json
 import re
 from math import ceil
+from types import SimpleNamespace
+
 import geopandas as gpd
 import pandas as pd
 from typing import Dict, Any, List, Optional, Union, Type, TypeVar
 
 from shapely import wkb
 from sqlalchemy import text, Select, select, Table, Engine, func
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, ResourceClosedError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.base import Executable
 
 # T represents the Pydantic Model type
 T = TypeVar("T")
@@ -496,3 +499,53 @@ class DBQuery:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?", name):
             raise ValueError(f"Unsafe SQL identifier: {name!r}")
         return name
+
+
+    @staticmethod
+    def execute_query_as_dicts(
+            session: Session,
+            query: Union[str, Executable, Table],
+            params: Optional[dict] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Supports:
+        - raw SQL string
+        - Select / union / subqueries (Executable)
+        - Table
+        """
+        if isinstance(query, str):
+            result = session.execute(text(query), params or {})
+        elif isinstance(query, Table):
+            result = session.execute(select(query), params or {})
+        else:
+            result = session.execute(query, params or {})
+
+        try:
+            return [dict(row) for row in result.mappings()]
+        except ResourceClosedError:
+            return []
+
+    @staticmethod
+    def execute_query_as_objects(
+            session: Session,
+            query: Union[str, Executable, Table],
+            params: Optional[dict] = None
+    ) -> List[SimpleNamespace]:
+        return [
+            SimpleNamespace(**row)
+            for row in DBQuery.execute_query_as_dicts(session, query, params)
+        ]
+
+    @staticmethod
+    def execute_query_as_objects(
+            session: Session,
+            query: Union[str, Executable, Table],
+            params: Optional[dict] = None
+    ) -> List[SimpleNamespace]:
+        """
+                 Executable could Select, select, compound union etc
+                """
+        return [
+            SimpleNamespace(**row)
+            for row in DBQuery.execute_query_as_dicts(session, query, params)
+        ]

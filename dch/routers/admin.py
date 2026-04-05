@@ -1172,3 +1172,140 @@ async def delete_layer_features(
     except Exception as e:
         da_logger.exception(f"Bulk delete failed: {e}")
         raise HTTPException(status_code=500, detail="Database error during deletion")
+
+
+
+@dch_admin_router.post("/bulk_update_layer_field_value/{uuid}/")
+async def bulk_update_layer_attribute(
+    uuid: str,
+    payload: dict = Body(...),  # {"pk_objects": [{"id": 1}, {"id": 2}], "column": "status", "value": "approved"}
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Bulk update a single attribute for multiple features in an external vector layer table.
+    Requires superuser or app_manager privileges.
+    """
+    require_dch_admin(current_user)
+
+    pk_objects = payload.get("pk_objects", [])
+    col_name = payload.get("column")
+    new_value = payload.get("value")
+
+    if not isinstance(pk_objects, list) or not pk_objects:
+        raise HTTPException(status_code=400, detail="Missing or invalid pk_objects")
+
+    if not col_name:
+        raise HTTPException(status_code=400, detail="Missing column name")
+
+    with LayerInfo.managed_session() as session:
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
+
+    if not info or not info.layer_accessibility:
+        raise HTTPException(status_code=404, detail="Layer not found or accessibility info missing")
+
+    access = info.layer_accessibility
+
+    # validate editable column
+    allowed_cols = set(access.cols_name or [])
+    if col_name not in allowed_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Column '{col_name}' is not in the allowed list or is not editable."
+        )
+
+    pk_cols = access.pk_cols or []
+    if not pk_cols:
+        raise HTTPException(status_code=400, detail="No primary key columns configured for this layer")
+
+    if col_name in pk_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Primary key column '{col_name}' cannot be updated."
+        )
+
+    # validate each pk object
+    normalized_pk_objects = []
+    for idx, pk_object in enumerate(pk_objects):
+        if not isinstance(pk_object, dict) or not pk_object:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid pk_object at index {idx}"
+            )
+
+        missing_pk_cols = [col for col in pk_cols if col not in pk_object]
+        if missing_pk_cols:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing PK field(s) at index {idx}: {', '.join(missing_pk_cols)}"
+            )
+
+        extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
+        if extra_pk_cols:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unexpected PK field(s) at index {idx}: {', '.join(extra_pk_cols)}"
+            )
+
+        normalized_pk_objects.append({col: pk_object[col] for col in pk_cols})
+
+    engine = access.get_external_engine()
+    if not engine:
+        raise HTTPException(status_code=500, detail="External database engine could not be initialized")
+
+    table = DBQuery.safe_ident(access.table_name)
+    target_col = DBQuery.safe_ident(col_name)
+    schema_name = (access.params or {}).get("schema", "public")
+    full_table_path = f"{DBQuery.safe_ident(schema_name)}.{table}"
+
+    rows_affected = 0
+
+    try:
+        with Session(engine) as db_session:
+            for idx, pk_object in enumerate(normalized_pk_objects):
+                params = {"new_val": new_value}
+                clauses = []
+
+                for col in pk_cols:
+                    pname = f"pk_{col}"
+                    clauses.append(f"{DBQuery.safe_ident(col)} = :{pname}")
+                    params[pname] = pk_object[col]
+
+                where_sql = " AND ".join(clauses)
+
+                update_query = text(
+                    f"UPDATE {full_table_path} "
+                    f"SET {target_col} = :new_val "
+                    f"WHERE {where_sql}"
+                )
+
+                result = db_session.execute(update_query, params)
+                rows_affected += result.rowcount or 0
+
+            db_session.commit()
+
+        cleared_tiles = 0
+        try:
+            cleared_tiles = MVTCache.clear_layer_cache(uuid)
+        except Exception:
+            pass
+
+        return {
+            "payload": {
+                "status": "success",
+                "message": f"Successfully updated '{col_name}' for {rows_affected} feature(s)",
+                "rows_affected": rows_affected,
+                "pk_count": len(normalized_pk_objects),
+                "cache_cleared": True,
+                "cleared_tiles": cleared_tiles,
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        da_logger.exception(f"Bulk attribute update failed for layer {uuid}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database Update Error: {str(e)}")
