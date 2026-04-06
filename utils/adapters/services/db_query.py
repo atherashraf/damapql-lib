@@ -504,7 +504,6 @@ class DBQuery:
             raise ValueError(f"Unsafe SQL identifier: {name!r}")
         return name
 
-
     @staticmethod
     def execute_query_as_dicts(
             session: Session,
@@ -525,7 +524,7 @@ class DBQuery:
             result = session.execute(query, params or {})
 
         try:
-            return [dict(row) for row in result.mappings()]
+            return [dict(row) for row in result.mappings().all()]
         except ResourceClosedError:
             return []
 

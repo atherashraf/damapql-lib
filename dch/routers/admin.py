@@ -24,7 +24,7 @@ from app.damapql.dch.models import (
     DBQuery,
     DataModel,
     LayerAccessibility,
-    LayerInfo,
+    LayerInfo, MapInfo,
 )
 from app.damapql.dch.services.vector_append_service import DCHVectorAppendService
 from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
@@ -39,12 +39,10 @@ from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.crypto import CryptoUtils
 from digitalarzengine.utils.singletons import da_logger
 
-
 # ---------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------
 dch_admin_router = APIRouter(prefix="/admin", tags=["dch admin"])
-
 
 # ---------------------------------------------------------------------
 # Shared append/upload service
@@ -83,7 +81,7 @@ def require_dch_admin(current_user: UserInfo):
 # ---------------------------------------------------------------------
 @dch_admin_router.get("/get_db_connection/")
 async def get_db_connection(
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Return available DB connections as a small list of id + name.
@@ -100,8 +98,8 @@ async def get_db_connection(
 
 @dch_admin_router.post("/test-db-connection/")
 def test_db_connection(
-    payload: DBConnectionCreate,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        payload: DBConnectionCreate,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Test an external database connection using the submitted credentials.
@@ -134,8 +132,8 @@ def test_db_connection(
 
 @dch_admin_router.post("/add-db-connection/")
 def add_db_connection(
-    payload: DBConnectionCreate,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        payload: DBConnectionCreate,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Save an external DB connection definition in the system.
@@ -175,8 +173,8 @@ def add_db_connection(
 
 @dch_admin_router.get("/db_table_list/{db_id}/")
 async def db_table_list(
-    db_id: str, db = Depends(get_sync_session),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        db_id: str, db=Depends(get_sync_session),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Return the list of spatial tables from a configured external DB connection.
@@ -207,11 +205,11 @@ async def db_table_list(
 
 @dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
 async def save_db_layer_info(
-    db_id: str,
-    table_name: str,
-    layer_category_id: str,
-    db = Depends(get_sync_session),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        db_id: str,
+        table_name: str,
+        layer_category_id: str,
+        db=Depends(get_sync_session),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Register an existing external DB spatial table as a layer in local metadata.
@@ -247,6 +245,7 @@ async def save_db_layer_info(
     except Exception as e:
         da_logger.exception(f"Failed to save DB layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save DB layer info")
+
 
 # @dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
 # async def save_db_layer_info(
@@ -297,8 +296,8 @@ async def save_db_layer_info(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/add_model_row/")
 async def add_model_row(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Add a row into a dynamic model using form data.
@@ -338,9 +337,9 @@ async def add_model_row(
 
 @dch_admin_router.post("/save_model_data/")
 async def save_model_data(
-    request: Request,
-    model_name: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        model_name: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Update a model row dynamically.
@@ -446,8 +445,8 @@ async def save_model_data(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/add_layer_url_info/")
 async def add_layer_url_info(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Create a URL-based layer metadata entry.
@@ -511,10 +510,52 @@ async def add_layer_url_info(
         raise HTTPException(status_code=500, detail="Failed to add layer URL info")
 
 
+@dch_admin_router.post("/save_map_info/")
+async def save_map_info(
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user)
+):
+    require_dch_admin(current_user)
+
+    data = await request.json()
+    pk_col = data.get("pk", {}).get("colName")
+    pk_val = data.get("pk", {}).get("colValue")
+    row_data = data.get("rowData")
+
+    if not pk_col or pk_val is None or not isinstance(row_data, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    if not hasattr(MapInfo, pk_col):
+        raise HTTPException(status_code=400, detail=f"Invalid LayerInfo PK column: {pk_col}")
+
+    try:
+        with MapInfo.managed_session() as session:
+            obj = session.execute(
+                select(MapInfo).where(getattr(MapInfo, pk_col) == pk_val)
+            ).scalar_one_or_none()
+
+            if obj is None:
+                raise HTTPException(status_code=404, detail="LayerInfo not found")
+
+            for key, value in row_data.items():
+                if hasattr(obj, key):
+                    setattr(obj, key, value)
+
+            obj.save(session=session)
+
+        return {"payload": {"status": "success", "updated": row_data}}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        da_logger.exception(f"Failed to save layer info: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save layer info")
+
+
 @dch_admin_router.post("/save_layer_info/")
 async def save_layer_info(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Update LayerInfo row fields dynamically.
@@ -571,8 +612,8 @@ async def save_layer_info(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/upload_shp_file/")
 async def upload_shp_file(
-    request: Request,
-    current_user: dict = Depends(AuthUtils.require_role("app_manager"))
+        request: Request,
+        current_user: dict = Depends(AuthUtils.require_role("app_manager"))
 ):
     """
     Upload shapefile parts, import into DB, register the new vector layer,
@@ -698,8 +739,8 @@ async def upload_shp_file(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/preview_append_shp/")
 async def preview_append_shp(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     require_dch_admin(current_user)
 
@@ -819,7 +860,6 @@ async def preview_append_shp(
         analysis["preview_feature_count"] = len(preview_gdf)
         analysis["preview_geojson"] = preview_geojson
         analysis["preview_geojson_zip"] = preview_geojson_zip
-
 
         return {"payload": analysis}
 
@@ -952,16 +992,16 @@ async def commit_append_shp(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 from fastapi import Body, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
+
 @dch_admin_router.post("/update_layer_attributes/{uuid}/")
 async def update_layer_attribute(
-    uuid: str,
-    payload: dict = Body(...),  # Expects {"pk_object": {"id": 1, ...}, "column": "col_name", "value": "new_val"}
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        payload: dict = Body(...),  # Expects {"pk_object": {"id": 1, ...}, "column": "col_name", "value": "new_val"}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Updates a single attribute for a feature in an external vector layer table.
@@ -1091,9 +1131,6 @@ async def update_layer_attribute(
         raise HTTPException(status_code=500, detail=f"Database Update Error: {str(e)}")
 
 
-
-
-
 @dch_admin_router.post("/delete_layer_features/{uuid}/")
 async def delete_layer_features(
         uuid: str,
@@ -1183,12 +1220,11 @@ async def delete_layer_features(
         raise HTTPException(status_code=500, detail="Database error during deletion")
 
 
-
 @dch_admin_router.post("/bulk_update_layer_field_value/{uuid}/")
 async def bulk_update_layer_attribute(
-    uuid: str,
-    payload: dict = Body(...),  # {"pk_objects": [{"id": 1}, {"id": 2}], "column": "status", "value": "approved"}
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        payload: dict = Body(...),  # {"pk_objects": [{"id": 1}, {"id": 2}], "column": "status", "value": "approved"}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Bulk update a single attribute for multiple features in an external vector layer table.
