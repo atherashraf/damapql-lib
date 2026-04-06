@@ -139,15 +139,9 @@ class DBQuery:
             geom_col: str = "geom",
             id_col: str = "id"
     ) -> Dict[str, Any]:
-        """
-        Returns a GeoJSON FeatureCollection.
-        If using PostgreSQL, it uses a high-speed recursive JSON builder.
-        """
         engine = session.get_bind()
 
-        # --- HIGH SPEED POSTGRES PATH ---
         if engine.dialect.name == 'postgresql':
-            # Wrap the existing query in a PostGIS GeoJSON builder
             raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
 
             pg_geojson_sql = f"""
@@ -159,7 +153,7 @@ class DBQuery:
                   SELECT jsonb_build_object(
                     'type',       'Feature',
                     'id',         {id_col},
-                    'geometry',   ST_AsGeoJSON({geom_col})::jsonb,
+                    'geometry',   ST_AsGeoJSON(({geom_col})::geometry)::jsonb,
                     'properties', to_jsonb(inputs) - '{geom_col}'
                   ) AS feature
                   FROM ({raw_sql}) inputs
@@ -168,12 +162,12 @@ class DBQuery:
             result = session.execute(text(pg_geojson_sql)).scalar()
             return result if result else {"type": "FeatureCollection", "features": []}
 
-        # --- FALLBACK PATH (SQLite or other) ---
         result = session.execute(text(stmt) if isinstance(stmt, str) else stmt)
         features = []
         for row in result.mappings():
             geom = row.get(geom_col)
-            if not geom: continue
+            if not geom:
+                continue
             features.append({
                 "type": "Feature",
                 "geometry": json.loads(geom) if isinstance(geom, str) else geom,
