@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 import re
 
@@ -375,6 +377,8 @@ class MVTUtils:
             return b''  # No features to encode → return empty tile
 
 
+
+
 class MVTCache:
     @staticmethod
     def ensure_cache_table(session, uuid: str):
@@ -384,19 +388,21 @@ class MVTCache:
         table_name = f"{uuid}_xyz"
         index_name = f"{table_name}_idx"
 
+        # New schema: variant-aware cache key
         session.execute(text(f'''
             CREATE TABLE IF NOT EXISTS "{table_name}" (
                 x INTEGER NOT NULL,
                 y INTEGER NOT NULL,
                 z INTEGER NOT NULL,
+                variant TEXT NOT NULL,
                 mvt BLOB NOT NULL,
-                PRIMARY KEY (x, y, z)
+                PRIMARY KEY (x, y, z, variant)
             )
         '''))
 
         session.execute(text(f'''
             CREATE INDEX IF NOT EXISTS "{index_name}"
-            ON "{table_name}" (z, x, y)
+            ON "{table_name}" (z, x, y, variant)
         '''))
 
         session.commit()
@@ -410,20 +416,63 @@ class MVTCache:
     def get_cache_table(cls, session, layer_uuid: str):
         return cls.ensure_cache_table(session, layer_uuid)
 
+    @staticmethod
+    def build_variant(
+        cols: list[str] | None = None,
+        resolution: float = 0,
+        extra: dict | None = None
+    ) -> str:
+        """
+        Build a stable cache variant hash from request-affecting parameters.
+
+        Example:
+            variant = MVTCache.build_variant(
+                cols=["sewer_type", "diameter"],
+                resolution=0,
+                extra={"date": "2026-04-09"}
+            )
+        """
+        normalized = {
+            "cols": sorted(set(cols or [])),
+            "resolution": resolution,
+        }
+
+        if extra:
+            normalized.update(extra)
+
+        raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
     @classmethod
-    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int):
+    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str):
         engine = cls.get_cache_engine()
 
         with Session(engine) as session:
             table = cls.get_cache_table(session, layer_uuid)
 
             return session.execute(
-                text(f"SELECT mvt FROM {table} WHERE x=:x AND y=:y AND z=:z"),
-                {"x": x, "y": y, "z": z},
+                text(
+                    f"SELECT mvt FROM {table} "
+                    f"WHERE x=:x AND y=:y AND z=:z AND variant=:variant"
+                ),
+                {
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "variant": variant,
+                },
             ).scalar_one_or_none()
 
     @classmethod
-    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, mvt_bytes: bytes):
+    def set_cached_tile(
+        cls,
+        layer_uuid: str,
+        x: int,
+        y: int,
+        z: int,
+        variant: str,
+        mvt_bytes: bytes
+    ):
         if not mvt_bytes:
             return
 
@@ -434,18 +483,25 @@ class MVTCache:
 
             session.execute(
                 text(
-                    f"INSERT INTO {table} (x, y, z, mvt) "
-                    f"VALUES (:x, :y, :z, :mvt) "
-                    f"ON CONFLICT (x, y, z) DO UPDATE SET mvt = EXCLUDED.mvt"
+                    f"INSERT INTO {table} (x, y, z, variant, mvt) "
+                    f"VALUES (:x, :y, :z, :variant, :mvt) "
+                    f"ON CONFLICT (x, y, z, variant) "
+                    f"DO UPDATE SET mvt = EXCLUDED.mvt"
                 ),
-                {"x": x, "y": y, "z": z, "mvt": mvt_bytes},
+                {
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "variant": variant,
+                    "mvt": mvt_bytes,
+                },
             )
             session.commit()
 
     @classmethod
     def clear_layer_cache(cls, layer_uuid: str) -> int:
         """
-        Clears ALL tiles for a layer.
+        Clears ALL cached tiles for a layer.
         """
         engine = cls.get_cache_engine()
 
@@ -456,5 +512,26 @@ class MVTCache:
             session.commit()
 
             da_logger.info(f"Cleared {result.rowcount} tiles for layer {layer_uuid}")
+            return result.rowcount or 0
+
+    @classmethod
+    def clear_variant_cache(cls, layer_uuid: str, variant: str) -> int:
+        """
+        Clears cached tiles for a specific variant of a layer.
+        """
+        engine = cls.get_cache_engine()
+
+        with Session(engine) as session:
+            table = cls.get_cache_table(session, layer_uuid)
+
+            result = session.execute(
+                text(f"DELETE FROM {table} WHERE variant = :variant"),
+                {"variant": variant},
+            )
+            session.commit()
+
+            da_logger.info(
+                f"Cleared {result.rowcount} cached tiles for layer {layer_uuid}, variant={variant}"
+            )
             return result.rowcount or 0
 

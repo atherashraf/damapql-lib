@@ -61,16 +61,17 @@ async def get_raster_tile(uuid: str, z: int, x: int, y: int):
 
 @dch_tiles_router.get("/layer_mvt/{uuid}/{tile_size}/{z}/{x}/{y}")
 async def get_layer_mvt(
-    uuid: str,
-    tile_size: int,
-    z: int,
-    x: int,
-    y: int,
-    resolution: float = 0,
-    cols: list[str] | None = Query(None),
+        uuid: str,
+        tile_size: int,
+        z: int,
+        x: int,
+        y: int,
+        resolution: float = 0,
+        cols: list[str] | None = Query(None),
 ):
     """
     Public endpoint to serve Mapbox Vector Tiles (MVT) with per-layer DB cache.
+    Optimized to minimize DB property lookups and reuse PK logic.
     """
     info = LayerInfo.get_layer_info_by_uuid(uuid)
     if not info:
@@ -80,47 +81,67 @@ async def get_layer_mvt(
     if not access:
         return Response(status_code=204)
 
+    # Check row count before expensive engine connection
     if info.count_layer_rows() == 0:
         return Response(
             content=b"",
             media_type="application/vnd.mapbox-vector-tile"
         )
 
-    # 1) cache read
-    try:
-        cached = MVTCache.get_cached_tile(uuid, x, y, z)
-        if cached:
-            return Response(
-                content=bytes(cached),
-                media_type="application/vnd.mapbox-vector-tile"
-            )
-    except Exception as cache_err:
-        da_logger.exception(
-            f"[MVTCacheReadError] uuid={uuid}, z={z}, x={x}, y={y} - {cache_err}"
-        )
-
-    # 2) generate on cache miss
     try:
         external_engine = access.get_external_engine()
         if not external_engine:
             return Response(status_code=204)
 
+        # --- OPTIMIZATION: Fetch PK and Column data once ---
+        pk_list = access.pk_cols or []
+        pk_sql_fragment = info.pk_cols_as_pk  # "col1 || '-' || col2 as pk"
+
         allowed_cols = set(access.cols_name or [])
         requested_cols = cols or list(allowed_cols)
+        requested_cols = sorted(set(requested_cols))
 
+        # Validate requested columns
         bad = [c for c in requested_cols if c not in allowed_cols]
         if bad:
             raise HTTPException(status_code=400, detail=f"Invalid columns requested: {bad}")
 
-        select_cols = ", ".join(DBQuery.safe_ident(c) for c in requested_cols)
+        # Build variant using PK list to ensure cache uniqueness
+        variant = MVTCache.build_variant(
+            cols=requested_cols,
+            resolution=resolution,
+            extra={"pk_cols": pk_list}
+        )
+
+        da_logger.debug(
+            f"[MVTRequest] uuid={uuid}, z={z}, x={x}, y={y}, variant={variant}"
+        )
+
+        # 1) Cache Read
+        try:
+            cached = MVTCache.get_cached_tile(uuid, x, y, z, variant)
+            if cached:
+                da_logger.debug(f"[MVTCacheHit] uuid={uuid}, variant={variant}")
+                return Response(
+                    content=bytes(cached),
+                    media_type="application/vnd.mapbox-vector-tile"
+                )
+        except Exception as cache_err:
+            da_logger.exception(f"[MVTCacheReadError] uuid={uuid} - {cache_err}")
+
+        # 2) Generate on cache miss
+        # Prepare safe column identifiers
+        safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
+
+        # Merge the pre-computed PK fragment with other columns
+        all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols)
+
         geom_col = DBQuery.safe_ident(access.geometry_col)
         table = DBQuery.safe_ident(access.table_name)
 
-        stmt = (
-            f"SELECT {select_cols}, {geom_col} FROM {table}"
-            if select_cols else
-            f"SELECT {geom_col} FROM {table}"
-        )
+        stmt = f"SELECT {all_cols_sql}, {geom_col} FROM {table}"
+
+        da_logger.debug(f"[MVTGenerate] uuid={uuid}, stmt={stmt}")
 
         with Session(external_engine) as ext_session:
             mvt_bytes = DBQuery.execute_query_as_mvt(
@@ -135,14 +156,15 @@ async def get_layer_mvt(
                 resolution=resolution,
             )
 
-        # 3) cache write
+        # 3) Cache Write
         if mvt_bytes:
             try:
-                MVTCache.set_cached_tile(uuid, x, y, z, mvt_bytes)
+                MVTCache.set_cached_tile(uuid, x, y, z, variant, mvt_bytes)
+                da_logger.debug(f"[MVTCacheWrite] uuid={uuid}, variant={variant}, size={len(mvt_bytes)}")
             except Exception as cache_err:
-                da_logger.exception(
-                    f"[MVTCacheWriteError] uuid={uuid}, z={z}, x={x}, y={y} - {cache_err}"
-                )
+                da_logger.exception(f"[MVTCacheWriteError] uuid={uuid} - {cache_err}")
+        else:
+            da_logger.debug(f"[MVTEmptyTile] uuid={uuid}, variant={variant}")
 
         return Response(
             content=mvt_bytes or b"",
@@ -152,8 +174,10 @@ async def get_layer_mvt(
     except HTTPException:
         raise
     except Exception as e:
-        da_logger.exception(f"[MVTError] uuid={uuid}, z={z}, x={x}, y={y} - {e}")
+        da_logger.exception(f"[MVTError] uuid={uuid} - {e}")
         return Response(status_code=500)
+
+
 
 
 @dch_tiles_router.delete("/clear_cache/{uuid}/")
@@ -166,19 +190,22 @@ async def clear_cache(
     """
     require_tile_manager(current_user)
 
+    if not re.fullmatch(r"[A-Fa-f0-9]+", uuid):
+        raise HTTPException(status_code=400, detail="Invalid uuid")
+
     try:
-        cache_engine = DBBase.get_engine(app_label="cache_db")
+        cache_engine = DBBase.get_engine(db_key="cache_db")
     except KeyError:
         raise HTTPException(status_code=500, detail="Cache database configuration missing")
 
-    xyz_table = cache_table_name(uuid)
+    table_name = f'"{uuid}_xyz_v2"'
 
     with Session(cache_engine) as session:
         try:
-            session.execute(text(f"DROP TABLE IF EXISTS {xyz_table}"))
+            session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
             session.commit()
-            return {"payload": f"Cache table {xyz_table} successfully cleared"}
+            return {"payload": f"Cache table {table_name} successfully cleared"}
         except Exception as e:
             session.rollback()
             da_logger.exception(f"Failed to clear cache for uuid={uuid}: {e}")
-            return {"payload": "error clearing cache", "detail": str(e)}
+            raise HTTPException(status_code=500, detail="Error clearing cache")

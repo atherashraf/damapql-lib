@@ -140,6 +140,16 @@ class DBConnection(DBBase):
         return ExternalEngineRegistry.get(self.name, self.params.copy())
 
 
+
+
+class LayerQualityLevel(DBBase):
+    __tablename__ = "dch_quality_level"
+    id = mapped_column('id', db.INTEGER, primary_key=True, autoincrement=True)
+    level = mapped_column('level', db.INTEGER, nullable=False)
+    name = mapped_column('name', db.VARCHAR(50), nullable=False)
+    description = mapped_column('description', db.TEXT, nullable=True)
+    __pydantic__ = LayerQualityLevelType
+
 class LayerAccessibility(DBBase):
     __tablename__ = "dch_layer_accessibility"
 
@@ -332,14 +342,6 @@ class LayerAccessibility(DBBase):
     @url_type.expression
     def url_type(cls):
         return cls.params.op("->>")("url_type")
-
-class LayerQualityLevel(DBBase):
-    __tablename__ = "dch_quality_level"
-    id = mapped_column('id', db.INTEGER, primary_key=True, autoincrement=True)
-    level = mapped_column('level', db.INTEGER, nullable=False)
-    name = mapped_column('name', db.VARCHAR(50), nullable=False)
-    description = mapped_column('description', db.TEXT, nullable=True)
-    __pydantic__ = LayerQualityLevelType
 
 class LayerInfo(DBBase):
     __tablename__ = "dch_layer_info"
