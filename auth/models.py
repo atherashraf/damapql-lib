@@ -122,6 +122,7 @@ class Profile(DBBase):
         back_populates="profiles",
         lazy="selectin",
     )
+    designation: Mapped[str] = mapped_column(db.String(150), nullable=True)
 
     __pydantic__ = ProfileType
 

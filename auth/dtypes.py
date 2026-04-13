@@ -14,6 +14,7 @@ class UserCreate(BaseModel):
     profile_contact: Optional[str] = None
     organization: Optional[str] = None
     department: Optional[str] = None
+    designation: Optional[str] = None
     roles: List[str] = Field(default_factory=list)
 
 
