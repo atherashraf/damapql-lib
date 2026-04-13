@@ -1,27 +1,34 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
 
-import pandas as pd
-import geopandas as gpd
-from typing import Union, Any, Tuple, Optional, List, Dict, Generator
+from types import SimpleNamespace
+from typing import Any, Dict, Generator, List, Literal, Optional, Tuple, Union
 
-from sqlalchemy import Select, func, inspect as sa_inspect, ColumnElement, Engine, text
-from sqlalchemy.orm import Session, Query, InstrumentedAttribute
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import String, Integer, DateTime
+import geopandas as gpd
+import pandas as pd
+from pydantic import BaseModel
+from shapely import wkb
+from shapely.geometry import mapping, shape
+from shapely.geometry.base import BaseGeometry
+from sqlalchemy import ColumnElement, DateTime, Engine, Integer, Select, String, func, inspect as sa_inspect, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute, Query, Session
 
 from geoalchemy2 import Geometry, WKBElement
 from geoalchemy2.shape import to_shape
-from shapely import wkb
-from datetime import date, datetime
 
-from app.damapql.settings import DCH_DATABASES, DCH_APPS, DCH_DB_KEY
-from app.damapql.utils.adapters.deps import get_sync_engine_instance, sync_session_scope, _sync_session_factories
+from app.damapql.settings import DCH_DATABASES, DCH_DB_KEY
+from app.damapql.utils.adapters.deps import (
+    _sync_session_factories,
+    get_sync_engine_instance,
+    sync_session_scope,
+)
 from settings import DA_APPS
 
 
 class AmbiguousGeometryError(Exception):
-    """Raised when a model has multiple geometry columns and none is specified."""
     pass
 
 
@@ -31,52 +38,119 @@ class ModelHelpersMixin:
         db_key = None
         app_label = None
 
-    # ----- internal Service Locator ----
+    # -------------------------------------------------------
+    # REPRESENTATION HELPERS
+    # -------------------------------------------------------
+    def as_representation(
+        self,
+        mode: Literal["orm", "object", "dict"] = "orm",
+    ):
+        if mode == "orm":
+            return self
+        if mode == "object":
+            return self.to_object()
+        if mode == "dict":
+            return self.to_dict()
+        raise ValueError(f"Invalid mode: {mode}")
 
+    @staticmethod
+    def normalize_geometry_value(
+        value: Any,
+        output: Literal["shapely", "wkt", "geojson"] = "shapely",
+    ) -> Any:
+        """
+        Normalize geometry across common representations.
+
+        Accepts:
+        - Shapely geometry
+        - GeoAlchemy WKBElement
+        - WKB bytes / bytearray / memoryview
+        - GeoJSON dict
+        - WKT string
+        """
+        if value is None:
+            return None
+
+        geom = None
+
+        if isinstance(value, BaseGeometry):
+            geom = value
+
+        elif isinstance(value, WKBElement):
+            geom = to_shape(value)
+
+        elif isinstance(value, (bytes, bytearray)):
+            try:
+                geom = wkb.loads(bytes(value))
+            except Exception:
+                geom = None
+
+        elif isinstance(value, memoryview):
+            try:
+                geom = wkb.loads(bytes(value))
+            except Exception:
+                geom = None
+
+        elif isinstance(value, dict):
+            try:
+                geom = shape(value)
+            except Exception:
+                geom = None
+
+        elif isinstance(value, str):
+            try:
+                from shapely import wkt as shapely_wkt
+                geom = shapely_wkt.loads(value)
+            except Exception:
+                geom = None
+
+        if geom is None:
+            return None
+
+        if output == "shapely":
+            return geom
+        if output == "wkt":
+            return geom.wkt
+        if output == "geojson":
+            return mapping(geom)
+
+        raise ValueError(f"Unsupported geometry output: {output}")
+
+    # -------------------------------------------------------
+    # INTERNAL SERVICE LOCATOR
+    # -------------------------------------------------------
     @classmethod
-    def get_engine(cls, app_label: str = None, db_key: str=None) -> Engine:
-        """Returns the Sync Engine for this model's database key."""
+    def get_engine(cls, app_label: str = None, db_key: str = None) -> Engine:
         if db_key is None:
             db_key = cls.get_db_key(app_label)
         return get_sync_engine_instance(db_key)
 
     @staticmethod
     def engine_to_db_config(engine: Engine) -> dict:
-        """
-        Deconstructs an SQLAlchemy Engine into a configuration dictionary.
-        """
         url = engine.url
-
-        # Extract components from the SQLAlchemy URL object
         return {
             "engine": url.drivername,
             "host": url.host,
             "port": url.port,
             "name": url.database,
             "user": url.username,
-            "password": url.password
+            "password": url.password,
         }
 
     @classmethod
     def get_session(cls) -> Session:
-        """
-        Returns a new standalone session based on the model's db_key.
-        Note: The caller is responsible for closing this session!
-        """
-        # 1. Ensure the engine and factory are initialized for this key
         db_key = cls.get_db_key()
         get_sync_engine_instance(db_key)
-
-        # 2. Grab the session factory from the internal registry
         SessionLocal = _sync_session_factories[db_key]
-
-        # 3. Return a fresh session instance
         return SessionLocal()
 
     @classmethod
     @contextmanager
-    def managed_session(cls, session: Session = None, app_label: str = None) -> Generator[Session, None, None]:
-        """The single source of truth for session management in the Mixin."""
+    def managed_session(
+        cls,
+        session: Session = None,
+        app_label: str = None,
+    ) -> Generator[Session, None, None]:
         db_key = cls.get_db_key(app_label)
         if session:
             yield session
@@ -86,10 +160,6 @@ class ModelHelpersMixin:
 
     @classmethod
     def get_db_key(cls, app_label: str = None) -> str:
-        """
-        Determines the database key for this model.
-        Priority: 1. _Meta.db_key, 2. _Meta.app_label, 3. Module path.
-        """
         if hasattr(cls._Meta, "db_key") and cls._Meta.db_key is not None:
             return cls._Meta.db_key
 
@@ -97,37 +167,22 @@ class ModelHelpersMixin:
             if hasattr(cls._Meta, "app_label") and cls._Meta.app_label is not None:
                 app_label = getattr(cls._Meta, "app_label")
             else:
-                # Fallback: take the parent directory name of the model file
                 app_label = cls.__module__.split(".")[-2]
-                if app_label== "models":
+                if app_label == "models":
                     app_label = cls.__module__.split(".")[-3]
 
         return DA_APPS.get(app_label, {}).get("db_key") or None
 
     @classmethod
     def get_db_params(cls, app_label: str = None) -> Dict[str, Any]:
-        """
-        Retrieves the configuration dictionary for the resolved database key.
-        """
         key = cls.get_db_key(app_label)
-        # Safely get the config, falling back to 'default' if the key doesn't exist
         return DCH_DATABASES.get(key, DCH_DATABASES.get(DCH_DB_KEY))
 
-
-
-
-
-    # --- HYBRID SAVE & DELETE ---
+    # -------------------------------------------------------
+    # MODEL METADATA HELPERS
+    # -------------------------------------------------------
     @classmethod
     def get_conflict_fields(cls, unique_fields=None) -> List[str]:
-        """
-        Resolve the fields used to detect conflicts/upserts.
-
-        Priority:
-        1. explicitly passed unique_fields
-        2. cls._Meta.unique_fields
-        3. primary key fields
-        """
         if unique_fields is None:
             unique_fields = getattr(cls._Meta, "unique_fields", None)
 
@@ -137,37 +192,175 @@ class ModelHelpersMixin:
         table_cols = cls.__table__.columns.keys()
         return [f for f in unique_fields if f in table_cols]
 
+    @classmethod
+    def get_primary_key_fields(cls) -> list[str]:
+        return [col.name for col in sa_inspect(cls).primary_key]
 
     @classmethod
-    def bulk_save(
-            cls,
-            data: Union[List[Union[dict, Any]], pd.DataFrame, gpd.GeoDataFrame],
-            unique_fields: List[str] = None,
-            app_label: str = None,
-    ) -> int:
-        """
-        Usage:
-            User.bulk_save([
-                {"username": "ather", "email": "a1@x.com", "is_active": True},
-                {"username": "admin", "email": "admin@x.com", "is_active": False},
-            ])
-        Bulk upsert:
-        - insert rows if they do not exist
-        - update rows if they conflict on conflict_fields
+    def get_fields(cls, skip_fields=None):
+        if skip_fields is None:
+            skip_fields = []
 
-        Supports:
-        - list[dict]
-        - list[ORM objects / pydantic-like objects]
-        - pandas DataFrame
-        - GeoPandas GeoDataFrame
-        """
+        mapper = sa_inspect(cls)
+        return [column.key for column in mapper.attrs if column.key not in skip_fields]
+
+    @classmethod
+    def get_geom_cols(cls) -> dict:
+        if cls._Meta.is_spatial:
+            return {
+                name: col
+                for name, col in cls.__table__.columns.items()
+                if isinstance(col.type, Geometry)
+            }
+        return {}
+
+    @classmethod
+    def get_geom_col_name_srid(cls) -> Tuple[Optional[str], Optional[int]]:
+        cols = cls.get_geom_cols()
+        if cols:
+            name = list(cols.keys())[0]
+            return name, cols[name].type.srid
+        return None, None
+
+    @staticmethod
+    def sa_type_to_js_type(col: ColumnElement[Any]) -> str:
+        t = getattr(col, "type", None)
+
+        if isinstance(t, PG_UUID):
+            return "uuid"
+        if isinstance(t, String):
+            return "string"
+        if isinstance(t, Integer):
+            return "number"
+        if isinstance(t, DateTime):
+            return "datetime"
+
+        from sqlalchemy import Enum as SAEnum
+        if isinstance(t, SAEnum):
+            return "enum"
+
+        return "string"
+
+    # -------------------------------------------------------
+    # OBJECT / DICT CONVERSION
+    # -------------------------------------------------------
+    def to_object(self):
+        pydantic_cls = getattr(self, "__pydantic__", None)
+        data = {}
+
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+
+            if isinstance(v, WKBElement):
+                data[k] = to_shape(v)
+            else:
+                data[k] = v
+
+        if pydantic_cls:
+            expected_fields = set(pydantic_cls.model_fields.keys())
+
+            for field in expected_fields:
+                if field not in data and hasattr(self, field):
+                    rel_val = getattr(self, field)
+
+                    if isinstance(rel_val, list):
+                        data[field] = [
+                            i.to_object() if hasattr(i, "to_object") else i
+                            for i in rel_val
+                        ]
+                    else:
+                        data[field] = (
+                            rel_val.to_object()
+                            if hasattr(rel_val, "to_object")
+                            else rel_val
+                        )
+
+            return pydantic_cls.model_validate(data)
+
+        return SimpleNamespace(**data)
+
+    def to_dict(self):
+        def _convert(obj):
+            if hasattr(obj, "model_dump"):
+                return obj.model_dump()
+
+            if isinstance(obj, (list, tuple)):
+                return [_convert(i) for i in obj]
+
+            if hasattr(obj, "__dict__"):
+                return {
+                    k: _convert(v)
+                    for k, v in vars(obj).items()
+                    if not k.startswith("_")
+                }
+
+            if hasattr(obj, "__geo_interface__"):
+                return obj.__geo_interface__
+
+            return obj
+
+        return _convert(self.to_object())
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "cls":
+        if not isinstance(data, dict):
+            raise TypeError(f"{cls.__name__}.from_dict expects dict, got {type(data)}")
+
+        table_columns = {c.name for c in cls.__table__.columns}
+        geom_cols = cls.get_geom_cols()
+
+        filtered = {}
+        for k, v in data.items():
+            if k not in table_columns:
+                continue
+
+            col = cls.__table__.columns[k]
+            if isinstance(col.type, Geometry):
+                filtered[k] = cls.normalize_geometry_value(v, output="shapely")
+            else:
+                filtered[k] = v
+
+        return cls(**filtered)
+
+    @classmethod
+    def from_object(
+        cls,
+        obj: dict | SimpleNamespace | BaseModel,
+        *,
+        exclude_unset: bool = True,
+    ) -> "cls":
+        if isinstance(obj, BaseModel):
+            data = obj.model_dump(exclude_unset=exclude_unset)
+        elif isinstance(obj, dict):
+            data = obj
+        elif isinstance(obj, SimpleNamespace):
+            data = {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+        else:
+            raise TypeError(
+                f"{cls.__name__}.from_object expects "
+                f"dict | SimpleNamespace | BaseModel, got {type(obj)}"
+            )
+
+        return cls.from_dict(data)
+
+    # -------------------------------------------------------
+    # BULK SAVE
+    # -------------------------------------------------------
+    @classmethod
+    def bulk_save(
+        cls,
+        data: list[dict | Any] | pd.DataFrame | gpd.GeoDataFrame,
+        unique_fields: list[str] | None = None,
+        app_label: str | None = None,
+    ) -> int:
         if data is None:
             return 0
 
         if isinstance(data, (pd.DataFrame, gpd.GeoDataFrame)) and data.empty:
             return 0
 
-        if isinstance(data, list) and len(data) == 0:
+        if isinstance(data, list) and not data:
             return 0
 
         table = cls.__table__
@@ -181,19 +374,10 @@ class ModelHelpersMixin:
                 f"Define _Meta.unique_fields or ensure a primary key exists."
             )
 
-        # Normalize input into list[dict]
-        processed_data = []
+        processed_data: list[dict] = []
 
         if isinstance(data, gpd.GeoDataFrame):
-            temp_df = data.copy()
-            geom_col = temp_df.geometry.name if temp_df.geometry is not None else None
-
-            if geom_col and geom_col in temp_df.columns:
-                temp_df[geom_col] = temp_df[geom_col].apply(
-                    lambda g: g.wkt if g is not None and hasattr(g, "wkt") else None
-                )
-
-            processed_data = temp_df.to_dict("records")
+            processed_data = data.copy().to_dict("records")
 
         elif isinstance(data, pd.DataFrame):
             processed_data = data.to_dict("records")
@@ -202,14 +386,10 @@ class ModelHelpersMixin:
             for item in data:
                 if isinstance(item, dict):
                     row = item.copy()
-
                 elif hasattr(item, "model_dump"):
                     row = item.model_dump()
-
-                elif hasattr(item, "to_object"):
-                    obj = item.to_object()
-                    row = obj.model_dump() if hasattr(obj, "model_dump") else dict(obj)
-
+                elif hasattr(item, "to_dict") and callable(item.to_dict):
+                    row = item.to_dict()
                 else:
                     row = {
                         col.name: getattr(item, col.name, None)
@@ -221,11 +401,27 @@ class ModelHelpersMixin:
         if not processed_data:
             return 0
 
-        # Keep only actual table columns
         processed_data = [
             {k: v for k, v in row.items() if k in table_columns}
             for row in processed_data
         ]
+
+        # Normalize geometry to WKT first. This makes insert/update consistent.
+        normalized_rows: list[dict] = []
+        for row in processed_data:
+            new_row: dict = {}
+
+            for c in table.columns:
+                if c.name not in row:
+                    continue
+
+                val = row[c.name]
+                if isinstance(c.type, Geometry):
+                    new_row[c.name] = cls.normalize_geometry_value(val, output="wkt")
+                else:
+                    new_row[c.name] = val
+
+            normalized_rows.append(new_row)
 
         engine = cls.get_engine(app_label=app_label)
         dialect = engine.dialect.name
@@ -233,28 +429,17 @@ class ModelHelpersMixin:
         if dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-            # Convert geometry WKT values to ST_GeomFromText for inserts
-            values_with_geom = []
-            for row in processed_data:
-                new_row = {}
-                for c in table.columns:
-                    if c.name not in row:
-                        continue
+            stmt = pg_insert(table).values(normalized_rows)
 
-                    val = row[c.name]
-
-                    if isinstance(c.type, Geometry) and val is not None:
-                        srid = getattr(c.type, "srid", None)
-                        if srid:
-                            new_row[c.name] = func.ST_GeomFromText(val, srid)
-                        else:
-                            new_row[c.name] = func.ST_GeomFromText(val)
-                    else:
-                        new_row[c.name] = val
-
-                values_with_geom.append(new_row)
-
-            stmt = pg_insert(table).values(values_with_geom)
+            # Convert WKT strings to geometry in both insert and update paths
+            insert_values = {}
+            for c in table.columns:
+                if isinstance(c.type, Geometry):
+                    srid = getattr(c.type, "srid", None)
+                    insert_values[c.name] = (
+                        func.ST_GeomFromText(stmt.excluded[c.name], srid)
+                        if srid else func.ST_GeomFromText(stmt.excluded[c.name])
+                    )
 
             update_dict = {}
             for c in table.columns:
@@ -263,12 +448,36 @@ class ModelHelpersMixin:
 
                 if isinstance(c.type, Geometry):
                     srid = getattr(c.type, "srid", None)
-                    if srid:
-                        update_dict[c.name] = func.ST_GeomFromText(stmt.excluded[c.name], srid)
-                    else:
-                        update_dict[c.name] = func.ST_GeomFromText(stmt.excluded[c.name])
+                    update_dict[c.name] = (
+                        func.ST_GeomFromText(stmt.excluded[c.name], srid)
+                        if srid else func.ST_GeomFromText(stmt.excluded[c.name])
+                    )
                 else:
                     update_dict[c.name] = stmt.excluded[c.name]
+
+            # Rebuild insert statement with SQL expressions for geometry columns
+            values_with_geom = []
+            for row in normalized_rows:
+                shaped_row = {}
+                for c in table.columns:
+                    if c.name not in row:
+                        continue
+
+                    val = row[c.name]
+                    if isinstance(c.type, Geometry):
+                        if val is None:
+                            shaped_row[c.name] = None
+                        else:
+                            srid = getattr(c.type, "srid", None)
+                            shaped_row[c.name] = (
+                                func.ST_GeomFromText(val, srid)
+                                if srid else func.ST_GeomFromText(val)
+                            )
+                    else:
+                        shaped_row[c.name] = val
+                values_with_geom.append(shaped_row)
+
+            stmt = pg_insert(table).values(values_with_geom)
 
             if update_dict:
                 stmt = stmt.on_conflict_do_update(
@@ -277,13 +486,14 @@ class ModelHelpersMixin:
                 )
             else:
                 stmt = stmt.on_conflict_do_nothing(
-                    index_elements=conflict_fields
+                    index_elements=conflict_fields,
                 )
 
         elif dialect == "sqlite":
             from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-            stmt = sqlite_insert(table).values(processed_data)
+            # SQLite path remains plain because PostGIS funcs are unavailable
+            stmt = sqlite_insert(table).values(normalized_rows)
 
             update_dict = {
                 c.name: stmt.excluded[c.name]
@@ -298,71 +508,59 @@ class ModelHelpersMixin:
                 )
             else:
                 stmt = stmt.on_conflict_do_nothing(
-                    index_elements=conflict_fields
+                    index_elements=conflict_fields,
                 )
 
         else:
             from sqlalchemy import insert as base_insert
-            stmt = base_insert(table).values(processed_data)
+            stmt = base_insert(table).values(normalized_rows)
 
         with engine.begin() as conn:
             result = conn.execute(stmt)
 
         return result.rowcount if result.rowcount is not None else 0
 
+    # -------------------------------------------------------
+    # SAVE / DELETE
+    # -------------------------------------------------------
     def save(
-            self,
-            session: Union[Session, AsyncSession] = None,
-            app_label: str = None,
-            unique_fields: List[str] = None,
+        self,
+        session: Union[Session, AsyncSession] = None,
+        app_label: str = None,
+        unique_fields: List[str] = None,
+        return_mode: Literal["orm", "object", "dict"] = "orm",
     ) -> Any:
-        """
-        Usage: upsert style
-            user = User(username="ather", email="new@x.com", is_active=False)
-            user.save()
-        Save one object using upsert semantics:
-        - insert if not found
-        - update if found by conflict fields
-
-        Conflict fields come from:
-        1. passed unique_fields
-        2. _Meta.unique_fields
-        3. primary key
-        """
         conflict_fields = self.get_conflict_fields(unique_fields)
         pk_fields = self.get_primary_key_fields()
 
         with self.managed_session(session, app_label) as s:
             existing = None
 
-            # 1. Try finding existing record via conflict fields
             if conflict_fields:
                 criteria = {
-                    f: getattr(self, f, None)
+                    f: getattr(self, f)
                     for f in conflict_fields
+                    if getattr(self, f, None) is not None
                 }
 
-                # only query if at least one meaningful criterion exists
-                if criteria and any(v is not None for v in criteria.values()):
+                if criteria:
                     existing = s.query(self.__class__).filter_by(**criteria).first()
 
-            # 2. Fallback to PK lookup if conflict lookup found nothing
             if not existing and pk_fields:
                 pk_vals = [getattr(self, f, None) for f in pk_fields]
 
-                # single-column PK
                 if len(pk_fields) == 1 and pk_vals[0] is not None:
                     existing = s.get(self.__class__, pk_vals[0])
 
-                # composite PK
                 elif len(pk_fields) > 1 and all(v is not None for v in pk_vals):
                     existing = s.get(self.__class__, tuple(pk_vals))
 
-            # 3. Update or Insert
             if existing:
+                current_data = self.to_dict()
                 for col in self.__table__.columns.keys():
-                    if col not in pk_fields:
-                        setattr(existing, col, getattr(self, col, None))
+                    if col in pk_fields or col not in current_data:
+                        continue
+                    setattr(existing, col, getattr(self, col, None))
                 target = existing
                 is_add = False
             else:
@@ -370,9 +568,13 @@ class ModelHelpersMixin:
                 is_add = True
 
             if isinstance(s, AsyncSession):
-                return self._save_async(target, s, is_add)
-            return self._save_sync(target, s, is_add)
+                raise TypeError(
+                    f"{self.__class__.__name__}.save() received AsyncSession in a sync method. "
+                    "Use save_async() or an async-managed path."
+                )
 
+            obj = self._save_sync(target, s, is_add)
+            return obj.as_representation(return_mode)
 
     @staticmethod
     def _save_sync(obj, session: Session, is_add: bool):
@@ -380,7 +582,7 @@ class ModelHelpersMixin:
             session.add(obj)
         session.commit()
         session.refresh(obj)
-        return obj.to_object() if hasattr(obj, "to_object") else obj
+        return obj
 
     @staticmethod
     async def _save_async(obj, session: AsyncSession, is_add: bool):
@@ -388,7 +590,7 @@ class ModelHelpersMixin:
             session.add(obj)
         await session.commit()
         await session.refresh(obj)
-        return obj.to_object() if hasattr(obj, "to_object") else obj
+        return obj
 
     def delete(self, session: Union[Session, AsyncSession] = None, app_label=None):
         with self.managed_session(session, app_label) as s:
@@ -399,185 +601,113 @@ class ModelHelpersMixin:
             return None
 
     @staticmethod
-    async def _delete_async(obj, session):  # Fixed: removed extra 'self'
+    async def _delete_async(obj, session):
         await session.delete(obj)
         await session.commit()
 
-    # --- ATTRIBUTE AND GEOMETRY HANDLING & SPATIAL UTILS ---
+    # -------------------------------------------------------
+    # DATAFRAME / GDF / GEOJSON
+    # -------------------------------------------------------
     @classmethod
-    def get_geom_cols(cls) -> dict:
-        if cls._Meta.is_spatial:
-            return {name: col for name, col in cls.__table__.columns.items()
-                    if isinstance(col.type, Geometry)}
-        return {}
-
-    @classmethod
-    def get_geom_col_name_srid(cls) -> Tuple[Optional[str], Optional[int]]:
-        cols = cls.get_geom_cols()
-        if cols:
-            name = list(cols.keys())[0]
-            return name, cols[name].type.srid
-        return None, None
-
-    @staticmethod
-    def convert_wkb(wkb_element: Any):
-        if isinstance(wkb_element, WKBElement):
-            return wkb.loads(bytes(wkb_element.data), hex=True)
-        return wkb_element
-
-    @classmethod
-    def get_primary_key_fields(cls) -> list[str]:
-        return [col.name for col in sa_inspect(cls).primary_key]
-
-    @classmethod
-    def get_fields(cls, skip_fields=None):
-        if skip_fields is None:
-            skip_fields = []
-
-        # Use SQLAlchemy's mapper to get actual column names
-        # This avoids picking up methods, internal SA state, or helper properties
-        mapper = sa_inspect(cls)
-        return [
-            column.key for column in mapper.attrs
-            if column.key not in skip_fields
-        ]
-
-    @staticmethod
-    def sa_type_to_js_type(col: ColumnElement[Any]) -> str:
-        """
-        Map SQLAlchemy column types to simple strings
-        that the front-end PivotTable can understand.
-        """
-        t = getattr(col, "type", None)
-
-        # UUID (Postgres)
-        if isinstance(t, PG_UUID):
-            return "uuid"
-
-        # Basic scalar types
-        if isinstance(t, String):
-            return "string"
-
-        if isinstance(t, Integer):
-            return "number"
-
-        if isinstance(t, DateTime):
-            return "datetime"
-
-        # Enum is stored as string (because you used .value)
-        # or native enum in PG, but for the front-end it's effectively a string.
-        from sqlalchemy import Enum as SAEnum
-        if isinstance(t, SAEnum):
-            return "enum"
-
-        # Fallback
-        return "string"
-
-
-    # --- RELATIONSHIP-AWARE VALIDATION (TO_OBJECT) ---
-    def to_object(self):
-        pydantic_cls = getattr(self, '__pydantic__', None)
-        # Clean dict: exclude SA internal state and handle spatial binary
-        data = {}
-        for k, v in self.__dict__.items():
-            if k.startswith('_'): continue
-            if isinstance(v, WKBElement):
-                data[k] = to_shape(v)  # Convert to Shapely for Pydantic
+    def to_gdf(
+        cls,
+        qs: Union[Query, Select, List[Any], None] = None,
+        geom_col_name: str = None,
+        target_crs: int | None = None,
+    ) -> Union[gpd.GeoDataFrame, pd.DataFrame]:
+        with cls.managed_session() as session:
+            if qs is None:
+                objs = session.query(cls).all()
+            elif isinstance(qs, Select):
+                objs = session.execute(qs).scalars().all()
+            elif isinstance(qs, Query):
+                objs = qs.all()
+            elif isinstance(qs, list):
+                objs = qs
             else:
-                data[k] = v
+                raise TypeError(f"Unsupported query type: {type(qs)}")
 
-        if pydantic_cls:
-            # RELATIONSHIP AWARENESS:
-            # Check for fields defined in Pydantic but missing from __dict__ (lazy relationships)
-            expected_fields = set(pydantic_cls.model_fields.keys())
-            for field in expected_fields:
-                if field not in data and hasattr(self, field):
-                    rel_val = getattr(self, field)
-                    # Recursively convert list of models or single model if they have to_object
-                    if isinstance(rel_val, list):
-                        data[field] = [i.to_object() if hasattr(i, 'to_object') else i for i in rel_val]
-                    else:
-                        data[field] = rel_val.to_object() if hasattr(rel_val, 'to_object') else rel_val
+        if not objs:
+            return gpd.GeoDataFrame()
 
-            return pydantic_cls.model_validate(data)
-        return data
+        records = []
+        for obj in objs:
+            if isinstance(obj, dict):
+                records.append(obj)
+            elif hasattr(obj, "to_dict"):
+                records.append(obj.to_dict())
+            else:
+                records.append({
+                    col.name: getattr(obj, col.name, None)
+                    for col in cls.__table__.columns
+                })
 
-    # --- BULK CONVERSION (DATAFRAME) ---
-    @classmethod
-    def to_gdf(cls, qs: Union[Query, Select] = None, geom_col_name: str = None) -> gpd.GeoDataFrame:
-        """
-        Explicit method to return a GeoDataFrame.
-        Automatically detects geom column and SRID.
-        Raises Exception if multiple geometries exist and none are specified.
-        """
-        geom_cols = cls.get_geom_cols()
+        if not records:
+            return gpd.GeoDataFrame()
 
-        if not geom_cols:
-            raise ValueError(f"Model {cls.__name__} has no Geometry columns defined.")
+        g_cols = cls.get_geom_cols()
+        if not g_cols:
+            return pd.DataFrame(records)
 
-        # Logic for multiple geometry columns
-        if len(geom_cols) > 1 and geom_col_name is None:
-            raise AmbiguousGeometryError(
-                f"Model {cls.__name__} has multiple geometry columns: {list(geom_cols.keys())}. "
-                "Please specify 'geom_col_name' explicitly."
-            )
+        geom_col = geom_col_name or list(g_cols.keys())[0]
+        source_srid = g_cols[geom_col].type.srid
 
-        # Use specified column or the only one available
-        target_col_name = geom_col_name or list(geom_cols.keys())[0]
+        if source_srid is None:
+            raise ValueError(f"{cls.__name__}: Geometry SRID is undefined")
 
-        if target_col_name not in geom_cols:
-            raise KeyError(f"Column '{target_col_name}' is not a Geometry column in {cls.__name__}.")
+        for row in records:
+            if geom_col in row:
+                row[geom_col] = cls.normalize_geometry_value(row[geom_col], output="shapely")
 
-        target_srid = geom_cols[target_col_name].type.srid
-
-        return cls.to_dataframe(
-            qs=qs,
-            is_spatial=True,
-            geom_col=target_col_name,
-            srid=target_srid
+        gdf = gpd.GeoDataFrame(
+            records,
+            geometry=geom_col,
+            crs=f"EPSG:{source_srid}",
         )
 
-    from sqlalchemy import Select
-    from sqlalchemy.orm import Query
+        if target_crs:
+            if gdf.crs is None:
+                raise ValueError("Cannot transform CRS: source CRS is undefined")
+            gdf = gdf.to_crs(epsg=target_crs)
+
+        return gdf
 
     @classmethod
     def to_dataframe(
-            cls,
-            qs: Union[Query, Select, str] = None,  # Added str here
-            is_spatial: bool = True,
-            geom_col: str = None,
-            srid: int = None,
-            params: dict = None  # Added for safe parameter binding in raw SQL
+        cls,
+        qs: Union[Query, Select, str] = None,
+        is_spatial: bool = True,
+        geom_col: str = None,
+        srid: int = None,
+        params: dict = None,
     ) -> Union[pd.DataFrame, gpd.GeoDataFrame]:
-
         with cls.managed_session() as session:
-            # 1. Logic to handle different query types
             if qs is None:
                 objs = session.query(cls).all()
-                data_dicts = [{k: v for k, v in obj.__dict__.items() if k != '_sa_instance_state'} for obj in objs]
+                data_dicts = [obj.to_dict() if hasattr(obj, "to_dict") else {
+                    k: v for k, v in obj.__dict__.items() if not k.startswith("_")
+                } for obj in objs]
 
             elif isinstance(qs, str):
-                # Execute raw SQL string
                 result = session.execute(text(qs), params or {})
-                # Use mappings() to get dict-like rows immediately
                 data_dicts = [dict(row) for row in result.mappings()]
 
             elif isinstance(qs, Select):
-                # Execute SQLAlchemy 2.0 Select object
                 result = session.execute(qs)
-                # Check if we are selecting full ORM objects or specific columns
-                if qs.column_descriptions and qs.column_descriptions[0]['entity'] == cls:
+                if qs.column_descriptions and qs.column_descriptions[0]["entity"] == cls:
                     objs = result.scalars().all()
-                    data_dicts = [{k: v for k, v in obj.__dict__.items() if k != '_sa_instance_state'} for obj in objs]
+                    data_dicts = [obj.to_dict() if hasattr(obj, "to_dict") else {
+                        k: v for k, v in obj.__dict__.items() if not k.startswith("_")
+                    } for obj in objs]
                 else:
                     data_dicts = [dict(row) for row in result.mappings()]
 
             else:
-                # Handle legacy ORM Query objects
-                objs = qs.all() if hasattr(qs, 'all') else qs
-                data_dicts = [{k: v for k, v in obj.__dict__.items() if k != '_sa_instance_state'} for obj in objs]
+                objs = qs.all() if hasattr(qs, "all") else qs
+                data_dicts = [obj.to_dict() if hasattr(obj, "to_dict") else {
+                    k: v for k, v in obj.__dict__.items() if not k.startswith("_")
+                } for obj in objs]
 
-        # 2. Spatial Conversion Logic (Remains largely the same)
         if is_spatial and cls._Meta.is_spatial:
             if not geom_col or not srid:
                 detected_name, detected_srid = cls.get_geom_col_name_srid()
@@ -587,34 +717,29 @@ class ModelHelpersMixin:
                 for row in data_dicts:
                     val = row.get(geom_col)
                     if val is not None:
-                        # Convert WKB (binary) to Shapely for GeoPandas
-                        if isinstance(val, WKBElement):
-                            row[geom_col] = wkb.loads(bytes(val.data), hex=True)
-                        elif isinstance(val, bytes):
-                            row[geom_col] = wkb.loads(val)
+                        row[geom_col] = cls.normalize_geometry_value(val, output="shapely")
 
                 return gpd.GeoDataFrame(data_dicts, geometry=geom_col, crs=f"EPSG:{srid}")
 
         return pd.DataFrame(data_dicts)
 
-
     @classmethod
     def to_geojson(cls, qs: Union[Query, Select] = None) -> dict:
-        """
-        Converts the model data to a GeoJSON-compliant dictionary.
-        """
         gdf = cls.to_gdf(qs=qs)
         if gdf.empty:
             return {"type": "FeatureCollection", "features": []}
-
-        # The __geo_interface__ is a property of GeoDataFrames that
-        # follows the GeoJSON standard.
         return gdf.__geo_interface__
 
     @classmethod
-    def unary_union_to_gdf(cls, qs: Union[Query, Select] = None, session: Session = None) -> Optional[gpd.GeoDataFrame]:
+    def unary_union_to_gdf(
+        cls,
+        qs: Union[Query, Select] = None,
+        session: Session = None,
+    ) -> Optional[gpd.GeoDataFrame]:
         geom_cols = cls.get_geom_cols()
-        if not geom_cols: return None
+        if not geom_cols:
+            return None
+
         g_name = list(geom_cols.keys())[0]
         srid = geom_cols[g_name].type.srid
 
@@ -624,126 +749,92 @@ class ModelHelpersMixin:
             else:
                 result = s.query(func.ST_Union(getattr(cls, g_name))).scalar()
 
-            if result is None: return None
-            return gpd.GeoDataFrame(geometry=[cls.convert_wkb(result)], crs=f"EPSG:{srid}")
+            if result is None:
+                return None
 
-    # --- SERVER-SIDE SPATIAL UTILITIES ---
+            return gpd.GeoDataFrame(
+                geometry=[cls.normalize_geometry_value(result, output="shapely")],
+                crs=f"EPSG:{srid}",
+            )
+
+    # -------------------------------------------------------
+    # SERVER-SIDE SPATIAL UTILITIES
+    # -------------------------------------------------------
+    @staticmethod
+    def obj_to_shapely(obj, geom_col="geom"):
+        return ModelHelpersMixin.normalize_geometry_value(
+            getattr(obj, geom_col),
+            output="shapely",
+        )
 
     @staticmethod
-    def obj_to_shapely(obj, geom_col='geom'):
-        """Converts a model instance's geometry to a Shapely object."""
-        data = getattr(obj, geom_col)
-        if isinstance(data, WKBElement):
-            return wkb.loads(bytes(data.data), hex=True)
-        return data
-
-    # @staticmethod
-    # def obj_to_shapely(obj, geom_col='geom'):
-    #     return wkb.loads(obj[geom_col].desc)
-
-    @staticmethod
-    def obj_to_envelop(obj, session: Session, in_latlon: bool = False, geom_col='geom'):
-        """
-        Calculates the Bounding Box (Envelope) via PostGIS.
-        Optionally transforms to Lat/Lon (EPSG:4326).
-        """
+    def obj_to_envelop(obj, session: Session, in_latlon: bool = False, geom_col="geom"):
         target_geom = getattr(obj, geom_col)
         if in_latlon:
             target_geom = func.ST_Transform(target_geom, 4326)
 
-        # ST_Envelope returns a polygon representing the bounding box
         envelope = session.scalar(func.ST_Envelope(target_geom))
-
         if envelope is not None:
-            return wkb.loads(bytes(envelope.data), hex=True)
+            return ModelHelpersMixin.normalize_geometry_value(envelope, output="shapely")
         return None
 
     @staticmethod
-    def obj_to_xy(obj, session: Session, in_latlon: bool = False, geom_col='geom'):
-        """
-        Extracts X and Y coordinates.
-        If the geometry is a Polygon/MultiPolygon, it uses the Centroid.
-        """
+    def obj_to_xy(obj, session: Session, in_latlon: bool = False, geom_col="geom"):
         target_geom = getattr(obj, geom_col)
         if in_latlon:
             target_geom = func.ST_Transform(target_geom, 4326)
 
         geom_type = session.scalar(func.GeometryType(target_geom))
-
-        if geom_type in ['POLYGON', 'MULTIPOLYGON']:
-            point_geom = func.ST_Centroid(target_geom)
-        else:
-            point_geom = target_geom
+        point_geom = func.ST_Centroid(target_geom) if geom_type in ["POLYGON", "MULTIPOLYGON"] else target_geom
 
         x = session.scalar(func.ST_X(point_geom))
         y = session.scalar(func.ST_Y(point_geom))
-
         return x, y
 
-    @classmethod
-    def obj_to_gdf(cls, obj, geom_col_name=None) -> Union[gpd.GeoDataFrame, pd.DataFrame]:
-        """
-        Convert a single model instance to a GeoDataFrame.
-        Handles date serialization and geometry conversion.
-        """
-        # We leverage the existing to_object logic to get clean data
-        data = obj.to_object()
-
-        # Determine geometry column and SRID
-        g_cols = cls.get_geom_cols()
-        if not g_cols:
-            return pd.DataFrame([data])
-
-        target_g = geom_col_name or list(g_cols.keys())[0]
-        srid = g_cols[target_g].type.srid
-
-        # Ensure dates are serialized for the DataFrame
-        for k, v in data.items():
-            if isinstance(v, (date, datetime)):
-                data[k] = v.isoformat()
-
-        return gpd.GeoDataFrame([data], geometry=target_g, crs=f"EPSG:{srid}")
-
-    # --- STRING & WKB PARSING ---
-
+    # -------------------------------------------------------
+    # STRING & WKB PARSING
+    # -------------------------------------------------------
     @classmethod
     def extent_box_2_tuple(cls, box_string: str) -> Tuple[float, float, float, float]:
-        """Parses a PostGIS 'BOX(xmin ymin, xmax ymax)' string into a tuple."""
-        # Standard PostGIS BOX format: BOX(1 2,3 4)
-        values = box_string.replace('BOX(', '').replace(')', '').split(",")
+        values = box_string.replace("BOX(", "").replace(")", "").split(",")
         xmin, ymin = map(float, values[0].split())
         xmax, ymax = map(float, values[1].split())
         return (xmin, ymin, xmax, ymax)
 
     @staticmethod
     def convert_wkb_element_to_gdf(wkb_element: WKBElement) -> gpd.GeoDataFrame:
-        """Converts a single WKBElement into a single-row GeoDataFrame."""
-        geometry = wkb.loads(bytes(wkb_element.data), hex=True)
+        geometry = ModelHelpersMixin.normalize_geometry_value(wkb_element, output="shapely")
         srid = wkb_element.srid
-        return gpd.GeoDataFrame([{'geometry': geometry}], crs=f'EPSG:{srid}')
+        return gpd.GeoDataFrame([{"geometry": geometry}], crs=f"EPSG:{srid}")
 
-    # --- SQL DEBUGGING ---
-
+    # -------------------------------------------------------
+    # SQL DEBUGGING
+    # -------------------------------------------------------
     @staticmethod
     def convert_to_sql_query(qs, engine) -> str:
-        """Compiles a query object into a raw SQL string using the engine's dialect."""
         compiled = qs.compile(compile_kwargs={"literal_binds": True}, dialect=engine.dialect)
         return str(compiled)
 
     @classmethod
     def get_query_string(cls, qs):
-        """Specifically compiles a query for the PostgreSQL dialect."""
         from sqlalchemy.dialects import postgresql
         return qs.statement.compile(
             dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True}
+            compile_kwargs={"literal_binds": True},
         )
 
-    # --- ADVANCED SPATIAL FILTERING ---
+    # -------------------------------------------------------
+    # ADVANCED SPATIAL FILTERING
+    # -------------------------------------------------------
     @classmethod
-    def get_result_set_under_aoi(cls, aoi_gdf: gpd.GeoDataFrame, geom_col: InstrumentedAttribute) -> gpd.GeoDataFrame:
+    def get_result_set_under_aoi(
+        cls,
+        aoi_gdf: gpd.GeoDataFrame,
+        geom_col: InstrumentedAttribute,
+    ) -> gpd.GeoDataFrame:
         srid = geom_col.type.srid
         geom_col_name = geom_col.name
+
         if aoi_gdf.crs.to_epsg() != srid:
             aoi_gdf = aoi_gdf.to_crs(epsg=srid)
 
@@ -751,10 +842,9 @@ class ModelHelpersMixin:
 
         with cls.managed_session() as session:
             query = session.query(cls).filter(
-                func.ST_Intersects(getattr(cls, geom_col_name), func.ST_GeomFromText(aoi_geom_wkt, srid))
+                func.ST_Intersects(
+                    getattr(cls, geom_col_name),
+                    func.ST_GeomFromText(aoi_geom_wkt, srid),
+                )
             )
             return cls.to_dataframe(qs=query, is_spatial=True, geom_col=geom_col_name, srid=srid)
-
-
-
-
