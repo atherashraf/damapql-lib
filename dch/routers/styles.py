@@ -166,7 +166,7 @@ async def upload_sld_style(
             else:
                 obj.layer_styling = {"type": "sld", "style": sld_str}
 
-        obj.save(session=session, allow_update=True)
+        obj.save(session=session)
 
     return {"payload": "Style saved successfully"}
 

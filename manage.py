@@ -26,6 +26,9 @@ Create database tables:
     python -m app.damapql.manage migrate --app_label auth
     python -m app.damapql.manage migrate --app_label dch
      python -m app.damapql.manage sync_schema --app_label dch
+     python -m app.damapql.manage sync_sequences --app_label dch
+     python -m app.damapql.manage sync_sequences --app_label dch --table_names dch_map_info,dch_layer_info,dch_layer_accessibility
+
 
 Add DB Connections:
     python -m app.damapql.manage add_db_connection
@@ -81,7 +84,6 @@ from sqlalchemy_utils import ChoiceType
 from sqlalchemy.engine import URL
 from sqlalchemy.orm.attributes import flag_modified
 
-
 from cryptography.fernet import Fernet
 
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel
@@ -100,8 +102,6 @@ manage_router = APIRouter(
     tags=["manage"],
     responses={404: {"description": "Not found"}},
 )
-
-
 
 
 def create_dch_databases():
@@ -242,6 +242,7 @@ def update_db_connection_localhost(ip: str):
 
         session.commit()
 
+
 # --- UTILS ---
 
 def to_python_scalar(v: Any) -> Any:
@@ -261,6 +262,7 @@ def to_python_scalar(v: Any) -> Any:
 
     return v
 
+
 def sqlalchemy_column_to_python_type(col) -> str:
     """Maps SQLAlchemy types to string names for Pydantic generation."""
     if isinstance(col.type, (Integer, Float)):
@@ -274,6 +276,7 @@ def sqlalchemy_column_to_python_type(col) -> str:
     elif hasattr(col.type, 'item_type'):
         return "list"
     return "Any"
+
 
 def parse_params(argv: List[str]) -> Dict[str, Any]:
     """Parses CLI arguments into a dictionary."""
@@ -293,6 +296,7 @@ def parse_params(argv: List[str]) -> Dict[str, Any]:
             i += 1
     return params
 
+
 def _to_bool(value: Any) -> bool:
     """Convert CLI/string values to bool."""
     if isinstance(value, bool):
@@ -300,6 +304,7 @@ def _to_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
 
 # --- APP SCAFFOLDING ---
 
@@ -314,6 +319,7 @@ def startapp(app_label: str):
         with open(os.path.join(dir_path, fname), "w") as f:
             f.write(f'"""\n{fname} for {app_label} app\n"""\n')
     print(f"🚀 App '{app_label}' created at {dir_path}")
+
 
 # --- SCHEMA & MIGRATIONS ---
 
@@ -367,6 +373,98 @@ def sync_schema(app_label: str, rename_map: dict | None = None):
     print(f"✅ Schema sync for '{app_label}' complete.")
 
 
+def sync_sequences(app_label: str, table_names: str = None):
+    """
+    Sync PostgreSQL ID sequences with current MAX(id) values.
+
+    Usage:
+        python -m app.damapql.manage sync_sequences --app_label dch
+        python -m app.damapql.manage sync_sequences --app_label auth
+        python -m app.damapql.manage sync_sequences --app_label dch --table_names dch_map_info,dch_layer_info
+    """
+    ap = DA_APPS.get(app_label)
+    if not ap:
+        print(f"❌ App label '{app_label}' not found.")
+        return
+
+    importlib.import_module(f'{ap["path"]}.models')
+
+    if "base" not in ap:
+        BaseCls = DBBase
+    else:
+        BaseCls = import_string(ap["base"]) if isinstance(ap["base"], str) else ap["base"]
+
+    engine = BaseCls.get_engine(db_key=ap["db_key"])
+
+    requested_tables = None
+    if table_names:
+        requested_tables = {t.strip() for t in table_names.split(",") if t.strip()}
+
+    synced = []
+    skipped = []
+
+    with BaseCls.managed_session(app_label=app_label) as session:
+        for table in BaseCls.metadata.sorted_tables:
+            table_name = table.name
+
+            if requested_tables and table_name not in requested_tables:
+                continue
+
+            pk_cols = list(table.primary_key.columns)
+            if len(pk_cols) != 1:
+                skipped.append((table_name, "composite primary key"))
+                continue
+
+            pk_col = pk_cols[0]
+            pk_name = pk_col.name
+
+            # only handle integer/bigint autoincrement-style PKs
+            try:
+                python_type = pk_col.type.python_type
+            except NotImplementedError:
+                skipped.append((table_name, f"unsupported pk type for '{pk_name}'"))
+                continue
+
+            if python_type is not int:
+                skipped.append((table_name, f"non-integer pk '{pk_name}'"))
+                continue
+
+            seq = session.execute(
+                text("SELECT pg_get_serial_sequence(:tbl, :col)"),
+                {"tbl": table_name, "col": pk_name}
+            ).scalar()
+
+            if not seq:
+                skipped.append((table_name, f"no backing sequence for '{pk_name}'"))
+                continue
+
+            max_id = session.execute(
+                text(f'SELECT COALESCE(MAX("{pk_name}"), 0) FROM "{table_name}"')
+            ).scalar() or 0
+
+            # set sequence so next nextval() becomes max_id + 1
+            session.execute(
+                text("SELECT setval(:seq, :val, :is_called)"),
+                {"seq": seq, "val": max_id, "is_called": True}
+            )
+
+            synced.append((table_name, pk_name, max_id, seq))
+
+        session.commit()
+
+    print(f"✅ Sequence sync complete for app '{app_label}'")
+
+    if synced:
+        print("\nSynced tables:")
+        for table_name, pk_name, max_id, seq in synced:
+            print(f"  - {table_name}.{pk_name} -> max={max_id}, sequence={seq}")
+
+    if skipped:
+        print("\nSkipped tables:")
+        for table_name, reason in skipped:
+            print(f"  - {table_name}: {reason}")
+
+
 def import_string(dotted_path: str):
     module_path, attr_name = dotted_path.rsplit(".", 1)
     module = importlib.import_module(module_path)
@@ -391,6 +489,7 @@ def migrate(app_label: str):
     BaseCls.metadata.create_all(engine)
     print(f"✅ Migration for '{app_label}' complete.")
 
+
 # --- DATA MANAGEMENT ---
 
 def dumpdata(app_label: str, model: str, output: str = "data.json"):
@@ -412,7 +511,6 @@ def dumpdata(app_label: str, model: str, output: str = "data.json"):
     with open(output, "w") as f:
         json.dump(data, f, indent=2, default=str)
     print(f"📤 Dumped {len(data)} records to {output}")
-
 
 
 def loaddata(app_label: str, file: str):
@@ -505,13 +603,11 @@ def reset_pk_sequences(engine, session, touched_models):
     session.commit()
 
 
-
-
 def create_layerinfo_from_app_models(
-    app_label: str,
-    layer_category_id=None,
-    overwrite: bool = True,
-    include_non_spatial: bool = False,
+        app_label: str,
+        layer_category_id=None,
+        overwrite: bool = True,
+        include_non_spatial: bool = False,
 ):
     service = LayerInfoService()
 
@@ -564,15 +660,17 @@ Usage:
         overwrite=True,
     )
 """
+
+
 def create_layerinfo_from_raster(
-    title: str,
-    raster_path: str,
-    layer_category_id=None,
-    temporal: str = None,
-    data_model_type: str = None,
-    overwrite: bool = False,
-    app_label: str = "dch",
-    layer_name: str = None,
+        title: str,
+        raster_path: str,
+        layer_category_id=None,
+        temporal: str = None,
+        data_model_type: str = None,
+        overwrite: bool = False,
+        app_label: str = "dch",
+        layer_name: str = None,
 ):
     service = LayerInfoService()
 
@@ -626,6 +724,7 @@ def create_layerinfo_from_raster(
         }
     )
     return obj
+
 
 # --- AUTH, ROLES, ORGS & DEPTS ---
 
@@ -691,6 +790,7 @@ def create_organization(name: str, description: str = None):
 
         print(f"✅ Organization '{name}' created with ID={organization.id}.")
 
+
 def create_department(organization_name: str, name: str, description: str = None):
     """Creates an organizational department under an organization."""
     normalized_org = organization_name.strip()
@@ -730,6 +830,7 @@ def create_department(organization_name: str, name: str, description: str = None
             f"with ID={department.id}."
         )
 
+
 def create_role(name: str, description: str = None):
     """Creates a security role."""
     normalized_name = name.strip().lower()
@@ -747,14 +848,15 @@ def create_role(name: str, description: str = None):
 
         print(f"✅ Role '{name}' created with ID={role.id}.")
 
+
 def create_app_user(
-    role_name: str,
-    organization_name: str = None,
-    department_name: str = None,
-    is_staff: bool = True,
-    is_superuser: bool = False,
-    is_active: bool = True,
-    is_verified: bool = True,
+        role_name: str,
+        organization_name: str = None,
+        department_name: str = None,
+        is_staff: bool = True,
+        is_superuser: bool = False,
+        is_active: bool = True,
+        is_verified: bool = True,
 ):
     """Interactive CLI to create an application user with optional organization and department."""
     print("\n--- Create App User ---")
@@ -859,6 +961,7 @@ def create_app_user(
             f"with role '{role_name}' and ID={user.id}."
         )
 
+
 def _prompt_valid_email() -> str:
     while True:
         email = input("Email: ")
@@ -868,6 +971,7 @@ def _prompt_valid_email() -> str:
         except ValidationError:
             print("❌ Invalid email format.")
 
+
 def _prompt_unique_username() -> str:
     while True:
         username = input("Username: ")
@@ -876,13 +980,16 @@ def _prompt_unique_username() -> str:
         else:
             return username
 
+
 # --- SECURITY ---
 
 def generate_crypto_key():
     print(Fernet.generate_key().decode())
 
+
 def generate_secret_key_hex(length: int = 32):
     print(binascii.hexlify(os.urandom(int(length))).decode())
+
 
 # --- SYSTEM ---
 
@@ -897,6 +1004,7 @@ def help():
             doc = (func.__doc__ or "No description").split('\n')[0]
             print(f"{name:<25} {doc}")
     print("\n")
+
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ['help', '--help', '-h']:
@@ -916,6 +1024,7 @@ def main():
     except Exception:
         print("💥 Execution failed:")
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
