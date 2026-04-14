@@ -18,12 +18,14 @@ class AccessibilityType(APIEnum):
     DB = 'Database'
     D_DB = 'Django Database Key'
     URL = 'url'
+    Application = 'Application'
 
 
 class DataModel(APIEnum):
     R = 'Raster'
     V = 'Vector'
     URL= 'URL'
+    Application= 'Application'
 
 
 class GeomType(APIEnum):
@@ -48,4 +50,11 @@ class ModelType(APIEnum):
     DSM = 'Digital Surface Model'
     Surface = 'Surface'
     Classification = 'Classification'
+    Application = 'Application'
+    Api = 'Api'
     Other = 'Other'
+
+
+class ApplicationURLType(str, Enum):
+    geoserver = "geoserver"
+    arcgis = "arcgis"

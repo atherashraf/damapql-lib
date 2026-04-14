@@ -26,7 +26,16 @@ from app.damapql.utils.adapters.deps import (
     sync_session_scope,
 )
 from settings import DA_APPS
+from sqlalchemy_utils.types.choice import Choice
 
+def _normalize_choice(value):
+    if isinstance(value, Choice):
+        return value.value   # 👈 or .code depending on your API
+    if isinstance(value, dict):
+        return {k: _normalize_choice(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_choice(v) for v in value]
+    return value
 
 class AmbiguousGeometryError(Exception):
     pass
@@ -244,6 +253,9 @@ class ModelHelpersMixin:
     # -------------------------------------------------------
     # OBJECT / DICT CONVERSION
     # -------------------------------------------------------
+
+
+
     def to_object(self):
         pydantic_cls = getattr(self, "__pydantic__", None)
         data = {}
@@ -255,7 +267,7 @@ class ModelHelpersMixin:
             if isinstance(v, WKBElement):
                 data[k] = to_shape(v)
             else:
-                data[k] = v
+                data[k] = _normalize_choice(v)
 
         if pydantic_cls:
             expected_fields = set(pydantic_cls.model_fields.keys())
