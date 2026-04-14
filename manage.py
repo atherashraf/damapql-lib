@@ -498,20 +498,44 @@ def dumpdata(app_label: str, model: str, output: str = "data.json"):
     module = importlib.import_module(f'{ap["path"]}.models')
     model_class = getattr(module, model)
 
+    output_path = Path(output)
+
+    # ✅ Step 1: Resolve path
+    if not output_path.is_absolute():
+        output_path = Path(BASE_DIR) / output_path
+
+    output_path = output_path.resolve()
+
+    # ✅ Step 2: Delete if exists
+    if output_path.exists():
+        print(f"⚠️ Deleting existing file: {output_path}")
+        output_path.unlink()
+
     with DBBase.managed_session(app_label=app_label) as session:
         results = session.query(model_class).all()
         data = []
         pk_name = model_class.__mapper__.primary_key[0].name
 
         for obj in results:
-            fields = {col.name: to_python_scalar(getattr(obj, col.name))
-                      for col in model_class.__table__.columns if col.name != pk_name}
-            data.append({"model": model, "pk": getattr(obj, pk_name), "fields": fields})
+            fields = {
+                col.name: to_python_scalar(getattr(obj, col.name))
+                for col in model_class.__table__.columns
+                if col.name != pk_name
+            }
+            data.append({
+                "model": model,
+                "pk": getattr(obj, pk_name),
+                "fields": fields
+            })
 
-    with open(output, "w") as f:
+    # ✅ Step 3: Ensure directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ✅ Step 4: Write file
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
-    print(f"📤 Dumped {len(data)} records to {output}")
 
+    print(f"📤 Dumped {len(data)} records to {output_path}")
 
 def loaddata(app_label: str, file: str):
     """
@@ -568,9 +592,8 @@ def loaddata(app_label: str, file: str):
                 payload[pk_name] = pk_value
 
                 obj = model_class(**payload)
-                session.merge(obj)
+                obj.save(session=session)
 
-            session.commit()
 
             reset_pk_sequences(
                 DBBase.get_engine(app_label=app_label),
