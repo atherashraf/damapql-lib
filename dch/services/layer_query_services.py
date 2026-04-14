@@ -633,3 +633,67 @@ class LayerQueryService:
             "column": col_name,
             "value": value,
         }
+
+    @staticmethod
+    def get_feature_extent(
+            identifier: str,
+            pk: str | int | list[str] | list[int],
+            by: LayerLookupBy = "uuid",
+    ) -> dict[str, Any] | Response:
+        """
+        Return extent of a single feature by primary key.
+        Extent is returned in the layer SRID.
+        """
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+
+        if not geom_col:
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
+
+        engine = access.get_external_engine()
+        if not engine:
+            return Response(status_code=204)
+
+        pk_values = pk if isinstance(pk, list) else [str(pk)]
+        where_sql, params = LayerQueryService.get_safe_pk_where(info, pk_values)
+
+        table = DBQuery.safe_ident(access.table_name)
+        geom = DBQuery.safe_ident(geom_col)
+
+        sql = text(
+            f"""
+            SELECT
+                ST_XMin(ext) AS xmin,
+                ST_YMin(ext) AS ymin,
+                ST_XMax(ext) AS xmax,
+                ST_YMax(ext) AS ymax
+            FROM (
+                SELECT ST_Envelope({geom}) AS ext
+                FROM {table}
+                WHERE {where_sql}
+                LIMIT 1
+            ) q
+            """
+        )
+
+        with Session(engine) as session:
+            row = session.execute(sql, params).mappings().first()
+
+        if not row:
+            return Response(status_code=204)
+
+        if None in (row["xmin"], row["ymin"], row["xmax"], row["ymax"]):
+            return Response(status_code=204)
+
+        return {
+            "extent": [
+                float(row["xmin"]),
+                float(row["ymin"]),
+                float(row["xmax"]),
+                float(row["ymax"]),
+            ],
+            "srid": info.srid,
+        }

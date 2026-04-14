@@ -356,3 +356,12 @@ def update_column_value(
         value=payload.value,
     )
     return {"payload": result}
+
+@layer_query_router.get("/layer-query/{identifier}/feature-extent")
+def get_feature_extent(
+    identifier: str,
+    pk: str,
+    by: LayerLookupBy = Query(default="table_name"),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    return {"payload": LayerQueryService.get_feature_extent(identifier=identifier, by=by, pk=pk)}
