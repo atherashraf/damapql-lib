@@ -541,17 +541,13 @@ def loaddata(app_label: str, file: str):
     """
     Load records from a JSON fixture file and reset PostgreSQL SERIAL sequences.
 
-    The file path may be either:
-    - an absolute path
-    - a relative path (resolved against DCH_BASE_DIR)
-
-    Example:
-        python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layercategory.json
+    Behavior:
+    - existing PK -> update
+    - new PK -> insert
     """
 
     file_path = Path(file)
 
-    # Resolve relative paths against DCH_BASE_DIR
     if not file_path.is_absolute():
         file_path = Path(BASE_DIR) / file_path
 
@@ -569,9 +565,9 @@ def loaddata(app_label: str, file: str):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             records = json.load(f)
-    except Exception as e:
+    except Exception:
         print(f"❌ Failed to read JSON file: {file_path}")
-        raise e
+        raise
 
     module = importlib.import_module(f'{ap["path"]}.models')
     touched_models = set()
@@ -592,8 +588,11 @@ def loaddata(app_label: str, file: str):
                 payload[pk_name] = pk_value
 
                 obj = model_class(**payload)
-                obj.save(session=session)
 
+                # existing PK -> update, new PK -> insert
+                session.merge(obj)
+
+            session.commit()
 
             reset_pk_sequences(
                 DBBase.get_engine(app_label=app_label),
@@ -607,7 +606,6 @@ def loaddata(app_label: str, file: str):
             session.rollback()
             print("❌ Data loading failed. Rolling back transaction.")
             raise
-
 
 def reset_pk_sequences(engine, session, touched_models):
     """Fixes ID sequences to avoid PK collisions after bulk load."""
