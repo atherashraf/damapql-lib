@@ -510,6 +510,7 @@ async def add_layer_url_info(
         raise HTTPException(status_code=500, detail="Failed to add layer URL info")
 
 
+
 @dch_admin_router.post("/save_map_info/")
 async def save_map_info(
         request: Request,
@@ -529,6 +530,19 @@ async def save_map_info(
         raise HTTPException(status_code=400, detail=f"Invalid LayerInfo PK column: {pk_col}")
 
     try:
+        # normalize known JSON fields
+        json_list_fields = {"layers"}
+
+        for field in json_list_fields:
+            if field in row_data and isinstance(row_data[field], str):
+                try:
+                    row_data[field] = json.loads(row_data[field])
+                except json.JSONDecodeError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid JSON for field '{field}'"
+                    )
+
         with MapInfo.managed_session() as session:
             obj = session.execute(
                 select(MapInfo).where(getattr(MapInfo, pk_col) == pk_val)
@@ -550,7 +564,6 @@ async def save_map_info(
     except Exception as e:
         da_logger.exception(f"Failed to save layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save layer info")
-
 
 @dch_admin_router.post("/save_layer_info/")
 async def save_layer_info(
