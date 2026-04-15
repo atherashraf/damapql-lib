@@ -365,3 +365,34 @@ def get_feature_extent(
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     return {"payload": LayerQueryService.get_feature_extent(identifier=identifier, by=by, pk=pk)}
+
+@layer_query_router.get("/layer-query/{identifier}/feature-geojson")
+def get_feature_geojson(
+    identifier: str,
+    pk: str,
+    by: LayerLookupBy = Query(default="uuid"),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Get a single feature as GeoJSON by primary key values.
+
+    Endpoint:
+    POST /api/dch/layer-query/{identifier}/feature-geojson
+
+    Body:
+    - pk_values: list[str]
+
+    Returns:
+    - GeoJSON Feature
+
+    Use case:
+    - Map highlight
+    - Boundary navigation
+    - Zoom to selected feature
+    """
+    feature = LayerQueryService.get_features_geojson(
+        identifier=identifier,
+        by=by,
+        pk_values=[pk]
+    )
+    return {"payload": feature}
