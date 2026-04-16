@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import selectinload, Session
 
+from app.damapql.dch.api_enum import ModelType, ApplicationURLType
 from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.dch.utils.mvt_utils import MVTCache
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
@@ -445,18 +446,18 @@ async def save_model_data(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/add_layer_url_info/")
 async def add_layer_url_info(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+    request: Request,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
-    Create a URL-based layer metadata entry.
+    Create a URL-based or application-based layer metadata entry.
 
     Expected JSON:
     {
       "layer_title": "Layer 1",
       "layer_category_id": 1,
       "layer_url": "https://....",
-      "url_type": "wms"
+      "url_type": "wms"   # wms, wfs, tms, geoserver, arcgis
     }
 
     Protected endpoint.
@@ -472,17 +473,35 @@ async def add_layer_url_info(
 
     if not layer_title:
         raise HTTPException(status_code=400, detail="layer_title is required")
-    if not layer_category_id:
+    if layer_category_id is None:
         raise HTTPException(status_code=400, detail="layer_category_id is required")
     if not layer_url:
         raise HTTPException(status_code=400, detail="layer_url is required")
     if not url_type:
         raise HTTPException(status_code=400, detail="url_type is required")
 
+    url_type = str(url_type).strip().lower()
+
+    valid_url_types = {"wms", "wfs", "tms"}
+    valid_app_types = {e.value for e in ApplicationURLType}
+    allowed_types = valid_url_types | valid_app_types
+
+    if url_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid url_type. Allowed values are: {', '.join(sorted(allowed_types))}"
+        )
+
     try:
         with LayerInfo.managed_session() as session:
+            is_application = url_type in valid_app_types
+
             accessibility = LayerAccessibility(
-                accessibility_type=AccessibilityType.URL.name,
+                accessibility_type=(
+                    AccessibilityType.Application.name
+                    if is_application
+                    else AccessibilityType.URL.name
+                ),
                 params={
                     "url": layer_url,
                     "url_type": url_type,
@@ -494,8 +513,17 @@ async def add_layer_url_info(
             layer = LayerInfo(
                 uuid=DCHUtils.get_uuid1(),
                 title=layer_title,
-                layer_name=layer_title.replace(" ", "_"),
-                data_model=DataModel.URL.name,
+                layer_name=layer_title.strip().replace(" ", "_"),
+                data_model=(
+                    DataModel.Application.name
+                    if is_application
+                    else DataModel.URL.name
+                ),
+                model_type=(
+                    ModelType.Application.name
+                    if is_application
+                    else ModelType.Api.name
+                ),
                 category_id=int(layer_category_id),
                 layer_access_id=accessibility.id,
             )
@@ -508,6 +536,7 @@ async def add_layer_url_info(
     except Exception as e:
         da_logger.exception(f"Failed to add URL layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to add layer URL info")
+
 
 
 @dch_admin_router.post("/save_map_info/")
@@ -529,6 +558,19 @@ async def save_map_info(
         raise HTTPException(status_code=400, detail=f"Invalid LayerInfo PK column: {pk_col}")
 
     try:
+        # normalize known JSON fields
+        json_list_fields = {"layers"}
+
+        for field in json_list_fields:
+            if field in row_data and isinstance(row_data[field], str):
+                try:
+                    row_data[field] = json.loads(row_data[field])
+                except json.JSONDecodeError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid JSON for field '{field}'"
+                    )
+
         with MapInfo.managed_session() as session:
             obj = session.execute(
                 select(MapInfo).where(getattr(MapInfo, pk_col) == pk_val)
@@ -550,7 +592,6 @@ async def save_map_info(
     except Exception as e:
         da_logger.exception(f"Failed to save layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save layer info")
-
 
 @dch_admin_router.post("/save_layer_info/")
 async def save_layer_info(

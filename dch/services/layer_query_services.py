@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 import pandas as pd
@@ -632,4 +633,197 @@ class LayerQueryService:
             "updated": result.rowcount,
             "column": col_name,
             "value": value,
+        }
+
+    @staticmethod
+    def get_feature_extent(
+            identifier: str,
+            pk: str | int | list[str] | list[int],
+            by: LayerLookupBy = "uuid",
+    ) -> dict[str, Any] | Response:
+        """
+        Return extent of a single feature by primary key.
+        Extent is returned in the layer SRID.
+        """
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+
+        if not geom_col:
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
+
+        engine = access.get_external_engine()
+        if not engine:
+            return Response(status_code=204)
+
+        pk_values = pk if isinstance(pk, list) else [str(pk)]
+        where_sql, params = LayerQueryService.get_safe_pk_where(info, pk_values)
+
+        table = DBQuery.safe_ident(access.table_name)
+        geom = DBQuery.safe_ident(geom_col)
+
+        sql = text(
+            f"""
+            SELECT
+                ST_XMin(ext) AS xmin,
+                ST_YMin(ext) AS ymin,
+                ST_XMax(ext) AS xmax,
+                ST_YMax(ext) AS ymax
+            FROM (
+                SELECT ST_Envelope({geom}) AS ext
+                FROM {table}
+                WHERE {where_sql}
+                LIMIT 1
+            ) q
+            """
+        )
+
+        with Session(engine) as session:
+            row = session.execute(sql, params).mappings().first()
+
+        if not row:
+            return Response(status_code=204)
+
+        if None in (row["xmin"], row["ymin"], row["xmax"], row["ymax"]):
+            return Response(status_code=204)
+
+        return {
+            "extent": [
+                float(row["xmin"]),
+                float(row["ymin"]),
+                float(row["xmax"]),
+                float(row["ymax"]),
+            ],
+            "srid": info.srid,
+        }
+
+
+
+    @staticmethod
+    def get_features_geojson(
+        identifier: str,
+        pk_values: list[str],
+        by: LayerLookupBy = "uuid",
+    ) -> dict[str, Any] | Response:
+        """
+        Return multiple features as GeoJSON FeatureCollection by PK values.
+
+        Shape:
+        {
+            "type": "FeatureCollection",
+            "crs": "EPSG:3857",
+            "features": [
+                {
+                    "id": 1,
+                    "type": "Feature",
+                    "geometry": {...},
+                    "properties": {...}
+                }
+            ]
+        }
+
+        Notes:
+        - Geometry is returned as-is in the source SRID.
+        - CRS is included as a non-standard GeoJSON extension.
+        - Assumes all rows in the layer share the same SRID.
+        """
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+
+        if not geom_col:
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
+
+        if not pk_values:
+            return {
+                "type": "FeatureCollection",
+                "crs": None,
+                "features": [],
+            }
+
+        where_sql, params = LayerQueryService.get_safe_pk_where(info, pk_values)
+
+        engine = access.get_external_engine()
+        if not engine:
+            return Response(status_code=204)
+
+        table = DBQuery.safe_ident(access.table_name)
+        geom = DBQuery.safe_ident(geom_col)
+
+        sql = text(
+            f"""
+            SELECT
+                *,
+                ST_SRID({geom}) AS __srid,
+                ST_AsGeoJSON({geom}) AS __geojson_geometry
+            FROM {table}
+            WHERE {where_sql}
+            """
+        )
+
+        with Session(engine) as session:
+            rows = session.execute(sql, params).mappings().all()
+
+        if not rows:
+            return Response(status_code=204)
+
+        pk_cols = access.pk_cols or []
+        features: list[dict[str, Any]] = []
+        collection_srid = None
+
+        for row in rows:
+            row_dict = dict(row)
+
+            geometry_json = row_dict.pop("__geojson_geometry", None)
+            srid = row_dict.pop("__srid", None)
+
+            # Track collection-level SRID from first valid row
+            if collection_srid is None and srid not in (None, 0):
+                collection_srid = srid
+
+            # Remove raw geometry fields from properties
+            row_dict.pop(geom_col, None)
+            row_dict.pop("geom", None)
+            row_dict.pop("geometry", None)
+
+            if geometry_json is None:
+                continue
+
+            if isinstance(geometry_json, str):
+                geometry = json.loads(geometry_json)
+            elif isinstance(geometry_json, dict):
+                geometry = geometry_json
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Unsupported geometry JSON type: {type(geometry_json)}",
+                )
+
+            feature_id = None
+            if len(pk_cols) == 1:
+                feature_id = row_dict.get(pk_cols[0])
+            elif len(pk_cols) > 1:
+                feature_id = {col: row_dict.get(col) for col in pk_cols}
+
+            features.append(
+                {
+                    "id": feature_id,
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": row_dict,
+                }
+            )
+
+        crs = None
+        if collection_srid not in (None, 0):
+            crs = f"EPSG:{collection_srid}"
+
+        return {
+            "type": "FeatureCollection",
+            "crs": crs,
+            "features": features,
         }

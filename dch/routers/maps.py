@@ -2,8 +2,10 @@ from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import case, func, literal, select
 
+
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
+from app.damapql.dch.api_enum import DataModel, ApplicationURLType
 from app.damapql.dch.dch_map_schema import MapSaveRequest
 from app.damapql.dch.dtypes import LayerInfoListResponse, MapInfoResponse
 from app.damapql.dch.models import LayerInfo, LayerAccessibility, LayerCategory, MapInfo, DBQuery
@@ -53,19 +55,20 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.extent,
                 LayerInfo.extent_3857,
                 LayerInfo.data_model,
+                LayerInfo.model_type,
                 LayerInfo.geom_type,
                 LayerInfo.zoom_range,
                 LayerInfo.layer_styling,
                 LayerInfo.data_url,
                 LayerInfo.date_range_url,
-                LayerInfo.model_name
+
             )
             .join(LayerAccessibility, LayerAccessibility.id == LayerInfo.layer_access_id)
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
         )
 
 
-        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model"])
+        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model", "model_type"])
         # enforce exact order from select list
         column_order = [
             "id",
@@ -78,12 +81,13 @@ async def get_all_layer_info(current_user: UserInfo =
             "extent",
             "extent_3857",
             "data_model",
+            "model_type",
             "geom_type",
             "zoom_range",
             "layer_styling",
             "data_url",
             "date_range_url",
-            "model_name"
+
         ]
         df = df[column_order]
     return ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])
@@ -123,30 +127,41 @@ async def save_map(
             )
 
         layers = []
+
+        # Save DA layers
         for da in payload.daLayers:
-            style = da.style.model_dump() if da.style else existing_styles.get(da.uuid.strip())
+            da_uuid = da.uuid.strip()
+            style = da.style if da.style else existing_styles.get(da_uuid)
+
             layers.append({
-                "uuid": da.uuid.strip(),
+                "uuid": da_uuid,
                 "style": style,
                 "visible": da.visible,
                 "zoomRange": [0, 30],
                 "opacity": da.opacity,
+                "zIndex": da.zIndex,
             })
 
+        # Save base layer
         layers.append({
             "uuid": "-1",
             "isBase": True,
-            "key": payload.baseLayer.strip()
+            "key": payload.baseLayer.strip(),
         })
 
+        # Save overlay / other layers (e.g. WMS)
         for info in payload.otherLayers:
             layers.append({
                 "uuid": "-1",
                 "isBase": False,
-                "key": info.name.strip(),
-                "params": info.params,
-                "type": info.type,
-                "visible": True,
+                "name": info['name'].strip(),
+                "key": info['title'],
+                "title": info['title'],
+                "params": info['params'],
+                "type": info['type'],
+                "visible": info['visible'],
+                "opacity": info['opacity'],
+                "zIndex": info['zIndex'],
             })
 
         map_info.title = payload.mapName
@@ -156,7 +171,12 @@ async def save_map(
         map_info.units = "m"
         map_info.save(session=session)
 
-        return {"payload": {"msg": "Map saved successfully", "uuid": map_info.uuid}}
+        return {
+            "payload": {
+                "msg": "Map saved successfully",
+                "uuid": map_info.uuid,
+            }
+        }
 
 
 @dch_maps_router.get(
@@ -223,11 +243,37 @@ async def get_all_layers(current_user: UserInfo = Depends(AuthUtils.get_current_
                 LayerCategory.main.label("category"),
             )
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
+            .where(LayerInfo.data_model!=DataModel.Application.name)
         )
 
         df = DBQuery.execute_stmt_as_df(session, stmt)
         da_logger.info(f"get_all_layers: {df.to_dict(orient='records')}")
         return {"payload": df.to_dict(orient="records")}
+
+@dch_maps_router.get("/get_application_url/{url_type}/")
+async def get_application_layers(
+    url_type: ApplicationURLType,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    with LayerInfo.managed_session() as session:
+        stmt = (
+            select(
+                LayerInfo.title,
+                LayerInfo.layer_name,
+                LayerInfo.uuid,
+                LayerAccessibility.url,
+                LayerAccessibility.url_type,
+            )
+            .join(LayerAccessibility, LayerInfo.layer_access_id == LayerAccessibility.id)
+            .where(LayerInfo.data_model == DataModel.Application.name)
+            .where(LayerAccessibility.url_type == url_type.value)
+        )
+
+        df = DBQuery.execute_stmt_as_df(session, stmt)
+        records = df.to_dict(orient="records")
+
+        da_logger.info(f"get_application_layers: {records}")
+        return {"payload": records}
 
 
 @dch_maps_router.get("/layer_info/{uuid}/")

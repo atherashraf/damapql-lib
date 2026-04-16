@@ -1,0 +1,17 @@
+[
+  {
+    "model": "DBConnection",
+    "pk": 1,
+    "fields": {
+      "name": "wasa_data_localhost",
+      "params": {
+        "engine": "postgresql",
+        "host": "localhost",
+        "name": "wasa_data",
+        "port": "5432",
+        "user": "dafast",
+        "password": "gAAAAABpvE7_U9fgTl9332cNDGPSretVpz_FKpIQ5HzF80uJanKY7SRcaoIDWiwUUll5TkneDqVN-C9bwE_p8ueDTagIQ8wLOw=="
+      }
+    }
+  }
+]

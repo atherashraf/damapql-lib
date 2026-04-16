@@ -1,21 +1,138 @@
 [
-  { "model": "LayerCategory", "pk": 1, "fields": { "main": "Boundaries", "sub": null } },
-  { "model": "LayerCategory", "pk": 2, "fields": { "main": "Demographics", "sub": null } },
-  { "model": "LayerCategory", "pk": 3, "fields": { "main": "Water Resources", "sub": null } },
-  { "model": "LayerCategory", "pk": 4, "fields": { "main": "Infrastructure", "sub": null } },
-  { "model": "LayerCategory", "pk": 5, "fields": { "main": "Social Infrastructure", "sub": null } },
-  { "model": "LayerCategory", "pk": 6, "fields": { "main": "Surfaces", "sub": null } },
-  { "model": "LayerCategory", "pk": 7, "fields": { "main": "Imagery", "sub": null } },
-  { "model": "LayerCategory", "pk": 8, "fields": { "main": "Gauges", "sub": null } },
-  { "model": "LayerCategory", "pk": 9, "fields": { "main": "Other", "sub": null } },
-
-  { "model": "LayerCategory", "pk": 10, "fields": { "main": "Social Infrastructure", "sub": "Water Supply" } },
-  { "model": "LayerCategory", "pk": 11, "fields": { "main": "Social Infrastructure", "sub": "Sewerage" } },
-  { "model": "LayerCategory", "pk": 12, "fields": { "main": "Social Infrastructure", "sub": "Education" } },
-  { "model": "LayerCategory", "pk": 13, "fields": { "main": "Social Infrastructure", "sub": "Health" } },
-  { "model": "LayerCategory", "pk": 14, "fields": { "main": "Gauges", "sub": "Hydrological" } },
-  { "model": "LayerCategory", "pk": 15, "fields": { "main": "Gauges", "sub": "Meteorological" } },
-
-  { "model": "LayerCategory", "pk": 16, "fields": { "main": "Imagery", "sub": "Satellite" } },
-  { "model": "LayerCategory", "pk": 17, "fields": { "main": "Imagery", "sub": "Aerial" } }
+  {
+    "model": "LayerCategory",
+    "pk": 1,
+    "fields": {
+      "main": "Boundaries",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 2,
+    "fields": {
+      "main": "Demographics",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 3,
+    "fields": {
+      "main": "Water Resources",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 4,
+    "fields": {
+      "main": "Infrastructure",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 5,
+    "fields": {
+      "main": "Social Infrastructure",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 6,
+    "fields": {
+      "main": "Surfaces",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 7,
+    "fields": {
+      "main": "Imagery",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 8,
+    "fields": {
+      "main": "Gauges",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 9,
+    "fields": {
+      "main": "Other",
+      "sub": null
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 10,
+    "fields": {
+      "main": "Social Infrastructure",
+      "sub": "Water Supply"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 11,
+    "fields": {
+      "main": "Social Infrastructure",
+      "sub": "Sewerage"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 12,
+    "fields": {
+      "main": "Social Infrastructure",
+      "sub": "Education"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 13,
+    "fields": {
+      "main": "Social Infrastructure",
+      "sub": "Health"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 14,
+    "fields": {
+      "main": "Gauges",
+      "sub": "Hydrological"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 15,
+    "fields": {
+      "main": "Gauges",
+      "sub": "Meteorological"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 16,
+    "fields": {
+      "main": "Imagery",
+      "sub": "Satellite"
+    }
+  },
+  {
+    "model": "LayerCategory",
+    "pk": 17,
+    "fields": {
+      "main": "Imagery",
+      "sub": "Aerial"
+    }
+  }
 ]
