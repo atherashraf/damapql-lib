@@ -15,6 +15,7 @@ class UserCreate(BaseModel):
     organization: Optional[str] = None
     department: Optional[str] = None
     designation: Optional[str] = None
+    password: Optional[str] = None
     roles: List[str] = Field(default_factory=list)
 
 

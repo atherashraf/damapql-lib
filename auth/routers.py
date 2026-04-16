@@ -191,12 +191,12 @@ def create_user(
         if session.query(Profile).filter(Profile.email == user_data.profile_email).first():
             raise HTTPException(status_code=400, detail="Email already exists.")
 
-        dummy_password = AuthUtils.generate_temp_password(8)
+        password = user_data.password if user_data.password else AuthUtils.generate_temp_password(8)
 
         try:
             created_user = AuthUtils.create_user(
                 username=user_data.username,
-                password=dummy_password,
+                password=password,
                 email=user_data.profile_email,
                 name=user_data.profile_name,
                 contact=user_data.profile_contact,
@@ -210,27 +210,45 @@ def create_user(
 
             session.refresh(created_user)
 
-            token = AuthUtils.create_access_token(
-                subject=user_data.username,
-                expires_delta=timedelta(hours=1)
-            )
             app_fe_url = os.environ.get("APP_FE_URL", "")
-            activation_url = f"{app_fe_url}/activateaccount?token={token}"
 
-            email_subject, email_body = EmailUtils.get_email_subject_and_body(
-                email_type="create_pulse_user",
-                params={
-                    "profile_name": user_data.profile_name,
-                    "activation_url": activation_url,
-                }
-            )
+            if not user_data.password:
+                token = AuthUtils.create_access_token(
+                    subject=user_data.username,
+                    expires_delta=timedelta(hours=1)
+                )
+                activation_url = f"{app_fe_url}/activateaccount?token={token}"
 
-            background_tasks.add_task(
-                EmailUtils.send_email_background,
-                user_data.profile_email,
-                email_subject,
-                email_body
-            )
+                email_subject, email_body = EmailUtils.get_email_subject_and_body(
+                    email_type="create_pulse_user",
+                    params={
+                        "profile_name": user_data.profile_name,
+                        "activation_url": activation_url,
+                    }
+                )
+
+                background_tasks.add_task(
+                    EmailUtils.send_email_background,
+                    user_data.profile_email,
+                    email_subject,
+                    email_body
+                )
+            else:
+                email_subject, email_body = EmailUtils.get_email_subject_and_body(
+                    email_type="user_created_with_password",
+                    params={
+                        "profile_name": user_data.profile_name,
+                        "username": user_data.username,
+                        "password": password,
+                    }
+                )
+
+                background_tasks.add_task(
+                    EmailUtils.send_email_background,
+                    user_data.profile_email,
+                    email_subject,
+                    email_body
+                )
 
             return created_user.to_object()
 
