@@ -13,7 +13,7 @@ class EmailSchema(BaseModel):
 
 
 # Define supported email types
-EmailTypeLiteral = Literal["create_pulse_user", "deactivate_pulse_user"]
+EmailTypeLiteral = Literal["create_pulse_user", "deactivate_pulse_user", "user_created_with_password"]
 
 
 class EmailUtils:
@@ -49,12 +49,27 @@ class EmailUtils:
             subject = "Activate your account"
             body = f"""
                 Dear {params['profile_name']},
-                
+
                     Please click the following link to activate your account and set a password:
-                    
+
                     {params['activation_url']}
-                
-                Regards,  
+
+                Regards,
+                Your Team
+                """
+        elif email_type == "user_created_with_password":
+            subject = "Your account has been created"
+            body = f"""
+                Dear {params['profile_name']},
+
+                    Your account has been created. Here are your login credentials:
+
+                    Username: {params['username']}
+                    Password: {params['password']}
+
+                Please login and change your password.
+
+                Regards,
                 Your Team
                 """
         if subject is None and body is None:

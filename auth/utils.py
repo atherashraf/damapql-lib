@@ -185,7 +185,7 @@ class AuthUtils:
                 is_superuser=is_superuser,
                 is_staff=is_staff,
                 is_active=is_superuser,
-                is_verified=is_superuser,
+                is_verified=True,
             )
             s.add(user)
             s.flush()
