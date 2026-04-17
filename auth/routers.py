@@ -24,10 +24,10 @@ from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES
 from app.damapql.utils.adapters.deps import get_sync_session
 from app.damapql.utils.crypto import CryptoUtils
 
-from .dtypes import UserInfo, UserCreate
+from .dtypes import UserInfo, UserCreate, UserUpdate
 from .manager.email_manager import EmailUtils
 from .manager.role_manager import UserRoleManager
-from .models import Profile, User, Role
+from .models import Organization, Department, Profile, User, Role
 from .utils import AuthUtils, oauth2_scheme
 
 auth_router = APIRouter(tags=["auth"])
@@ -263,6 +263,108 @@ def create_user(
             session.rollback()
             da_logger.exception(f"Failed to create user: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
+
+
+@auth_router.put("/update_user/{username}", response_model=UserInfo)
+def update_user(
+    username: str,
+    user_data: UserUpdate,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user)
+):
+    if not current_user.is_superuser and not AuthUtils.has_role(current_user, "app_manager"):
+        raise HTTPException(status_code=403, detail="Not authorized to update users.")
+
+    with User.managed_session() as session:
+        user = (
+            session.query(User)
+            .options(
+                selectinload(User.profile).selectinload(Profile.organization),
+                selectinload(User.profile).selectinload(Profile.department),
+                selectinload(User.roles),
+            )
+            .filter(User.username == username)
+            .first()
+        )
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        if not user.profile:
+            raise HTTPException(status_code=400, detail="User has no profile.")
+
+        if user_data.profile_name is not None:
+            user.profile.name = user_data.profile_name
+
+        if user_data.profile_email is not None:
+            existing = session.query(Profile).filter(
+                Profile.email == user_data.profile_email,
+                Profile.id != user.profile_id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Email already exists.")
+            user.profile.email = user_data.profile_email
+
+        if user_data.profile_contact is not None:
+            user.profile.contact = user_data.profile_contact
+
+        if user_data.designation is not None:
+            user.profile.designation = user_data.designation
+
+        organization_obj = None
+        if user_data.organization is not None:
+            normalized_org = user_data.organization.strip()
+            organization_obj = (
+                session.query(Organization)
+                .filter(
+                    Organization.name == normalized_org,
+                    Organization.is_active.is_(True)
+                )
+                .first()
+            )
+            if not organization_obj:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Organization '{user_data.organization}' not found"
+                )
+
+        department_obj = None
+        if user_data.department is not None:
+            normalized_dept = user_data.department.strip().lower()
+            query = session.query(Department).filter(
+                Department.name == normalized_dept,
+                Department.is_active.is_(True)
+            )
+            if organization_obj:
+                query = query.filter(Department.organization_id == organization_obj.id)
+            department_obj = query.first()
+            if not department_obj:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Department '{user_data.department}' not found"
+                )
+
+        user.profile.organization_id = organization_obj.id if organization_obj else None
+        user.profile.department_id = department_obj.id if department_obj else None
+
+        if user_data.roles is not None:
+            normalized_roles = [r.strip().lower() for r in user_data.roles]
+            role_objects = (
+                session.query(Role)
+                .filter(Role.name.in_(normalized_roles), Role.is_active.is_(True))
+                .all()
+            )
+            found_role_names = {role.name for role in role_objects}
+            missing_roles = [role for role in normalized_roles if role not in found_role_names]
+            if missing_roles:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid roles: {', '.join(missing_roles)}"
+                )
+            user.roles = role_objects
+
+        user.save(session=session)
+
+        return user.to_object()
 
 
 @auth_router.post("/activate-account")

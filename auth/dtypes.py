@@ -19,6 +19,16 @@ class UserCreate(BaseModel):
     roles: List[str] = Field(default_factory=list)
 
 
+class UserUpdate(BaseModel):
+    profile_name: Optional[str] = None
+    profile_email: Optional[str] = None
+    profile_contact: Optional[str] = None
+    organization: Optional[str] = None
+    department: Optional[str] = None
+    designation: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+
+
 class UserInfo(BaseModel):
     id: int
     username: str
