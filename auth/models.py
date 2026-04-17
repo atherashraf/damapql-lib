@@ -17,11 +17,12 @@ user_role_association = db.Table(
     db.Column("role_id", db.ForeignKey("auth_role.id"), primary_key=True),
 )
 
+
 class Organization(DBBase):
     __tablename__ = "auth_organization"
-    # __table_args__ = (
-    #     db.UniqueConstraint("dist_id", name="uq_auth_organization_dist_id")
-    # )
+    __table_args__ = (
+        db.UniqueConstraint("dist_id", name="uq_auth_organization_dist_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(db.String(150), unique=True, nullable=False, index=True)
@@ -29,8 +30,8 @@ class Organization(DBBase):
     is_active: Mapped[bool] = mapped_column(db.Boolean, default=True)
 
     # external district reference
-    # dist_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
-    # dist_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
+    dist_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
+    dist_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
 
     departments: Mapped[List["Department"]] = relationship(
         "Department",
@@ -51,6 +52,10 @@ class Organization(DBBase):
     def normalize_name(self, key, value):
         return value.strip()
 
+    @validates("dist_name")
+    def normalize_dist_name(self, key, value):
+        return value.strip() if value else None
+
     @classmethod
     def get_id_by_name(cls, name: str) -> Optional[int]:
         normalized_name = name.strip()
@@ -61,10 +66,10 @@ class Organization(DBBase):
 
 class Department(DBBase):
     __tablename__ = "auth_department"
-    # __table_args__ = (
-    #     db.UniqueConstraint("organization_id", "name", name="uq_department_org_name"),
-    #     db.UniqueConstraint("subdiv_id", name="uq_auth_department_subdiv_id")
-    # )
+    __table_args__ = (
+        db.UniqueConstraint("organization_id", "name", name="uq_department_org_name"),
+        db.UniqueConstraint("subdiv_id", name="uq_auth_department_subdiv_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(db.String(100), nullable=False, index=True)
@@ -77,8 +82,8 @@ class Department(DBBase):
     )
 
     # external subdivision reference
-    # subdiv_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
-    # subdiv_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
+    subdiv_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
+    subdiv_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
 
     organization: Mapped["Organization"] = relationship(
         "Organization",
@@ -96,8 +101,13 @@ class Department(DBBase):
     def normalize_name(self, key, value):
         return value.strip().lower()
 
+    @validates("subdiv_name")
+    def normalize_subdiv_name(self, key, value):
+        return value.strip() if value else None
+
     def __repr__(self):
         return f"<Department(name={self.name})>"
+
 
 class Profile(DBBase):
     __tablename__ = "auth_profile"
@@ -109,12 +119,12 @@ class Profile(DBBase):
 
     organization_id: Mapped[Optional[int]] = mapped_column(
         db.ForeignKey("auth_organization.id"),
-        nullable=True
+        nullable=True,
     )
 
     department_id: Mapped[Optional[int]] = mapped_column(
         db.ForeignKey("auth_department.id"),
-        nullable=True
+        nullable=True,
     )
 
     user: Mapped[Optional["User"]] = relationship(
@@ -134,7 +144,8 @@ class Profile(DBBase):
         back_populates="profiles",
         lazy="selectin",
     )
-    designation: Mapped[str] = mapped_column(db.String(150), nullable=True)
+
+    designation: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
 
     __pydantic__ = ProfileType
 
@@ -151,6 +162,10 @@ class Profile(DBBase):
             organization=self.organization.name if self.organization else None,
             department_id=self.department_id,
             department=self.department.name if self.department else None,
+            dist_id=self.organization.dist_id if self.organization else None,
+            dist_name=self.organization.dist_name if self.organization else None,
+            subdiv_id=self.department.subdiv_id if self.department else None,
+            subdiv_name=self.department.subdiv_name if self.department else None,
         )
 
     @classmethod
@@ -201,8 +216,6 @@ class Role(DBBase):
             return session.query(cls).filter(cls.name == normalized_name).first()
 
 
-
-
 class User(DBBase):
     __tablename__ = "auth_user"
 
@@ -213,7 +226,7 @@ class User(DBBase):
     profile_id: Mapped[Optional[int]] = mapped_column(
         db.ForeignKey("auth_profile.id"),
         unique=True,
-        nullable=True
+        nullable=True,
     )
 
     is_superuser: Mapped[bool] = mapped_column(db.Boolean, default=False)
@@ -254,6 +267,9 @@ class User(DBBase):
 
     def to_object(self) -> UserInfo:
         profile = self.profile
+        organization = self.organization
+        department = self.department
+
         return UserInfo(
             id=self.id,
             username=self.username,
@@ -262,8 +278,12 @@ class User(DBBase):
             is_active=self.is_active,
             is_verified=self.is_verified,
             roles=[role.name for role in self.roles] if self.roles else [],
-            organization=self.organization.name if self.organization else None,
-            department=self.department.name if self.department else None,
+            organization=organization.name if organization else None,
+            department=department.name if department else None,
+            dist_id=organization.dist_id if organization else None,
+            dist_name=organization.dist_name if organization else None,
+            subdiv_id=department.subdiv_id if department else None,
+            subdiv_name=department.subdiv_name if department else None,
             name=profile.name if profile else None,
             email=profile.email if profile else None,
             contact=profile.contact if profile else None,
