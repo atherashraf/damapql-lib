@@ -1,7 +1,7 @@
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import case, func, literal, select
-
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -169,6 +169,8 @@ async def save_map(
         map_info.extent = payload.extent
         map_info.srid = 3857
         map_info.units = "m"
+        flag_modified(map_info, "extent")
+        flag_modified(map_info, "layers")
         map_info.save(session=session)
 
         return {
