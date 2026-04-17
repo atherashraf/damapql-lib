@@ -296,10 +296,14 @@ def update_user(
             user.profile.name = user_data.profile_name
 
         if user_data.profile_email is not None:
-            existing = session.query(Profile).filter(
-                Profile.email == user_data.profile_email,
-                Profile.id != user.profile_id
-            ).first()
+            existing = (
+                session.query(Profile)
+                .filter(
+                    Profile.email == user_data.profile_email.strip().lower(),
+                    Profile.id != user.profile_id
+                )
+                .first()
+            )
             if existing:
                 raise HTTPException(status_code=400, detail="Email already exists.")
             user.profile.email = user_data.profile_email
@@ -310,38 +314,101 @@ def update_user(
         if user_data.designation is not None:
             user.profile.designation = user_data.designation
 
+        # organization -> district
+        # department -> subdivision
         organization_obj = None
-        if user_data.organization is not None:
-            normalized_org = user_data.organization.strip()
-            organization_obj = (
-                session.query(Organization)
-                .filter(
-                    Organization.name == normalized_org,
-                    Organization.is_active.is_(True)
-                )
-                .first()
-            )
-            if not organization_obj:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Organization '{user_data.organization}' not found"
+        department_obj = None
+
+        org_provided = user_data.organization is not None
+        dept_provided = user_data.department is not None
+
+        normalized_org = user_data.organization.strip() if org_provided and user_data.organization else ""
+        normalized_dept = user_data.department.strip() if dept_provided and user_data.department else ""
+
+        # Case 1: organization/district explicitly provided
+        if org_provided:
+            if normalized_org:
+                organization_obj = (
+                    session.query(Organization)
+                    .filter(Organization.name == normalized_org)
+                    .first()
                 )
 
-        department_obj = None
-        if user_data.department is not None:
-            normalized_dept = user_data.department.strip().lower()
-            query = session.query(Department).filter(
-                Department.name == normalized_dept,
-                Department.is_active.is_(True)
-            )
-            if organization_obj:
-                query = query.filter(Department.organization_id == organization_obj.id)
-            department_obj = query.first()
-            if not department_obj:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Department '{user_data.department}' not found"
+                if organization_obj:
+                    if not organization_obj.is_active:
+                        organization_obj.is_active = True
+                else:
+                    organization_obj = Organization(
+                        name=normalized_org,
+                        is_active=True,
+                    )
+                    session.add(organization_obj)
+                    session.flush()  # get organization_obj.id
+            else:
+                # Explicit empty/null organization means clear organization
+                organization_obj = None
+
+        else:
+            # organization not provided in payload -> keep current one
+            organization_obj = user.profile.organization
+
+        # Case 2: department/subdivision explicitly provided
+        if dept_provided:
+            if normalized_dept:
+                # subdivision cannot be created without district because department.organization_id is required
+                target_org = organization_obj
+
+                if not target_org:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Subdivision cannot be set without district."
+                    )
+
+                normalized_dept_lookup = normalized_dept.lower()
+
+                department_obj = (
+                    session.query(Department)
+                    .filter(
+                        Department.organization_id == target_org.id,
+                        Department.name == normalized_dept_lookup,
+                    )
+                    .first()
                 )
+
+                if department_obj:
+                    if not department_obj.is_active:
+                        department_obj.is_active = True
+                else:
+                    department_obj = Department(
+                        name=normalized_dept,
+                        organization_id=target_org.id,
+                        is_active=True,
+                    )
+                    session.add(department_obj)
+                    session.flush()  # get department_obj.id
+            else:
+                # Explicit empty/null department means clear subdivision
+                department_obj = None
+
+        else:
+            # department not provided in payload -> keep current one,
+            # but only if organization still matches
+            current_department = user.profile.department
+            if current_department and organization_obj and current_department.organization_id == organization_obj.id:
+                department_obj = current_department
+            elif current_department and organization_obj is None:
+                department_obj = None
+            else:
+                department_obj = current_department
+
+        # Safety: if organization changed and existing department belongs to another org, clear it
+        if department_obj and organization_obj:
+            if department_obj.organization_id != organization_obj.id:
+                department_obj = None
+
+        if organization_obj is None:
+            # no organization means no department
+            department_obj = None
 
         user.profile.organization_id = organization_obj.id if organization_obj else None
         user.profile.department_id = department_obj.id if department_obj else None
@@ -363,6 +430,7 @@ def update_user(
             user.roles = role_objects
 
         user.save(session=session)
+        session.refresh(user)
 
         return user.to_object()
 

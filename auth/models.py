@@ -19,11 +19,18 @@ user_role_association = db.Table(
 
 class Organization(DBBase):
     __tablename__ = "auth_organization"
+    # __table_args__ = (
+    #     db.UniqueConstraint("dist_id", name="uq_auth_organization_dist_id")
+    # )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(db.String(150), unique=True, nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(db.String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(db.Boolean, default=True)
+
+    # external district reference
+    # dist_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
+    # dist_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
 
     departments: Mapped[List["Department"]] = relationship(
         "Department",
@@ -54,9 +61,10 @@ class Organization(DBBase):
 
 class Department(DBBase):
     __tablename__ = "auth_department"
-    __table_args__ = (
-        db.UniqueConstraint("organization_id", "name", name="uq_department_org_name"),
-    )
+    # __table_args__ = (
+    #     db.UniqueConstraint("organization_id", "name", name="uq_department_org_name"),
+    #     db.UniqueConstraint("subdiv_id", name="uq_auth_department_subdiv_id")
+    # )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(db.String(100), nullable=False, index=True)
@@ -67,6 +75,10 @@ class Department(DBBase):
         db.ForeignKey("auth_organization.id"),
         nullable=False,
     )
+
+    # external subdivision reference
+    # subdiv_id: Mapped[Optional[int]] = mapped_column(db.Integer, nullable=True, index=True)
+    # subdiv_name: Mapped[Optional[str]] = mapped_column(db.String(150), nullable=True)
 
     organization: Mapped["Organization"] = relationship(
         "Organization",
