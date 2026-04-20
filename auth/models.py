@@ -345,7 +345,10 @@ class User(DBBase):
             if not user:
                 return None
 
-            return user.to_object()
+            # return user.to_object()
+            user_info = user.to_object()
+            from app.wasa.models import UserAOI
+            return UserAOI.attach_user_aoi(user_info)
 
     @classmethod
     def get_user_department(cls, username: str) -> Optional[str]:

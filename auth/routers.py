@@ -30,6 +30,14 @@ from .manager.role_manager import UserRoleManager
 from .models import Organization, Department, Profile, User, Role
 from .resolvers import resolve_or_create_organization, resolve_or_create_department
 from .utils import AuthUtils, oauth2_scheme
+from ...wasa.models.admin import UserAOI
+
+
+def clean_str(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 auth_router = APIRouter(tags=["auth"])
 
@@ -176,11 +184,13 @@ async def verify_token(data: TokenVerifyRequest):
         )
 
 
+
+
 @auth_router.post("/create_user", response_model=UserInfo)
 def create_user(
     user_data: UserCreate,
     background_tasks: BackgroundTasks,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user)
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     if not current_user.is_superuser and not AuthUtils.has_role(current_user, "app_manager"):
         raise HTTPException(status_code=403, detail="Not authorized to create users.")
@@ -195,49 +205,35 @@ def create_user(
         password = user_data.password if user_data.password else AuthUtils.generate_temp_password(8)
 
         try:
-            organization_obj = resolve_or_create_organization(
-                session=session,
-                organization_label=user_data.organization,
-                dist_id=user_data.dist_id,
-                dist_name=user_data.dist_name,
-            )
-
-            department_obj = resolve_or_create_department(
-                session=session,
-                organization_obj=organization_obj,
-                department_label=user_data.department,
-                subdiv_id=user_data.subdiv_id,
-                subdiv_name=user_data.subdiv_name,
-            )
-
             created_user = AuthUtils.create_user(
-                username=user_data.username,
+                username=user_data.username.strip().lower(),
                 password=password,
-                email=user_data.profile_email,
-                name=user_data.profile_name,
-                contact=user_data.profile_contact,
+                email=user_data.profile_email.strip().lower(),
+                name=user_data.profile_name.strip(),
+                contact=clean_str(user_data.profile_contact),
                 is_superuser=False,
                 is_staff=True,
                 roles=user_data.roles,
-                organization=organization_obj.name if organization_obj else None,
-                department=department_obj.name if department_obj else None,
+                organization=None,
+                department=None,
                 session=session,
             )
 
             if created_user.profile:
-                created_user.profile.organization_id = organization_obj.id if organization_obj else None
-                created_user.profile.department_id = department_obj.id if department_obj else None
-                created_user.profile.designation = user_data.designation.strip() if user_data.designation else None
+                created_user.profile.designation = clean_str(user_data.designation)
 
             session.flush()
             session.refresh(created_user)
+
+            auth_user_id = created_user.id
+            auth_username = created_user.username
 
             app_fe_url = os.environ.get("APP_FE_URL", "")
 
             if not user_data.password:
                 token = AuthUtils.create_access_token(
-                    subject=user_data.username,
-                    expires_delta=timedelta(hours=1)
+                    subject=created_user.username,
+                    expires_delta=timedelta(hours=1),
                 )
                 activation_url = f"{app_fe_url}/activateaccount?token={token}"
 
@@ -246,33 +242,31 @@ def create_user(
                     params={
                         "profile_name": user_data.profile_name,
                         "activation_url": activation_url,
-                    }
+                    },
                 )
 
                 background_tasks.add_task(
                     EmailUtils.send_email_background,
                     user_data.profile_email,
                     email_subject,
-                    email_body
+                    email_body,
                 )
             else:
                 email_subject, email_body = EmailUtils.get_email_subject_and_body(
                     email_type="user_created_with_password",
                     params={
                         "profile_name": user_data.profile_name,
-                        "username": user_data.username,
+                        "username": created_user.username,
                         "password": password,
-                    }
+                    },
                 )
 
                 background_tasks.add_task(
                     EmailUtils.send_email_background,
                     user_data.profile_email,
                     email_subject,
-                    email_body
+                    email_body,
                 )
-
-            return created_user.to_object()
 
         except IntegrityError:
             session.rollback()
@@ -286,13 +280,58 @@ def create_user(
             da_logger.exception(f"Failed to create user: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
 
+    # separate WASA DB write
+    try:
+        has_aoi_fields = any(
+            value is not None
+            for value in [
+                user_data.dist_id,
+                user_data.dist_name,
+                user_data.wasa_div_id,
+                user_data.wasa_div_name,
+                user_data.wasa_subdiv_id,
+                user_data.wasa_subdiv_name,
+            ]
+        )
+
+        if has_aoi_fields:
+            UserAOI.upsert_user_aoi(
+                user_id=auth_user_id,
+                username=auth_username,
+                dist_id=user_data.dist_id,
+                dist_name=user_data.dist_name,
+                wasa_div_id=user_data.wasa_div_id,
+                wasa_div_name=user_data.wasa_div_name,
+                wasa_subdiv_id=user_data.wasa_subdiv_id,
+                wasa_subdiv_name=user_data.wasa_subdiv_name,
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"User created, but AOI sync failed: {str(exc)}",
+        )
+
+    with User.managed_session() as session:
+        created_user = (
+            session.query(User)
+            .filter(User.id == auth_user_id)
+            .first()
+        )
+
+        if not created_user:
+            raise HTTPException(status_code=404, detail="User not found after creation.")
+
+        return created_user.to_object()
+
+
+
 
 
 @auth_router.put("/update_user/{username}", response_model=UserInfo)
 def update_user(
     username: str,
     user_data: UserUpdate,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user)
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     if not current_user.is_superuser and not AuthUtils.has_role(current_user, "app_manager"):
         raise HTTPException(status_code=403, detail="Not authorized to update users.")
@@ -301,8 +340,7 @@ def update_user(
         user = (
             session.query(User)
             .options(
-                selectinload(User.profile).selectinload(Profile.organization),
-                selectinload(User.profile).selectinload(Profile.department),
+                selectinload(User.profile),
                 selectinload(User.roles),
             )
             .filter(User.username == username)
@@ -316,13 +354,16 @@ def update_user(
             raise HTTPException(status_code=400, detail="User has no profile.")
 
         if user_data.profile_name is not None:
-            user.profile.name = user_data.profile_name.strip()
+            user.profile.name = clean_str(user_data.profile_name)
 
         if user_data.profile_email is not None:
             normalized_email = user_data.profile_email.strip().lower()
             existing = (
                 session.query(Profile)
-                .filter(Profile.email == normalized_email, Profile.id != user.profile_id)
+                .filter(
+                    Profile.email == normalized_email,
+                    Profile.id != user.profile_id,
+                )
                 .first()
             )
             if existing:
@@ -330,50 +371,10 @@ def update_user(
             user.profile.email = normalized_email
 
         if user_data.profile_contact is not None:
-            user.profile.contact = user_data.profile_contact.strip() if user_data.profile_contact else None
+            user.profile.contact = clean_str(user_data.profile_contact)
 
         if user_data.designation is not None:
-            user.profile.designation = user_data.designation.strip() if user_data.designation else None
-
-        has_any_location_field = any([
-            user_data.organization is not None,
-            user_data.department is not None,
-            user_data.dist_id is not None,
-            user_data.dist_name is not None,
-            user_data.subdiv_id is not None,
-            user_data.subdiv_name is not None,
-        ])
-
-        if has_any_location_field:
-            # explicit clear all
-            if (
-                user_data.organization is None and
-                user_data.department is None and
-                user_data.dist_id is None and
-                user_data.dist_name is None and
-                user_data.subdiv_id is None and
-                user_data.subdiv_name is None
-            ):
-                organization_obj = None
-                department_obj = None
-            else:
-                organization_obj = resolve_or_create_organization(
-                    session=session,
-                    organization_label=user_data.organization,
-                    dist_id=user_data.dist_id,
-                    dist_name=user_data.dist_name,
-                )
-
-                department_obj = resolve_or_create_department(
-                    session=session,
-                    organization_obj=organization_obj,
-                    department_label=user_data.department,
-                    subdiv_id=user_data.subdiv_id,
-                    subdiv_name=user_data.subdiv_name,
-                )
-
-            user.profile.organization_id = organization_obj.id if organization_obj else None
-            user.profile.department_id = department_obj.id if department_obj else None
+            user.profile.designation = clean_str(user_data.designation)
 
         if user_data.roles is not None:
             normalized_roles = [r.strip().lower() for r in user_data.roles]
@@ -384,17 +385,54 @@ def update_user(
             )
             found_role_names = {role.name for role in role_objects}
             missing_roles = [role for role in normalized_roles if role not in found_role_names]
+
             if missing_roles:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid roles: {', '.join(missing_roles)}"
+                    detail=f"Invalid roles: {', '.join(missing_roles)}",
                 )
+
             user.roles = role_objects
 
         user.save(session=session)
         session.refresh(user)
 
-        return user.to_object()
+        auth_user_id = user.id
+        auth_username = user.username
+
+    try:
+        UserAOI.upsert_user_aoi(
+            user_id=auth_user_id,
+            username=auth_username,
+            dist_id=user_data.dist_id,
+            dist_name=user_data.dist_name,
+            wasa_div_id=user_data.wasa_div_id,
+            wasa_div_name=user_data.wasa_div_name,
+            wasa_subdiv_id=user_data.wasa_subdiv_id,
+            wasa_subdiv_name=user_data.wasa_subdiv_name,
+        )
+    except Exception as exc:
+        da_logger.exception("Error occurred while updating user's AOI.", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"User updated, but AOI sync failed: {str(exc)}",
+        )
+
+    with User.managed_session() as session:
+        updated_user = (
+            session.query(User)
+            .options(
+                selectinload(User.profile),
+                selectinload(User.roles),
+            )
+            .filter(User.username == username)
+            .first()
+        )
+
+        if not updated_user:
+            raise HTTPException(status_code=404, detail="User not found after update.")
+
+        return updated_user.to_object()
 
 
 @auth_router.post("/activate-account")
@@ -436,7 +474,7 @@ def get_user_list(current_user: UserInfo = Depends(AuthUtils.get_current_user)) 
             selectinload(User.profile).selectinload(Profile.organization),
             selectinload(User.profile).selectinload(Profile.department),
             selectinload(User.roles),
-        )
+        ) #.where(User.id=='20')
 
         if current_user.is_superuser:
             query = query.filter(User.is_superuser.is_(False))
@@ -450,7 +488,7 @@ def get_user_list(current_user: UserInfo = Depends(AuthUtils.get_current_user)) 
             raise HTTPException(status_code=403, detail="Access denied")
 
         users = query.all()
-        users_info = [user.to_object() for user in users]
+        users_info = [UserAOI.attach_user_aoi(user.to_object()) for user in users]
         return UserListResponse(users=users_info)
 
 

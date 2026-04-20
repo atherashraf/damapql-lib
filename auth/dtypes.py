@@ -14,15 +14,16 @@ class UserCreate(BaseModel):
     profile_contact: Optional[str] = None
     designation: Optional[str] = None
 
-    organization: Optional[str] = None
-    department: Optional[str] = None
-
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None
-    subdiv_id: Optional[int] = None
-    subdiv_name: Optional[str] = None
 
-    password: str
+    wasa_div_id: Optional[int] = None
+    wasa_div_name: Optional[str] = None
+
+    wasa_subdiv_id: Optional[int] = None
+    wasa_subdiv_name: Optional[str] = None
+
+    password: Optional[str] = None
     roles: List[str] = Field(default_factory=list)
 
 
@@ -32,13 +33,14 @@ class UserUpdate(BaseModel):
     profile_contact: Optional[str] = None
     designation: Optional[str] = None
 
-    organization: Optional[str] = None
-    department: Optional[str] = None
-
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None
-    subdiv_id: Optional[int] = None
-    subdiv_name: Optional[str] = None
+
+    wasa_div_id: Optional[int] = None
+    wasa_div_name: Optional[str] = None
+
+    wasa_subdiv_id: Optional[int] = None
+    wasa_subdiv_name: Optional[str] = None
 
     roles: Optional[List[str]] = None
 
@@ -52,14 +54,16 @@ class UserInfo(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     contact: Optional[str] = None
-
-    organization: Optional[str] = None
-    department: Optional[str] = None
+    designation: Optional[str] = None
 
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None
-    subdiv_id: Optional[int] = None
-    subdiv_name: Optional[str] = None
+
+    wasa_div_id: Optional[int] = None
+    wasa_div_name: Optional[str] = None
+
+    wasa_subdiv_id: Optional[int] = None
+    wasa_subdiv_name: Optional[str] = None
 
     is_active: bool = False
     is_verified: bool = False
@@ -72,48 +76,13 @@ class UserInfo(BaseModel):
         ),
     )
 
+
 class ProfileType(BaseModel):
     id: int
     name: str
     email: str
     contact: Optional[str] = None
-
-    organization_id: Optional[int] = None
-    organization: Optional[str] = None
-    department_id: Optional[int] = None
-    department: Optional[str] = None
-
-    dist_id: Optional[int] = None
-    dist_name: Optional[str] = None
-    subdiv_id: Optional[int] = None
-    subdiv_name: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class OrganizationType(BaseModel):
-    id: int
-    name: str
-    description: Optional[str] = None
-    is_active: bool = True
-
-    dist_id: Optional[int] = None
-    dist_name: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class DepartmentType(BaseModel):
-    id: int
-    name: str
-    description: Optional[str] = None
-    is_active: bool = True
-
-    organization_id: int
-    organization: Optional[str] = None
-
-    subdiv_id: Optional[int] = None
-    subdiv_name: Optional[str] = None
+    designation: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
