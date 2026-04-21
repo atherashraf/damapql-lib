@@ -132,6 +132,43 @@ class DBQuery:
             print(f"Error in execute_stmt_as_df: {e}")
             return pd.DataFrame()
 
+
+    # @staticmethod
+    # def execute_query_as_geojson(
+    #         session: Session,
+    #         stmt,
+    #         geom_col: str = "geom",
+    #         id_col: str = "id"
+    # ):
+    #
+    #     subq = stmt.subquery("inputs")
+    #
+    #     geojson_stmt = select(
+    #         func.jsonb_build_object(
+    #             'type', 'FeatureCollection',
+    #             'features',
+    #             func.coalesce(
+    #                 func.jsonb_agg(
+    #                     func.jsonb_build_object(
+    #                         'type', 'Feature',
+    #                         'id', getattr(subq.c, id_col),
+    #                         'geometry',
+    #                         func.ST_AsGeoJSON(
+    #                             getattr(subq.c, geom_col)
+    #                         ).cast('jsonb'),
+    #                         'properties',
+    #                         func.to_jsonb(subq.table_valued()) - geom_col - id_col
+    #                     )
+    #                 ),
+    #                 func.cast('[]', 'jsonb')
+    #             )
+    #         )
+    #     )
+    #
+    #     result = session.execute(geojson_stmt).scalar()
+    #
+    #     return result or {"type": "FeatureCollection", "features": []}
+
     @staticmethod
     def execute_query_as_geojson(
             session: Session,

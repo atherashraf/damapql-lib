@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Set
 
+from geoalchemy2 import WKBElement
+from geoalchemy2.shape import from_shape
 from geopandas import GeoDataFrame
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pyproj import CRS
@@ -70,6 +72,9 @@ class GeometryData(BaseModel):
     def from_shapely(cls, geom: BaseGeometry) -> "GeometryData":
         return cls(**mapping(geom))
 
+    def to_db_geometry(self, srid: int = 4326) -> WKBElement:
+        return from_shape(self.to_shapely(), srid=srid)
+
 
 # -------------------------------------------------------
 # Feature Model
@@ -108,6 +113,7 @@ class Feature(BaseModel):
             crs=crs_norm,
         )
 
+
     @classmethod
     def from_shapely(
         cls,
@@ -118,6 +124,9 @@ class Feature(BaseModel):
             geometry=GeometryData.from_shapely(geom),
             properties=properties or {},
         )
+
+    def to_db_geometry(self, srid: int = 4326):
+        return from_shape(self.to_shapely(), srid=srid)
 
 
 # -------------------------------------------------------
@@ -188,6 +197,12 @@ class GeoJSON(BaseModel):
 
         return gdf
 
+    def to_feature_array(self):
+        return [f.to_feature_dict() for f in self.features]
+
+    def to_db_geometries(self, srid=4326):
+        return [f.to_db_geometry(srid) for f in self.features]
+
     def to_crs(self, target_epsg: int, assume_epsg: int | None = None) -> "GeoJSON":
         if target_epsg not in ALLOWED_EPSG:
             raise ValueError(f"Unsupported target EPSG:{target_epsg}")
@@ -210,23 +225,22 @@ class GeoJSON(BaseModel):
     # -------------------------------------------------------
     @classmethod
     def from_gdf(cls, gdf: GeoDataFrame) -> "GeoJSON":
-        features = []
-
-        for _, row in gdf.iterrows():
-            geom = row.geometry
-            if geom is None or geom.is_empty:
-                continue
-
-            props = row.drop(labels=["geometry"]).to_dict()
-            features.append(Feature.from_shapely(geom, props))
-
+        # features = []
+        #
+        # for _, row in gdf.iterrows():
+        #     geom = row.geometry
+        #     if geom is None or geom.is_empty:
+        #         continue
+        #
+        #     props = row.drop(labels=["geometry"]).to_dict()
+        #     features.append(Feature.from_shapely(geom, props))
         crs_val = None
         if gdf.crs:
             epsg = gdf.crs.to_epsg()
             if epsg:
                 crs_val = f"EPSG:{epsg}"
 
-        return cls(features=features, crs=crs_val)
+        return cls(**gdf.__geo_interface__, crs=crs_val)
 
     # -------------------------------------------------------
     # UTILITIES
