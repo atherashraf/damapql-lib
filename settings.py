@@ -20,6 +20,13 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # e.g., "DEBUG", "ERROR"
 
 localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
 
+
+def resolve_db_host(env_var_name: str) -> str:
+    configured_host = os.environ.get(env_var_name)
+    if configured_host:
+        return configured_host
+    return localhost
+
 ALLOWED_ORIGINS = ["*"]
 
 
@@ -39,7 +46,7 @@ DCH_DATABASES = {
     },
     "dch": {
         "engine": "postgresql",
-        "host": os.environ.get("DCH_HOST") if not IS_LOCAL else localhost,
+        "host": resolve_db_host("DCH_HOST"),
         "name": os.environ.get("DCH_NAME"),
         "port": os.environ.get("DCH_PORT"),
         "user": os.environ.get("DCH_USER"),
@@ -47,7 +54,7 @@ DCH_DATABASES = {
     },
     "data": {
         "engine": "postgresql",
-        "host": os.environ.get("DCH_DATA_HOST") if not IS_LOCAL else localhost,
+        "host": resolve_db_host("DCH_DATA_HOST"),
         "name": os.environ.get("DCH_DATA_NAME"),
         "port": os.environ.get("DCH_DATA_PORT"),
         "user": os.environ.get("DCH_DATA_USER"),
