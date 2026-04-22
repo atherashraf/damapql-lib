@@ -635,6 +635,8 @@ async def save_layer_info(
                 if hasattr(obj, key):
                     if key == "data_model":
                         value = DataModel.get_name(value)
+                    if key.lower() == "model_type":
+                        value = ModelType.get_name(value)
                     setattr(obj, key, value)
 
             obj.save(session=session)
