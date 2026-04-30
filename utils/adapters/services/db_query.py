@@ -169,49 +169,80 @@ class DBQuery:
     #
     #     return result or {"type": "FeatureCollection", "features": []}
 
+    from typing import Any, Dict, Union
+    import json
+
+    from sqlalchemy import text, Select
+    from sqlalchemy.orm import Session
+
     @staticmethod
     def execute_query_as_geojson(
             session: Session,
             stmt: Union[str, Select],
             geom_col: str = "geom",
-            id_col: str = "id"
+            id_col: str = "id",
     ) -> Dict[str, Any]:
         engine = session.get_bind()
 
-        if engine.dialect.name == 'postgresql':
-            raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
+        if engine.dialect.name == "postgresql":
+            raw_sql = (
+                str(stmt.compile(compile_kwargs={"literal_binds": True}))
+                if not isinstance(stmt, str)
+                else stmt
+            )
 
             pg_geojson_sql = f"""
                 SELECT jsonb_build_object(
-                    'type',     'FeatureCollection',
+                    'type', 'FeatureCollection',
+                    'crs', 'EPSG:3857',
                     'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
                 )
                 FROM (
-                  SELECT jsonb_build_object(
-                    'type',       'Feature',
-                    'id',         {id_col},
-                    'geometry',   ST_AsGeoJSON(({geom_col})::geometry)::jsonb,
-                    'properties', to_jsonb(inputs) - '{geom_col}'
-                  ) AS feature
-                  FROM ({raw_sql}) inputs
+                    SELECT jsonb_build_object(
+                        'type', 'Feature',
+                        'id', inputs.{id_col},
+                        'geometry', ST_AsGeoJSON((inputs.{geom_col})::geometry)::jsonb,
+                        'properties', to_jsonb(inputs) - '{geom_col}'
+                    ) AS feature
+                    FROM ({raw_sql}) inputs
+                    WHERE inputs.{geom_col} IS NOT NULL
                 ) features;
             """
+
             result = session.execute(text(pg_geojson_sql)).scalar()
-            return result if result else {"type": "FeatureCollection", "features": []}
+
+            return result if result else {
+                "type": "FeatureCollection",
+                "crs": "EPSG:3857",
+                "features": [],
+            }
 
         result = session.execute(text(stmt) if isinstance(stmt, str) else stmt)
+
         features = []
+
         for row in result.mappings():
             geom = row.get(geom_col)
-            if not geom:
+
+            if geom is None:
                 continue
+
             features.append({
                 "type": "Feature",
+                "id": row.get(id_col),
                 "geometry": json.loads(geom) if isinstance(geom, str) else geom,
-                "properties": {k: v for k, v in row.items() if k != geom_col},
-                "id": row.get(id_col)
+                "properties": {
+                    k: v
+                    for k, v in row.items()
+                    if k != geom_col
+                },
             })
-        return {"type": "FeatureCollection", "features": features}
+
+        return {
+            "type": "FeatureCollection",
+            "crs": "EPSG:3857",
+            "features": features,
+        }
 
     @staticmethod
     def _get_pydantic_model(orm_model: Type[Any]) -> Type[T]:
