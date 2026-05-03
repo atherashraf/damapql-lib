@@ -908,7 +908,8 @@ class MapInfo(DBBase):
     __tablename__ = "dch_map_info"
     id = Column(db.BIGINT, primary_key=True, autoincrement=True)
     uuid = Column(db.VARCHAR(40), nullable=False, unique=True)
-    title = Column(db.VARCHAR(100), nullable=False)
+    # name = Column(db.VARCHAR(100), unique=True, nullable=False)
+    title = Column(db.VARCHAR(100), nullable=False, unique=True)
     extent = Column(db.ARRAY(item_type=db.Float), nullable=False)
     layers = Column(db.JSON, nullable=False)
     srid = Column(db.INTEGER, nullable=False, default=3857)

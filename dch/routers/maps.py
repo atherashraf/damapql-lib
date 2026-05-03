@@ -316,3 +316,12 @@ async def get_layer_extent(uuid: str, current_user: UserInfo = Depends(AuthUtils
             return {"payload": extent}
 
     return Response(status_code=204)
+
+@dch_maps_router.get("/get_map_uuid/{layer_title}/")
+def get_map_uuid(layer_title:str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+    with MapInfo.managed_session() as session:
+        qs = select(MapInfo.uuid).where(MapInfo.title == layer_title)
+        res = session.execute(qs).scalar_one_or_none()
+        if res is not None:
+            return {"payload": res}
+        return Response(status_code=204)
