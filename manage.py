@@ -75,6 +75,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aiobotocore import session
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter
 from pydantic import ValidationError
@@ -492,9 +493,12 @@ def migrate(app_label: str):
 
 # --- DATA MANAGEMENT ---
 
-def dumpdata(app_label: str, model: str, output: str = "data.json"):
+def dumpdata(app_label: str, model: str, output: Optional[str] = None):
     """Dumps model records to a JSON file, resolving ChoiceTypes."""
+
     ap = DA_APPS.get(app_label)
+    if output is None:
+        output = Path(ap["path"].replace(".", "/")) / "fixtures" / f"{model}.json"
     module = importlib.import_module(f'{ap["path"]}.models')
     model_class = getattr(module, model)
 
@@ -1000,7 +1004,16 @@ def _prompt_unique_username() -> str:
             print("❌ Username taken.")
         else:
             return username
+# def get_user_list():
+#     with User.managed_session() as session:
+#         users = session.query(User.username).all()
+#         for user in users:
+#             da_logger.info(user.username)
 
+def get_user_password(username: str):
+    user = User.get_user(username)
+    password = CryptoUtils().decrypt_txt(user.password)
+    da_logger.success(f"{username} password is {password}")
 
 # --- SECURITY ---
 

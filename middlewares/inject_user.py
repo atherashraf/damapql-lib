@@ -3,8 +3,8 @@ from jwt import ExpiredSignatureError, InvalidTokenError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from mocc.app.auth.models import User
-from mocc.app.auth.utils import JWT_SECRET_KEY, ALGORITHM
+from app.damapql.auth.models import User
+from app.damapql.auth.utils import JWT_SECRET_KEY, ALGORITHM
 
 
 class InjectUserMiddleware(BaseHTTPMiddleware):

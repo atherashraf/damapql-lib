@@ -236,7 +236,7 @@ def get_layer_attributes(
     elif info.data_model and info.data_model.code == DataModel.R.name:
         return RasterStatsService.get_attribute_summary_grid(uuid)
 
-    return Response(content='{"payload": {"msg": "No attribute found"}}', status_code=204)
+    return Response(status_code=204)
 
 
 @dch_layers_router.get("/get_feature_detail/{uuid}/{col_name}/{col_val}/")
