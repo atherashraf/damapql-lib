@@ -526,5 +526,83 @@ def set_user_roles(
         }
 
 
+class RoleListResponse(BaseModel):
+    roles: List[str] = Field(default_factory=list)
+
+
+class CreateRoleRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+@auth_router.get("/roles_list", response_model=RoleListResponse)
+def get_roles_list(
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    if not (
+        current_user.is_superuser
+        or AuthUtils.has_role(current_user, "app_manager")
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    with User.managed_session() as session:
+        roles = (
+            session.query(Role)
+            .filter(Role.is_active.is_(True))
+            .order_by(Role.name.asc())
+            .all()
+        )
+
+        return RoleListResponse(
+            roles=[role.name for role in roles]
+        )
+
+
+@auth_router.post("/create_role")
+def create_role(
+    payload: CreateRoleRequest,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superuser can create roles"
+        )
+
+    role_name = payload.name.strip().lower()
+
+    with User.managed_session() as session:
+
+        existing_role = (
+            session.query(Role)
+            .filter(Role.name == role_name)
+            .first()
+        )
+
+        if existing_role:
+            raise HTTPException(
+                status_code=400,
+                detail="Role already exists"
+            )
+
+        role = Role(
+            name=role_name,
+            description=payload.description,
+            is_active=True,
+        )
+
+        session.add(role)
+        session.commit()
+        session.refresh(role)
+
+        return {
+            "message": "Role created successfully",
+            "role": {
+                "id": role.id,
+                "name": role.name,
+                "description": role.description,
+            },
+        }
+
+
 for route in auth_router.routes:
     route.include_in_schema = False

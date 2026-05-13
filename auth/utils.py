@@ -376,3 +376,16 @@ class AuthUtils:
             return user
 
         return department_checker
+
+    @staticmethod
+    def has_roles(user: UserInfo, roles: List[str], require_all: bool = False) -> bool:
+        if user.is_superuser:
+            return True
+
+        user_roles = {r.strip().lower() for r in user.roles}
+        required_roles = {r.strip().lower() for r in roles}
+
+        if require_all:
+            return required_roles.issubset(user_roles)
+
+        return bool(user_roles.intersection(required_roles))

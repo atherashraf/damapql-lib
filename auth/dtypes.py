@@ -76,6 +76,8 @@ class UserInfo(BaseModel):
         ),
     )
 
+    def has_role(self, role: str) -> bool:
+        return role.lower() in {r.lower() for r in self.roles}
 
 class ProfileType(BaseModel):
     id: int
