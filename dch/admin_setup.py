@@ -6,9 +6,36 @@ from app.damapql.utils.adapters.deps import get_async_engine_instance
 
 _dch_admin = None
 
+from app.damapql.auth.models import User
+
+
 class DCHAuth(BaseAdminAuth):
     def __init__(self, secret_key, engine):
         super().__init__(secret_key, engine, session_key="dch_admin_user")
+
+    async def login(self, request):
+        result = await super().login(request)
+
+        if not result:
+            return False
+
+        form = await request.form()
+        username = form.get("username")
+
+        user = User.get_user(username)
+
+        if not user:
+            return False
+
+        if not user.is_superuser:
+            da_logger.warning(
+                f"Blocked non-superuser admin login attempt: {username}"
+            )
+
+            request.session.clear()
+            return False
+
+        return True
 
 def create_dch_admin(app, secret_key, port, db_key="dch", base_url="/dch_admin", title="DAFastMap Admin") -> Admin:
     global _dch_admin
