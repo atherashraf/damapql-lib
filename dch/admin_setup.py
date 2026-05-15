@@ -26,10 +26,10 @@ def create_dch_admin(app, secret_key, port, db_key="dch", base_url="/dch_admin",
         ),
         title=title,
     )
-    # da_logger.success(f"Admin URL is running at http://127.0.0.1:{port}/api{base_url}/")
-    da_logger.success(
-        f"Admin URL is running at http://139.162.3.208:{port}{base_url}/"
-    )
+    da_logger.success(f"Admin URL is running at http://127.0.0.1:{port}/api{base_url}/")
+    # da_logger.success(
+    #     f"Admin URL is running at http://139.162.3.208:{port}{base_url}/"
+    # )
     return _dch_admin
 
 
