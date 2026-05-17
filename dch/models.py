@@ -453,7 +453,8 @@ class LayerInfo(DBBase):
             where_clause: str | None = None,
             limit: int = -1,
             offset: int = 0,
-            session: Session = None
+            session: Session = None,
+            min_intersection_ratio: float = 0.90,
     ) -> GeoDataFrame:
         """
         Return GeoDataFrame for vector DB layers.
@@ -461,7 +462,11 @@ class LayerInfo(DBBase):
         Supports:
         - optional attribute column selection
         - optional where_clause
-        - optional bbox filter
+        - optional bbox filter in EPSG:3857
+        - optional minimum intersection ratio for bbox filtering
+          - lines: intersection length / feature length
+          - polygons: intersection area / feature area
+          - points: normal ST_Intersects
         - SQL-level LIMIT / OFFSET
         """
         try:
@@ -527,15 +532,38 @@ class LayerInfo(DBBase):
                     and isinstance(extent_3857, (tuple, list))
                     and len(extent_3857) == 4
             ):
-                minx, miny, maxx, maxy = extent_3857
+                minx, miny, maxx, maxy = [float(v) for v in extent_3857]
+                ratio = max(0.0, min(float(min_intersection_ratio), 1.0))
+
+                bbox_sql = f"""
+                ST_Transform(
+                    ST_SetSRID(
+                        ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}),
+                        3857
+                    ),
+                    {int(srid)}
+                )
+                """.strip()
+
                 where_clauses.append(
                     f"""
-                    ST_Intersects(
-                        {safe_geom},
-                        ST_Transform(
-                            ST_SetSRID(ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}), 3857),
-                            {srid}
-                        )
+                    ST_Intersects({safe_geom}, {bbox_sql})
+                    AND
+                    (
+                        CASE
+                            WHEN GeometryType({safe_geom}) IN ('LINESTRING', 'MULTILINESTRING')
+                                 AND ST_Length({safe_geom}) > 0 THEN
+                                ST_Length(ST_Intersection({safe_geom}, {bbox_sql}))
+                                / ST_Length({safe_geom}) >= {ratio}
+
+                            WHEN GeometryType({safe_geom}) IN ('POLYGON', 'MULTIPOLYGON')
+                                 AND ST_Area({safe_geom}) > 0 THEN
+                                ST_Area(ST_Intersection({safe_geom}, {bbox_sql}))
+                                / ST_Area({safe_geom}) >= {ratio}
+
+                            ELSE
+                                ST_Intersects({safe_geom}, {bbox_sql})
+                        END
                     )
                     """.strip()
                 )

@@ -199,6 +199,20 @@ async def get_field_distinct_values(
     return {"payload": res}
 
 
+def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
+    if not extent_3857:
+        return None
+
+    try:
+        values = [float(v) for v in extent_3857.split(",")]
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid extent_3857")
+
+    if len(values) != 4:
+        raise HTTPException(status_code=400, detail="extent_3857 must have 4 values")
+
+    return values
+
 @dch_layers_router.get(
     "/layer_attributes/{uuid}/",
     response_model=Union[AttributeTableResponse, dict],
@@ -206,6 +220,7 @@ async def get_field_distinct_values(
 )
 def get_layer_attributes(
     uuid: str,
+    extent_3857: Optional[str] = Query(None),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
@@ -226,7 +241,18 @@ def get_layer_attributes(
         return Response(status_code=204)
 
     if info.data_model and info.data_model.code == DataModel.V.name:
-        df = info.to_layer_df()
+        extent_filter = parse_extent_3857(extent_3857)
+
+        if extent_filter:
+            gdf = info.to_layer_gdf(extent_3857=extent_filter)
+
+            # remove shapely geometry column before serialization
+            geom_col = info.layer_accessibility.geometry_col or "geom"
+
+            df = gdf.drop(columns=[geom_col], errors="ignore")
+        else:
+            df = info.to_layer_df()
+
         if not df.empty:
             return ManageDataFrameUtils.grid_response(
                 df,
