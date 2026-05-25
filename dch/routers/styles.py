@@ -14,6 +14,7 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.models import LayerInfo, MapInfo, DataModel, COGRaster, BandProcess
 from app.damapql.dch.utils.dch_utils import DCHUtils
+from app.damapql.dch.utils.mvt_utils import MVTCache
 
 dch_styles_router = APIRouter(tags=["dch"])
 
@@ -53,7 +54,7 @@ async def get_style(uuid: str, map_uuid: str):
                 if layer_entry:
                     style = layer_entry.get("style")
 
-    if style is None:
+    if style is None or style == {}:
         with LayerInfo.managed_session() as session:
             layer_info = session.execute(
                 select(LayerInfo).where(LayerInfo.uuid == uuid)
@@ -67,10 +68,10 @@ async def get_style(uuid: str, map_uuid: str):
 
 @dch_styles_router.post("/save_style/{uuid}/{map_uuid}/")
 async def save_style(
-    request: Request,
-    uuid: str,
-    map_uuid: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        uuid: str,
+        map_uuid: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Saves style either for a specific map-layer instance or globally for the layer.
@@ -106,36 +107,126 @@ async def save_style(
             if obj:
                 obj.layer_styling = layer_styling
                 obj.save(session=session)
+
+                # 👇 CLEAN CACHE: Force cache eviction so new styling takes immediate effect
+                try:
+                    cleared_tiles = MVTCache.clear_layer_cache(uuid)
+                    da_logger.info(
+                        f"[MVTCacheClear] Style updated globally. Cleared {cleared_tiles} tiles for layer {uuid}")
+                except Exception as cache_err:
+                    da_logger.error(f"[MVTCacheClearError] Failed to drop cache matrix: {cache_err}")
+
                 return {"payload": "Global Layer style saved successfully"}
 
-        # # Clear Cache logic remains the same
-        # cleared_tiles = 0
-        # try:
-        #     cleared_tiles = MVTCache.clear_layer_cache(uuid)
-        # except Exception:
-        #     pass
     return Response(status_code=204)
 
 
-@dch_styles_router.post("/upload_sld_style/{uuid}/")
+@dch_styles_router.post("/upload_sld_style/{uuid}/{map_uuid}/")
 async def upload_sld_style(
     uuid: str,
+    map_uuid: str,
     request: Request,
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
-    Uploads SLD or JSON styles and stores them in LayerInfo.layer_styling.
-    Protected endpoint.
+    Uploads SLD or JSON styles.
+
+    If map_uuid != "-1", saves style as map-specific layer style.
+    If map_uuid == "-1", saves style as global LayerInfo.layer_styling.
     """
     require_style_manager(current_user)
 
     form = await request.form()
     file = form.get("file")
+
     if file is None:
         raise HTTPException(status_code=400, detail="No file uploaded")
 
     content = await file.read()
 
+    filename = (getattr(file, "filename", "") or "").lower()
+    content_type = (file.content_type or "").lower()
+
+    is_json = (
+        "json" in content_type
+        or filename.endswith(".json")
+        or content.lstrip().startswith((b"{", b"["))
+    )
+
+    # Parse uploaded style
+    if is_json:
+        try:
+            parsed_style = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid JSON style file")
+
+    else:
+        try:
+            sld_str = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid SLD style file")
+
+        with LayerInfo.managed_session() as session:
+            layer_obj = session.execute(
+                select(LayerInfo).where(LayerInfo.uuid == uuid)
+            ).scalar_one_or_none()
+
+            if not layer_obj:
+                raise HTTPException(status_code=404, detail="Layer not found")
+
+            if layer_obj.data_model and layer_obj.data_model.code == DataModel.R.name:
+                raster = layer_obj.to_raster()
+
+                summary = BandProcess.get_summary_data(
+                    raster.get_data_array(1),
+                    nodata=raster.get_nodata_value(),
+                )
+
+                dtype = str(raster.get_profile().get("dtype", "")).lower()
+
+                parsed_style = DCHUtils.raster_symbolizer_parser(
+                    sld_str,
+                    summary,
+                    "float" in dtype,
+                )
+            else:
+                parsed_style = {
+                    "type": "sld",
+                    "style": sld_str,
+                }
+
+    # Save map-specific style
+    if map_uuid != "-1":
+        with MapInfo.managed_session() as session:
+            obj = session.execute(
+                select(MapInfo).where(MapInfo.uuid == map_uuid)
+            ).scalar_one_or_none()
+
+            if not obj:
+                raise HTTPException(status_code=404, detail="Map not found")
+
+            found = False
+            new_layers = []
+
+            for layer in (obj.layers or []):
+                layer_copy = dict(layer)
+
+                if layer_copy.get("uuid") == uuid:
+                    layer_copy["style"] = parsed_style
+                    found = True
+
+                new_layers.append(layer_copy)
+
+            if not found:
+                raise HTTPException(status_code=404, detail="Layer not found in map")
+
+            obj.layers = new_layers
+            flag_modified(obj, "layers")
+            obj.save(session=session)
+
+        return {"payload": "Map Layer style saved successfully"}
+
+    # Save global/default layer style
     with LayerInfo.managed_session() as session:
         obj = session.execute(
             select(LayerInfo).where(LayerInfo.uuid == uuid)
@@ -144,31 +235,17 @@ async def upload_sld_style(
         if not obj:
             raise HTTPException(status_code=404, detail="Layer not found")
 
-        if "json" in (file.content_type or "").lower():
-            try:
-                obj.layer_styling = json.loads(content)
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid JSON style file")
-        else:
-            sld_str = content.decode("utf-8")
-
-            if obj.data_model and obj.data_model.code == DataModel.R.name:
-                raster = obj.to_raster()
-                summary = BandProcess.get_summary_data(
-                    raster.get_data_array(1),
-                    nodata=raster.get_nodata_value()
-                )
-                obj.layer_styling = DCHUtils.raster_symbolizer_parser(
-                    sld_str,
-                    summary,
-                    "float" in raster.get_profile()["dtype"]
-                )
-            else:
-                obj.layer_styling = {"type": "sld", "style": sld_str}
-
+        obj.layer_styling = parsed_style
         obj.save(session=session)
 
-    return {"payload": "Style saved successfully"}
+    # 👇 CLEAN CACHE: Clear stale generated imagery buffers for global assets updates
+    try:
+        cleared_tiles = MVTCache.clear_layer_cache(uuid)
+        da_logger.info(f"[MVTCacheClear] SLD updated globally. Cleared {cleared_tiles} tiles for layer {uuid}")
+    except Exception as cache_err:
+        da_logger.error(f"[MVTCacheClearError] Failed to drop cache matrix: {cache_err}")
+
+    return {"payload": "Global Layer style saved successfully"}
 
 
 @dch_styles_router.get("/download_da_style/{uuid}/")
@@ -206,6 +283,61 @@ async def download_da_style(uuid: str):
 
     return Response(status_code=204)
 
+
+@dch_styles_router.post("/update_layer_visibility_zoom/{uuid}/")
+async def update_layer_zoom(
+        uuid: str,
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Direct endpoint to save Layer visibility zoom constraints.
+    Flushes tiles cache to update active client-side viewports cleanly.
+    """
+    # Enforce admin permission constraints
+    require_style_manager(current_user)
+
+    payload = await request.json()
+    zoom_range = payload.get("zoom_range")
+
+    # Validate that payload looks like a proper range array: [min, max]
+    if not isinstance(zoom_range, list) or len(zoom_range) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid payload. 'zoom_range' must be a list containing [min_zoom, max_zoom]"
+        )
+
+    try:
+        with LayerInfo.managed_session() as session:
+            obj = session.execute(
+                select(LayerInfo).where(LayerInfo.uuid == uuid)
+            ).scalar_one_or_none()
+
+            if obj is None:
+                raise HTTPException(status_code=404, detail="LayerInfo record not found")
+
+            # Cast components safely to integers to prevent string evaluation anomalies
+            obj.zoom_range = [int(zoom_range[0]), int(zoom_range[1])]
+
+            # Explicitly flag the array change for SQLAlchemy ORM state tracking
+            flag_modified(obj, "zoom_range")
+            obj.save(session=session)
+
+        # Clear active MVT map cache arrays so the tile delivery system respects the new scale boundaries immediately
+        try:
+            cleared_tiles = MVTCache.clear_layer_cache(uuid)
+            da_logger.info(f"[MVTCacheClear] Zoom visibility updated. Evicted {cleared_tiles} tiles for {uuid}")
+        except Exception as cache_err:
+            da_logger.warning(
+                f"[MVTCacheClearError] Failed to clear stale tile caches on zoom variance update: {cache_err}")
+
+        return {"payload": {"status": "success", "zoom_range": obj.zoom_range}}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        da_logger.exception(f"Failed to update visibility scale ranges on layer {uuid}: {e}")
+        raise HTTPException(status_code=500, detail="Internal update processing error")
 
 @dch_styles_router.get("/get_legend_graphic/{uuid}", response_class=Response)
 @dch_styles_router.get("/get_legend_graphic/{uuid}/", response_class=Response)

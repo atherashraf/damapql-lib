@@ -631,14 +631,22 @@ async def save_layer_info(
             if obj is None:
                 raise HTTPException(status_code=404, detail="LayerInfo not found")
 
+
             for key, value in row_data.items():
                 if hasattr(obj, key):
                     if key == "data_model":
                         value = DataModel.get_name(value)
                     if key.lower() == "model_type":
                         value = ModelType.get_name(value)
-                    setattr(obj, key, value)
 
+                    # 👇 ADD THIS BLOCK TO HANDLE STRINGIFIED LISTS
+                    if key == "zoom_range" and isinstance(value, str):
+                        try:
+                            value = json.loads(value)  # Converts "[14,30]" to [14, 30]
+                        except json.JSONDecodeError:
+                            raise HTTPException(status_code=400, detail="zoom_range must be a valid JSON array")
+
+                    setattr(obj, key, value)
             obj.save(session=session)
 
         return {"payload": {"status": "success", "updated": row_data}}

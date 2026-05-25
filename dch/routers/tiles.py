@@ -72,10 +72,26 @@ async def get_layer_mvt(
     """
     Public endpoint to serve Mapbox Vector Tiles (MVT) with per-layer DB cache.
     Optimized to minimize DB property lookups and reuse PK logic.
+    Enforces zoom level boundaries before hitting cache or generating tiles.
     """
     info = LayerInfo.get_layer_info_by_uuid(uuid)
     if not info:
         raise HTTPException(status_code=404, detail="Layer not found")
+
+    # 👇 1) ZOOM RANGE VALIDATION
+    # Expects info.zoom_range to be a list, e.g., [14, 30]
+    if info.zoom_range and isinstance(info.zoom_range, list) and len(info.zoom_range) == 2:
+        min_zoom, max_zoom = info.zoom_range
+
+        if z < min_zoom or z > max_zoom:
+            da_logger.debug(
+                f"[MVTZoomSkip] Requested z={z} is outside allowed range [{min_zoom}, {max_zoom}] for uuid={uuid}"
+            )
+            # Return a standard empty MVT response so the frontend map doesn't choke or throw 400s
+            return Response(
+                content=b"",
+                media_type="application/vnd.mapbox-vector-tile"
+            )
 
     access = info.layer_accessibility
     if not access:
@@ -117,7 +133,7 @@ async def get_layer_mvt(
             f"[MVTRequest] uuid={uuid}, z={z}, x={x}, y={y}, variant={variant}"
         )
 
-        # 1) Cache Read
+        # 2) Cache Read
         try:
             cached = MVTCache.get_cached_tile(uuid, x, y, z, variant)
             if cached:
@@ -129,7 +145,7 @@ async def get_layer_mvt(
         except Exception as cache_err:
             da_logger.exception(f"[MVTCacheReadError] uuid={uuid} - {cache_err}")
 
-        # 2) Generate on cache miss
+        # 3) Generate on cache miss
         # Prepare safe column identifiers
         safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
 
@@ -156,7 +172,7 @@ async def get_layer_mvt(
                 resolution=resolution,
             )
 
-        # 3) Cache Write
+        # 4) Cache Write
         if mvt_bytes:
             try:
                 MVTCache.set_cached_tile(uuid, x, y, z, variant, mvt_bytes)
