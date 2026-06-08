@@ -321,7 +321,7 @@ def create_user(
         if not created_user:
             raise HTTPException(status_code=404, detail="User not found after creation.")
 
-        return created_user.to_object()
+        return UserAOI.attach_user_aoi(created_user.to_object())
 
 
 
@@ -432,7 +432,7 @@ def update_user(
         if not updated_user:
             raise HTTPException(status_code=404, detail="User not found after update.")
 
-        return updated_user.to_object()
+        return UserAOI.attach_user_aoi(updated_user.to_object())
 
 
 @auth_router.post("/activate-account")

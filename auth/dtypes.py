@@ -65,6 +65,9 @@ class UserInfo(BaseModel):
     wasa_subdiv_id: Optional[int] = None
     wasa_subdiv_name: Optional[str] = None
 
+    # Effective scope description from wasa_subdivision or wasa_division (subdiv wins).
+    description: Optional[str] = None
+
     is_active: bool = False
     is_verified: bool = False
     roles: List[str] = Field(default_factory=list)
