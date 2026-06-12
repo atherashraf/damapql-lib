@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.dch.api_enum import AccessibilityType, DataModel
 from app.damapql.dch.models import LayerInfo, LayerCategory, DBQuery, LayerAccessibility
+from app.damapql.dch.schemas.geojson import GeoJSON
 
 # Supported lookup modes for resolving a layer.
 LayerLookupBy = Literal["uuid", "layer_name", "table_name"]
@@ -827,3 +828,143 @@ class LayerQueryService:
             "crs": crs,
             "features": features,
         }
+
+    @staticmethod
+    def get_features_geojson_by_pk_objects(
+            identifier: str,
+            pk_objects: list[dict[str, Any]],
+            by: LayerLookupBy = "uuid",
+    ) -> GeoJSON | Response:
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+
+        if not geom_col:
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
+
+        pk_cols = access.pk_cols or []
+
+        if not pk_cols:
+            raise HTTPException(
+                status_code=400,
+                detail="Layer has no primary key columns configured",
+            )
+
+        if not isinstance(pk_objects, list) or not pk_objects:
+            return GeoJSON(
+                type="FeatureCollection",
+                crs=None,
+                features=[],
+            )
+
+        where_groups = []
+        params: dict[str, Any] = {}
+
+        for row_index, pk_object in enumerate(pk_objects):
+            if not isinstance(pk_object, dict) or not pk_object:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid pk_object at index {row_index}",
+                )
+
+            missing_pk_cols = [col for col in pk_cols if col not in pk_object]
+
+            if missing_pk_cols:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Missing PK field(s) at index {row_index}: "
+                        f"{', '.join(missing_pk_cols)}"
+                    ),
+                )
+
+            extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
+
+            if extra_pk_cols:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Unexpected PK field(s) at index {row_index}: "
+                        f"{', '.join(extra_pk_cols)}"
+                    ),
+                )
+
+            clauses = []
+
+            for col_index, pk_col in enumerate(pk_cols):
+                param_name = f"pk_{row_index}_{col_index}"
+                clauses.append(f"{DBQuery.safe_ident(pk_col)} = :{param_name}")
+                params[param_name] = pk_object[pk_col]
+
+            where_groups.append("(" + " AND ".join(clauses) + ")")
+
+        engine = access.get_external_engine()
+
+        if not engine:
+            return Response(status_code=204)
+
+        schema_name = (access.params or {}).get("schema", "public")
+        table = f"{DBQuery.safe_ident(schema_name)}.{DBQuery.safe_ident(access.table_name)}"
+        geom = DBQuery.safe_ident(geom_col)
+
+        sql = text(
+            f"""
+            SELECT
+                *,
+                ST_SRID({geom}) AS __srid,
+                ST_AsGeoJSON({geom}) AS __geojson_geometry
+            FROM {table}
+            WHERE {" OR ".join(where_groups)}
+            """
+        )
+
+        with Session(engine) as session:
+            rows = session.execute(sql, params).mappings().all()
+
+        if not rows:
+            return Response(status_code=204)
+
+        features: list[dict[str, Any]] = []
+        collection_srid = None
+
+        for row in rows:
+            row_dict = dict(row)
+
+            geometry_json = row_dict.pop("__geojson_geometry", None)
+            srid = row_dict.pop("__srid", None)
+
+            if collection_srid is None and srid not in (None, 0):
+                collection_srid = srid
+
+            row_dict.pop(geom_col, None)
+            row_dict.pop("geom", None)
+            row_dict.pop("geometry", None)
+
+            if geometry_json is None:
+                continue
+
+            geometry = json.loads(geometry_json) if isinstance(geometry_json, str) else geometry_json
+
+            if len(pk_cols) == 1:
+                feature_id = row_dict.get(pk_cols[0])
+            else:
+                feature_id = {col: row_dict.get(col) for col in pk_cols}
+
+            features.append(
+                {
+                    "id": feature_id,
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": row_dict,
+                }
+            )
+
+        crs = f"EPSG:{collection_srid}" if collection_srid not in (None, 0) else None
+
+        return GeoJSON(
+            type="FeatureCollection",
+            crs=crs,
+            features=features,
+        )

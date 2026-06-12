@@ -1,4 +1,7 @@
 import json
+import tempfile
+from pathlib import Path
+
 import geopandas as gpd
 
 import io
@@ -6,12 +9,15 @@ import zipfile
 import base64
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Body
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import selectinload, Session
+from fastapi import APIRouter, Depends,  Request, Body, HTTPException
+from sqlalchemy import create_engine
+from fastapi.responses import FileResponse, Response
+
 
 from app.damapql.dch.api_enum import ModelType, ApplicationURLType
-from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.schemas.geojson import GeoJSON
+from app.damapql.dch.services.layer_query_services import LayerQueryService
+
 from app.damapql.dch.utils.mvt_utils import MVTCache
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 
@@ -1405,3 +1411,392 @@ async def bulk_update_layer_attribute(
     except Exception as e:
         da_logger.exception(f"Bulk attribute update failed for layer {uuid}: {e}")
         raise HTTPException(status_code=500, detail=f"Database Update Error: {str(e)}")
+
+
+
+@dch_admin_router.post("/download_geometry/{uuid}/")
+async def download_rows_geometry(
+    uuid: str,
+    payload: dict = Body(...),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    require_dch_admin(current_user)
+
+    pk_objects = payload.get("pk_objects")
+
+    if not isinstance(pk_objects, list) or not pk_objects:
+        raise HTTPException(
+            status_code=400,
+            detail="pk_objects must be a non-empty list",
+        )
+
+    try:
+        result = LayerQueryService.get_features_geojson_by_pk_objects(
+            identifier=uuid,
+            pk_objects=pk_objects,
+            by="uuid",
+        )
+
+        if isinstance(result, Response):
+            return result
+
+        geojson: GeoJSON = result
+
+        if not geojson.features:
+            raise HTTPException(
+                status_code=404,
+                detail="No geometry found for selected row(s)",
+            )
+
+        gdf = geojson.to_gdf()
+
+        if gdf.empty:
+            raise HTTPException(
+                status_code=404,
+                detail="No valid geometry found for selected row(s)",
+            )
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".gpkg",
+            delete=False,
+        )
+        tmp_path = Path(tmp.name)
+        tmp.close()
+
+        layer_name = f"selected_geometry_{uuid[:8]}"
+        safe_layer_name = layer_name[:60]
+
+        gdf.to_file(
+            tmp_path,
+            layer=safe_layer_name,
+            driver="GPKG",
+        )
+
+        filename = (
+            f"{safe_layer_name}_selected.gpkg"
+            if len(pk_objects) > 1
+            else f"{safe_layer_name}_selected_row.gpkg"
+        )
+
+        return FileResponse(
+            path=str(tmp_path),
+            media_type="application/geopackage+sqlite3",
+            filename=filename,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        da_logger.exception(f"Failed to download geometry for layer {uuid}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to download selected geometry",
+        )
+
+
+def validate_geometry_bounds(gdf, source_srid: int):
+    if gdf.empty:
+        raise HTTPException(status_code=400, detail="Uploaded GeoJSON has no geometry")
+
+    minx, miny, maxx, maxy = [float(v) for v in gdf.total_bounds]
+
+    if source_srid == 4326:
+        if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid coordinates for WGS84 / EPSG:4326. "
+                    "Longitude must be between -180 and 180, "
+                    "latitude must be between -90 and 90."
+                ),
+            )
+
+    elif source_srid == 3857:
+        limit = 20037508.342789244
+
+        if minx < -limit or maxx > limit or miny < -limit or maxy > limit:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid coordinates for Web Mercator / EPSG:3857. "
+                    "Coordinates must be within ±20037508.34 meters."
+                ),
+            )
+
+    elif source_srid == 32642:
+        # UTM Zone 42N: easting normally 166021–833978, northing 0–9329005
+        if minx < 100000 or maxx > 900000 or miny < 0 or maxy > 10000000:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid coordinates for UTM Zone 42N / EPSG:32642. "
+                    "Expected easting roughly 100000–900000 and northing 0–10000000."
+                ),
+            )
+
+    elif source_srid == 32643:
+        # UTM Zone 43N: easting normally 166021–833978, northing 0–9329005
+        if minx < 100000 or maxx > 900000 or miny < 0 or maxy > 10000000:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid coordinates for UTM Zone 43N / EPSG:32643. "
+                    "Expected easting roughly 100000–900000 and northing 0–10000000."
+                ),
+            )
+
+@dch_admin_router.post("/upload_geometry/{uuid}/")
+async def upload_row_geometry(
+    uuid: str,
+    request: Request,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    require_dch_admin(current_user)
+
+    form = await request.form()
+
+    upload_file = form.get("file")
+    pk_object_raw = form.get("pk_object")
+    source_srid_raw = form.get("source_srid") or "4326"
+
+    if not upload_file:
+        raise HTTPException(status_code=400, detail="file is required")
+
+    if not pk_object_raw:
+        raise HTTPException(status_code=400, detail="pk_object is required")
+
+    file_name = upload_file.filename or ""
+
+    if not file_name.lower().endswith((".geojson", ".json")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only GeoJSON file is supported"
+        )
+
+    try:
+        pk_object = json.loads(str(pk_object_raw))
+    except Exception:
+        raise HTTPException(status_code=400, detail="pk_object must be valid JSON")
+
+    if not isinstance(pk_object, dict) or not pk_object:
+        raise HTTPException(
+            status_code=400,
+            detail="pk_object must be a non-empty object"
+        )
+
+    try:
+        source_srid = int(source_srid_raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="source_srid must be integer")
+
+    allowed_srid = {4326, 3857, 32642, 32643}
+
+    if source_srid not in allowed_srid:
+        raise HTTPException(status_code=400, detail="Unsupported source_srid")
+
+    layer_info = LayerInfo.get_layer_info_by_uuid(uuid)
+
+    if not layer_info or not layer_info.layer_accessibility:
+        raise HTTPException(status_code=404, detail="Layer not found")
+
+    access = layer_info.layer_accessibility
+
+    if layer_info.data_model.code != DataModel.V.name:
+        raise HTTPException(status_code=400, detail="Layer is not a vector layer")
+
+    if access.accessibility_type.code != AccessibilityType.DB.name:
+        raise HTTPException(status_code=400, detail="Layer is not a DB layer")
+
+    pk_cols = access.pk_cols or []
+
+    if not pk_cols:
+        raise HTTPException(
+            status_code=400,
+            detail="Layer primary key is not configured"
+        )
+
+    missing_pk_cols = [col for col in pk_cols if col not in pk_object]
+
+    if missing_pk_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing PK field(s): {', '.join(missing_pk_cols)}"
+        )
+
+    extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
+
+    if extra_pk_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unexpected PK field(s): {', '.join(extra_pk_cols)}"
+        )
+
+    engine = access.get_external_engine()
+
+    if engine is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Layer database engine could not be initialized"
+        )
+
+    schema_name = (access.params or {}).get("schema", "public")
+    table_name = access.table_name
+    geom_col = access.geometry_col or "geom"
+    target_srid = layer_info.srid or 4326
+
+    if not table_name:
+        raise HTTPException(status_code=400, detail="Layer table name is missing")
+
+    try:
+        file_bytes = await upload_file.read()
+        geojson_dict = json.loads(file_bytes.decode("utf-8"))
+
+        raw_crs = geojson_dict.get("crs")
+
+        if isinstance(raw_crs, dict):
+            crs_name = (
+                    raw_crs.get("properties", {}).get("name")
+                    or raw_crs.get("name")
+            )
+
+            if isinstance(crs_name, str):
+                # Handles:
+                # urn:ogc:def:crs:EPSG::3857
+                # EPSG:3857
+                if "EPSG::" in crs_name:
+                    epsg = crs_name.split("EPSG::")[-1]
+                    geojson_dict["crs"] = f"EPSG:{epsg}"
+                elif "EPSG:" in crs_name:
+                    epsg = crs_name.split("EPSG:")[-1]
+                    geojson_dict["crs"] = f"EPSG:{epsg}"
+                else:
+                    geojson_dict["crs"] = f"EPSG:{source_srid}"
+            else:
+                geojson_dict["crs"] = f"EPSG:{source_srid}"
+
+        elif not raw_crs:
+            geojson_dict["crs"] = f"EPSG:{source_srid}"
+
+        geojson = GeoJSON(**geojson_dict)
+
+        if not geojson.features:
+            raise HTTPException(
+                status_code=400,
+                detail="GeoJSON has no feature"
+            )
+
+        if len(geojson.features) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="GeoJSON must contain exactly one feature"
+            )
+
+        if not geojson.crs:
+            geojson.crs = f"EPSG:{source_srid}"
+
+        gdf = geojson.to_gdf(assume_epsg=source_srid)
+
+        if gdf.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="GeoJSON has no valid geometry"
+            )
+
+        if len(gdf) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="GeoJSON must contain exactly one valid geometry"
+            )
+
+        validate_geometry_bounds(gdf, source_srid)
+
+        if source_srid != target_srid:
+            gdf = gdf.to_crs(epsg=target_srid)
+
+        geom = gdf.geometry.iloc[0]
+
+        if geom is None or geom.is_empty:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded geometry is empty"
+            )
+
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+
+        if geom is None or geom.is_empty or not geom.is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded geometry is invalid"
+            )
+
+        params = {
+            "geom_wkt": geom.wkt,
+            "srid": target_srid,
+        }
+
+        where_parts = []
+
+        for idx, pk_col in enumerate(pk_cols):
+            param_name = f"pk_{idx}"
+            where_parts.append(
+                f"{DBQuery.safe_ident(pk_col)} = :{param_name}"
+            )
+            params[param_name] = pk_object[pk_col]
+
+        safe_schema = DBQuery.safe_ident(schema_name)
+        safe_table = DBQuery.safe_ident(table_name)
+        safe_geom_col = DBQuery.safe_ident(geom_col)
+
+        sql = text(f"""
+            UPDATE {safe_schema}.{safe_table}
+            SET {safe_geom_col} = ST_SetSRID(
+                ST_GeomFromText(:geom_wkt),
+                :srid
+            )
+            WHERE {" AND ".join(where_parts)}
+        """)
+
+        with Session(engine) as db_session:
+            result = db_session.execute(sql, params)
+            db_session.commit()
+
+        if result.rowcount == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="No matching row found for geometry update"
+            )
+
+        try:
+            layer_info.update_extent(gdf.total_bounds.tolist(), overwrite=False)
+        except Exception as e:
+            da_logger.exception(
+                f"Failed to update layer extent after geometry upload: {e}"
+            )
+
+        try:
+            MVTCache.clear_layer_cache(uuid)
+        except Exception:
+            pass
+
+        return {
+            "payload": {
+                "status": "success",
+                "message": "Geometry uploaded successfully",
+                "rows_affected": result.rowcount,
+                "pk_object": pk_object,
+                "source_srid": source_srid,
+                "target_srid": target_srid,
+            }
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        da_logger.exception(f"Failed to upload geometry for layer {uuid}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to upload geometry"
+        )

@@ -279,3 +279,5 @@ class GeoJSON(BaseModel):
             crs=self.crs,
             style=self.style,
         )
+
+
