@@ -1458,25 +1458,27 @@ async def download_rows_geometry(
 
         tmp = tempfile.NamedTemporaryFile(
             suffix=".gpkg",
-            delete=False,
+            delete=True,
         )
         tmp_path = Path(tmp.name)
         tmp.close()
 
-        layer_name = f"selected_geometry_{uuid[:8]}"
-        safe_layer_name = layer_name[:60]
+        # layer_name = f"selected_geometry_{uuid[:8]}"
+        # safe_layer_name = layer_name[:60]
+        safe_layer_name = tmp_path.stem.replace(" ", "_")
 
         gdf.to_file(
             tmp_path,
             layer=safe_layer_name,
             driver="GPKG",
         )
+        filename = f"{safe_layer_name}.gpkg"
 
-        filename = (
-            f"{safe_layer_name}_selected.gpkg"
-            if len(pk_objects) > 1
-            else f"{safe_layer_name}_selected_row.gpkg"
-        )
+        # filename = (
+        #     f"{safe_layer_name}.gpkg"
+        #     if len(pk_objects) > 1
+        #     else f"{safe_layer_name}.gpkg"
+        # )
 
         return FileResponse(
             path=str(tmp_path),
