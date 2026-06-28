@@ -65,6 +65,9 @@ Add Layer Info
     python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
 correct layer accessibility col names
     python -m app.damapql.manage sync_layer_accessibility_columns --table_name wasa_asset_disposal
+refreh layer accessibility
+    docker exec -it wasa_be python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal --check true
+
 """
 import os
 import sys
@@ -82,12 +85,14 @@ from fastapi import APIRouter
 from pydantic import ValidationError
 from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import selectinload
 from sqlalchemy_utils import ChoiceType
 from sqlalchemy.engine import URL
 from sqlalchemy.orm.attributes import flag_modified
 
 from cryptography.fernet import Fernet
 
+from app.damapql.dch.api_enum import AccessibilityType
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
@@ -752,6 +757,412 @@ def create_layerinfo_from_raster(
     )
     return obj
 
+def refresh_layer_accessibility(
+        table_name: str = None,
+        layer_uuid: str = None,
+        check: bool = False,
+        schema: str = "public",
+):
+    """
+    Refresh DB-backed LayerAccessibility metadata from the real database table.
+
+    Usage:
+        python -m app.damapql.manage refresh_layer_accessibility
+        python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal
+        python -m app.damapql.manage refresh_layer_accessibility --layer_uuid <uuid>
+        python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal --check true
+    """
+
+    import time
+    from datetime import datetime, timezone
+
+    check = _to_bool(check)
+    started_at = time.time()
+
+    with LayerInfo.managed_session() as session:
+        query = (
+            session.query(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+        )
+
+        if table_name:
+            query = query.join(LayerInfo.layer_accessibility).filter(
+                LayerAccessibility.params.op("->>")("table_name") == table_name
+            )
+
+        if layer_uuid:
+            query = query.filter(LayerInfo.uuid == layer_uuid)
+
+        layers = query.all()
+
+        if not layers:
+            print("❌ No matching layers found.")
+            return
+
+        print("\n=========================================")
+        print("DAMap Layer Accessibility Refresh")
+        print("=========================================")
+        print(f"Mode        : {'CHECK ONLY' if check else 'UPDATE'}")
+        print(f"Schema      : {schema}")
+        print(f"Layers found: {len(layers)}\n")
+
+        checked_count = 0
+        updated_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        total_added_cols = 0
+        total_removed_cols = 0
+        total_geom_fixed = 0
+        total_pk_fixed = 0
+        total_extent_updated = 0
+        total_srid_updated = 0
+
+        for layer in layers:
+            access = layer.layer_accessibility
+
+            if not access:
+                skipped_count += 1
+                print(f"⏭️  {layer.layer_name}: no accessibility")
+                continue
+
+            if (
+                not access.accessibility_type
+                or access.accessibility_type.code != AccessibilityType.DB.name
+            ):
+                skipped_count += 1
+                print(f"⏭️  {layer.layer_name}: not DB-backed")
+                continue
+
+            if not access.table_name or not access.conn_name:
+                skipped_count += 1
+                print(f"⏭️  {layer.layer_name}: missing table_name or conn_name")
+                continue
+
+            db_conn = DBConnection.get_db_connection(con_name=access.conn_name)
+            if not db_conn:
+                skipped_count += 1
+                print(f"❌ {layer.layer_name}: DB connection not found: {access.conn_name}")
+                continue
+
+            engine = db_conn.get_sqlalchemy_engine()
+
+            try:
+                with engine.connect() as conn:
+                    col_rows = conn.execute(text("""
+                        SELECT 
+                            column_name,
+                            data_type,
+                            udt_name
+                        FROM information_schema.columns
+                        WHERE table_schema = :schema
+                          AND table_name = :table_name
+                        ORDER BY ordinal_position
+                    """), {
+                        "schema": schema,
+                        "table_name": access.table_name
+                    }).mappings().all()
+
+                    if not col_rows:
+                        skipped_count += 1
+                        print(f"❌ {layer.layer_name}: table not found: {schema}.{access.table_name}")
+                        continue
+
+                    pk_rows = conn.execute(text("""
+                        SELECT kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.constraint_type = 'PRIMARY KEY'
+                          AND tc.table_schema = :schema
+                          AND tc.table_name = :table_name
+                        ORDER BY kcu.ordinal_position
+                    """), {
+                        "schema": schema,
+                        "table_name": access.table_name
+                    }).mappings().all()
+
+                    geom_col = None
+                    columns = []
+
+                    for row in col_rows:
+                        col_name = row["column_name"]
+                        data_type = str(row["data_type"] or "").lower()
+                        udt_name = str(row["udt_name"] or "").lower()
+
+                        if udt_name == "geometry":
+                            geom_col = col_name
+                            continue
+
+                        columns.append({
+                            "name": col_name,
+                            "d_type": ManageDataFrameUtils.getColGenericType(data_type)
+                        })
+
+                    pk_cols = [r["column_name"] for r in pk_rows]
+
+                    srid = None
+                    geom_type = None
+                    extent = None
+                    extent_3857 = None
+                    row_count = 0
+
+                    if geom_col:
+                        safe_geom = f'"{geom_col.replace(chr(34), chr(34) * 2)}"'
+                        safe_schema = schema.replace('"', '""')
+                        safe_table_name = access.table_name.replace('"', '""')
+                        safe_table = f'"{safe_schema}"."{safe_table_name}"'
+
+                        meta = conn.execute(text(f"""
+                            SELECT 
+                                COUNT(*) AS row_count,
+                                ST_SRID({safe_geom}) AS srid,
+                                GeometryType({safe_geom}) AS geom_type
+                            FROM {safe_table}
+                            WHERE {safe_geom} IS NOT NULL
+                            GROUP BY ST_SRID({safe_geom}), GeometryType({safe_geom})
+                            ORDER BY COUNT(*) DESC
+                            LIMIT 1
+                        """)).mappings().first()
+
+                        if meta:
+                            srid = meta["srid"]
+                            geom_type = meta["geom_type"]
+                            row_count = int(meta["row_count"] or 0)
+
+                        ext = conn.execute(text(f"""
+                            SELECT 
+                                ST_XMin(e)::float AS minx,
+                                ST_YMin(e)::float AS miny,
+                                ST_XMax(e)::float AS maxx,
+                                ST_YMax(e)::float AS maxy
+                            FROM (
+                                SELECT ST_Extent({safe_geom})::geometry AS e
+                                FROM {safe_table}
+                                WHERE {safe_geom} IS NOT NULL
+                            ) AS q
+                            WHERE e IS NOT NULL
+                        """)).mappings().first()
+
+                        if ext:
+                            extent = [
+                                ext["minx"],
+                                ext["miny"],
+                                ext["maxx"],
+                                ext["maxy"],
+                            ]
+
+                        if extent and srid:
+                            ext3857 = conn.execute(text(f"""
+                                SELECT 
+                                    ST_XMin(e)::float AS minx,
+                                    ST_YMin(e)::float AS miny,
+                                    ST_XMax(e)::float AS maxx,
+                                    ST_YMax(e)::float AS maxy
+                                FROM (
+                                    SELECT ST_Extent(
+                                        ST_Transform({safe_geom}, 3857)
+                                    )::geometry AS e
+                                    FROM {safe_table}
+                                    WHERE {safe_geom} IS NOT NULL
+                                ) AS q
+                                WHERE e IS NOT NULL
+                            """)).mappings().first()
+
+                            if ext3857:
+                                extent_3857 = [
+                                    ext3857["minx"],
+                                    ext3857["miny"],
+                                    ext3857["maxx"],
+                                    ext3857["maxy"],
+                                ]
+
+                old_params = access.params or {}
+
+                old_cols = {
+                    c.get("name")
+                    for c in old_params.get("columns", [])
+                    if c.get("name")
+                }
+
+                new_cols = {
+                    c.get("name")
+                    for c in columns
+                    if c.get("name")
+                }
+
+                added_cols = sorted(new_cols - old_cols)
+                removed_cols = sorted(old_cols - new_cols)
+
+                old_geom = old_params.get("g_col")
+                old_pk = old_params.get("pk_cols", [])
+
+                old_geom_type = layer.geom_type
+                new_geom_type = [geom_type] if geom_type else None
+
+                columns_changed = old_params.get("columns") != columns
+                geom_changed = old_geom != geom_col
+                pk_changed = old_pk != pk_cols
+                srid_changed = layer.srid != srid
+                geom_type_changed = old_geom_type != new_geom_type
+                extent_changed = layer.extent != extent
+                extent_3857_changed = layer.extent_3857 != extent_3857
+
+                changed = any([
+                    columns_changed,
+                    geom_changed,
+                    pk_changed,
+                    srid_changed,
+                    geom_type_changed,
+                    extent_changed,
+                    extent_3857_changed,
+                ])
+
+                checked_count += 1
+
+                status_icon = "🟡" if changed else "✅"
+
+                print(f"{status_icon} {layer.layer_name}")
+                print(f"   UUID         : {layer.uuid}")
+                print(f"   Table        : {schema}.{access.table_name}")
+                print(f"   Connection   : {access.conn_name}")
+                print(f"   Columns      : {len(columns)}")
+                print(f"   Geometry     : {geom_col}")
+                print(f"   PK           : {pk_cols}")
+                print(f"   SRID         : {srid}")
+                print(f"   Geometry Type: {geom_type}")
+                print(f"   Features     : {row_count}")
+
+                if added_cols:
+                    print(f"   Added cols   : {added_cols}")
+
+                if removed_cols:
+                    print(f"   Removed cols : {removed_cols}")
+
+                if geom_changed:
+                    print(f"   Geometry Fix : {old_geom} -> {geom_col}")
+
+                if pk_changed:
+                    print(f"   PK Fix       : {old_pk} -> {pk_cols}")
+
+                if srid_changed:
+                    print(f"   SRID Fix     : {layer.srid} -> {srid}")
+
+                if geom_type_changed:
+                    print(f"   Type Fix     : {old_geom_type} -> {new_geom_type}")
+
+                if extent_changed:
+                    print("   Extent       : updated")
+
+                if extent_3857_changed:
+                    print("   Extent 3857  : updated")
+
+                if not check and changed:
+                    try:
+                        new_params = {
+                            **old_params,
+                            "conn_name": access.conn_name,
+                            "table_name": access.table_name,
+                            "columns": columns,
+                            "g_col": geom_col,
+                            "pk_cols": pk_cols,
+                        }
+
+                        access.params = new_params
+                        flag_modified(access, "params")
+
+                        if srid:
+                            layer.srid = int(srid)
+
+                        if geom_type:
+                            layer.geom_type = [geom_type]
+
+                        if extent:
+                            layer.extent = extent
+                            flag_modified(layer, "extent")
+
+                        if extent_3857:
+                            layer.extent_3857 = extent_3857
+                            flag_modified(layer, "extent_3857")
+
+                        extra = layer.extra_metadata or {}
+                        extra["row_count"] = row_count
+                        extra["accessibility_refreshed"] = True
+                        extra["accessibility_refreshed_at"] = datetime.now(
+                            timezone.utc
+                        ).isoformat()
+
+                        layer.extra_metadata = extra
+                        flag_modified(layer, "extra_metadata")
+
+                        session.commit()
+
+                        updated_count += 1
+                        total_added_cols += len(added_cols)
+                        total_removed_cols += len(removed_cols)
+
+                        if geom_changed:
+                            total_geom_fixed += 1
+
+                        if pk_changed:
+                            total_pk_fixed += 1
+
+                        if srid_changed:
+                            total_srid_updated += 1
+
+                        if extent_changed or extent_3857_changed:
+                            total_extent_updated += 1
+
+                        print("   Saved        : yes")
+
+                    except Exception as save_err:
+                        session.rollback()
+                        failed_count += 1
+                        print(f"   Saved        : failed - {save_err}")
+
+                elif check and changed:
+                    total_added_cols += len(added_cols)
+                    total_removed_cols += len(removed_cols)
+
+                    if geom_changed:
+                        total_geom_fixed += 1
+
+                    if pk_changed:
+                        total_pk_fixed += 1
+
+                    if srid_changed:
+                        total_srid_updated += 1
+
+                    if extent_changed or extent_3857_changed:
+                        total_extent_updated += 1
+
+                print("")
+
+            except Exception as e:
+                session.rollback()
+                failed_count += 1
+                print(f"❌ {layer.layer_name}: refresh failed: {e}\n")
+
+        elapsed = time.time() - started_at
+
+        print("=========================================")
+        print("Refresh Summary")
+        print("=========================================")
+        print(f"Checked layers  : {checked_count}")
+        print(f"Updated layers  : {updated_count}")
+        print(f"Skipped layers  : {skipped_count}")
+        print(f"Failed layers   : {failed_count}")
+        print(f"Columns added   : {total_added_cols}")
+        print(f"Columns removed : {total_removed_cols}")
+        print(f"Geometry fixed  : {total_geom_fixed}")
+        print(f"PK fixed        : {total_pk_fixed}")
+        print(f"SRID updated    : {total_srid_updated}")
+        print(f"Extent updated  : {total_extent_updated}")
+        print(f"Completed in    : {elapsed:.2f} sec")
+
+        if check:
+            print("\nℹ️ Check mode only. No database changes were saved.")
 
 def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = None):
     """
