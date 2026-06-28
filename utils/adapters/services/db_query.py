@@ -474,26 +474,29 @@ class DBQuery:
             layer_name: str = "default_layer",
             buffer: int = 64,
             extent: int = 4096,
-            resolution: float = 0  # New Parameter
+            resolution: float = 0
     ) -> bytes:
         """
-        High-speed MVT generation via PostGIS with geometry simplification.
+        High-speed MVT generation via PostGIS with optional geometry simplification.
         """
+
         engine = session.get_bind()
-        if engine.dialect.name != 'postgresql':
+        if engine.dialect.name != "postgresql":
             raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
 
-        raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
+        raw_sql = (
+            str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            if not isinstance(stmt, str)
+            else stmt
+        )
 
-        # 1. Geometry logic: Apply simplification if resolution is provided
-        # We use ST_SnapToGrid or ST_Simplify to reduce vertex count based on resolution
+        geom_ref = f't."{geom_col}"'
+
         if resolution > 0:
-            geom_expression = f'ST_Simplify("{geom_col}", {resolution})'
+            geom_expression = f"ST_Simplify({geom_ref}, {resolution})"
         else:
-            geom_expression = f'"{geom_col}"'
+            geom_expression = geom_ref
 
-        # 2. Optimized MVT Query
-        # Note: We use ST_Transform on the simplified geometry to move it to Web Mercator (3857)
         mvt_sql = f"""
             WITH 
             bounds AS (
@@ -510,16 +513,27 @@ class DBQuery:
                 ) AS mvt_geom,
                 t.*
               FROM ({raw_sql}) AS t, bounds
-              WHERE ST_Intersects(ST_Transform("{geom_col}", 3857), bounds.envelope)
+              WHERE ST_Intersects(
+                  ST_Transform({geom_ref}, 3857), 
+                  bounds.envelope
+              )
             )
-            SELECT ST_AsMVT(mvt_geoms.*, '{layer_name}', {extent}, 'mvt_geom') FROM mvt_geoms;
+            SELECT ST_AsMVT(
+                mvt_geoms.*, 
+                '{layer_name}', 
+                {extent}, 
+                'mvt_geom'
+            ) 
+            FROM mvt_geoms;
         """
+
         try:
             result = session.execute(text(mvt_sql)).scalar()
-        except Exception as e:
-            da_logger.exception("Error to get data")
-            result = None
-        return bytes(result) if result else b""
+            return bytes(result) if result else b""
+
+        except Exception:
+            da_logger.exception("Error to get MVT data")
+            return b""
 
     @staticmethod
     async def execute_query_as_mvt_async(

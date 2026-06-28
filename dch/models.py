@@ -279,6 +279,51 @@ class LayerAccessibility(DBBase):
         cols = (self.params or {}).get("columns", [])
         return [c.get("d_type") for c in cols]
 
+    def get_table_columns(
+            self,
+            session: Session,
+            schema: str = "public"
+    ) -> set[str]:
+        if not self.table_name:
+            return set()
+
+        sql = text("""
+                   SELECT column_name
+                   FROM information_schema.columns
+                   WHERE table_schema = :schema
+                     AND table_name = :table_name
+                   """)
+
+        rows = session.execute(sql, {
+            "schema": schema,
+            "table_name": self.table_name
+        }).fetchall()
+
+        return {r[0] for r in rows}
+
+    def get_valid_cols(
+            self,
+            session: Session,
+            schema: str = "public"
+    ) -> list[str]:
+        """
+        Returns only those metadata columns that really exist in the DB table.
+        Prevents stale LayerAccessibility.params columns from breaking MVT/query generation.
+        """
+        db_cols = self.get_table_columns(session=session, schema=schema)
+        metadata_cols = set(self.cols_name or [])
+
+        valid_cols = metadata_cols.intersection(db_cols)
+        missing_cols = metadata_cols - db_cols
+
+        if missing_cols:
+            da_logger.warning(
+                f"[LayerColumnMismatch] table={self.table_name}, "
+                f"missing={sorted(missing_cols)}"
+            )
+
+        return sorted(valid_cols)
+
     @property
     def geometry_col(self):
         return (self.params or {}).get("g_col")

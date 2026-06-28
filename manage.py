@@ -87,8 +87,9 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from cryptography.fernet import Fernet
 
-from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel
+from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.utils.adapters.db import DBBase, metadata_obj
 # Project Imports
 
@@ -751,6 +752,80 @@ def create_layerinfo_from_raster(
     return obj
 
 
+def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = None):
+    """
+    Refresh LayerAccessibility.params['columns'] from the real DB table columns.
+
+    Usage:
+        python -m app.damapql.manage sync_layer_accessibility_columns --table_name wasa_asset_disposal
+        python -m app.damapql.manage sync_layer_accessibility_columns
+    """
+
+    with LayerAccessibility.managed_session() as session:
+        query = session.query(LayerAccessibility)
+
+        if table_name:
+            query = query.filter(
+                LayerAccessibility.params.op("->>")("table_name") == table_name
+            )
+
+        access_list = query.all()
+
+        for access in access_list:
+            params = access.params or {}
+
+            if not access.table_name or not access.conn_name:
+                continue
+
+            if access.accessibility_type.code != "DB":
+                continue
+
+            db_conn = DBConnection.get_db_connection(con_name=access.conn_name)
+            if not db_conn:
+                print(f"❌ DB connection not found: {access.conn_name}")
+                continue
+
+            engine = db_conn.get_sqlalchemy_engine()
+
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                                         SELECT column_name, udt_name, data_type
+                                         FROM information_schema.columns
+                                         WHERE table_schema = 'public'
+                                           AND table_name = :table_name
+                                         ORDER BY ordinal_position
+                                         """), {"table_name": access.table_name}).mappings().all()
+
+            cols = []
+            g_col = None
+
+            for row in rows:
+                col_name = row["column_name"]
+                data_type = str(row["data_type"]).lower()
+                udt_name = str(row["udt_name"]).lower()
+
+                if udt_name == "geometry" or data_type == "USER-DEFINED".lower():
+                    g_col = col_name
+                    continue
+
+                cols.append({
+                    "name": col_name,
+                    "d_type": ManageDataFrameUtils.getColGenericType(data_type)
+                })
+
+            params["columns"] = cols
+            params["g_col"] = g_col or params.get("g_col")
+
+            access.params = params
+            flag_modified(access, "params")
+
+            print(
+                f"✅ Synced {access.table_name}: "
+                f"{len(cols)} columns, geom={params.get('g_col')}"
+            )
+
+        session.commit()
+
 # --- AUTH, ROLES, ORGS & DEPTS ---
 
 def createsuperuser():
@@ -1014,6 +1089,8 @@ def get_user_password(username: str):
     user = User.get_user(username)
     password = CryptoUtils().decrypt_txt(user.password)
     da_logger.success(f"{username} password is {password}")
+
+
 
 # --- SECURITY ---
 
