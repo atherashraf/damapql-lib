@@ -63,6 +63,8 @@ Generate security keys:
 
 Add Layer Info
     python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
+correct layer accessibility col names
+    python -m app.damapql.manage sync_layer_accessibility_columns --table_name wasa_asset_disposal
 """
 import os
 import sys
@@ -75,7 +77,6 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from aiobotocore import session
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter
 from pydantic import ValidationError
