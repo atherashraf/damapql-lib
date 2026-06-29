@@ -96,7 +96,7 @@ from app.damapql.dch.api_enum import AccessibilityType
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-from app.damapql.utils.adapters.db import DBBase, metadata_obj
+from app.damapql.utils.adapters.db import DBBase
 # Project Imports
 
 from app.damapql.utils.crypto import CryptoUtils
