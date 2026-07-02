@@ -128,40 +128,55 @@ async def save_map(
 
         layers = []
 
-        # Save DA layers
-        for da in payload.daLayers:
-            da_uuid = da.uuid.strip()
-            style = da.style if da.style else existing_styles.get(da_uuid)
-
-            layers.append({
-                "uuid": da_uuid,
-                "style": style,
-                "visible": da.visible,
-                "zoomRange": [0, 30],
-                "opacity": da.opacity,
-                "zIndex": da.zIndex,
-            })
-
-        # Save base layer
+        # Base layer
         layers.append({
             "uuid": "-1",
             "isBase": True,
             "key": payload.baseLayer.strip(),
         })
 
-        # Save overlay / other layers (e.g. WMS)
+        # DA layers
+        for da in payload.daLayers:
+            da_uuid = da.uuid.strip()
+            style = da.style if da.style else existing_styles.get(da_uuid)
+
+            layers.append({
+                "uuid": da_uuid,
+                "isBase": False,
+                "style": style,
+                "visible": da.visible,
+                "zoomRange": [0, 30],
+                "opacity": da.opacity,
+                "zIndex": da.zIndex,
+                "title": da.title,
+                "name": da.name,
+                "groupKey": da.groupKey,
+                "groupTitle": da.groupTitle,
+            })
+
+        # WMS / other layers
         for info in payload.otherLayers:
             layers.append({
-                "uuid": "-1",
+                "uuid": info.uuid,
                 "isBase": False,
-                "name": info['name'].strip(),
-                "key": info['title'],
-                "title": info['title'],
-                "params": info['params'],
-                "type": info['type'],
-                "visible": info['visible'],
-                "opacity": info['opacity'],
-                "zIndex": info['zIndex'],
+                "name": info.name.strip(),
+                "key": info.title or info.name,
+                "title": info.title or info.name,
+                "params": info.params,
+                "type": info.type,
+                "visible": info.visible,
+                "opacity": info.opacity,
+                "zIndex": info.zIndex,
+                "groupKey": info.groupKey,
+                "groupTitle": info.groupTitle,
+            })
+
+        # Add group metadata
+        if payload.groups:
+            layers.append({
+                "uuid": "-1",
+                "isGroupMeta": True,
+                "groups": [g.model_dump() for g in payload.groups],
             })
 
         map_info.title = payload.mapName
@@ -169,8 +184,11 @@ async def save_map(
         map_info.extent = payload.extent
         map_info.srid = 3857
         map_info.units = "m"
+
         flag_modified(map_info, "extent")
         flag_modified(map_info, "layers")
+        # flag_modified(map_info, "groups")
+
         map_info.save(session=session)
 
         return {
@@ -193,7 +211,8 @@ async def get_map_info(uuid: str, current_user: UserInfo = Depends(AuthUtils.get
         ).scalar_one_or_none()
 
         if map_obj:
-            return {"payload": map_obj.to_object()}
+            map_info = map_obj.to_object()
+            return {"payload": map_info}
 
     return Response(status_code=204)
 

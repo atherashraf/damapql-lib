@@ -979,17 +979,44 @@ class LayerInfo(DBBase):
 
 class MapInfo(DBBase):
     __tablename__ = "dch_map_info"
+
     id = Column(db.BIGINT, primary_key=True, autoincrement=True)
     uuid = Column(db.VARCHAR(40), nullable=False, unique=True)
-    # name = Column(db.VARCHAR(100), unique=True, nullable=False)
     title = Column(db.VARCHAR(100), nullable=False, unique=True)
     extent = Column(db.ARRAY(item_type=db.Float), nullable=False)
     layers = Column(db.JSON, nullable=False)
     srid = Column(db.INTEGER, nullable=False, default=3857)
-    units = Column(db.VARCHAR(10), nullable=False, default='m')
+    units = Column(db.VARCHAR(10), nullable=False, default="m")
     description = Column(db.TEXT, nullable=True)
     navigation_setting = Column(db.JSON, nullable=True)
+
     __pydantic__ = MapInfoType
+
+    def to_object(self):
+        obj = super().to_object()
+        data = obj.model_dump() if hasattr(obj, "model_dump") else vars(obj)
+
+        groups = []
+        clean_layers = []
+
+        for layer in data.get("layers") or []:
+            if isinstance(layer, dict) and layer.get("isGroupMeta"):
+                groups = layer.get("groups") or []
+            else:
+                clean_layers.append(layer)
+
+        data["groups"] = groups
+        data["layers"] = clean_layers
+
+        return self.__pydantic__.model_validate(data)
+
+    def get_layer_info(self, uuid):
+        for layer in self.layers:
+            if layer.get("isGroupMeta"):
+                continue
+            if layer.get("uuid") == uuid:
+                return layer
+        return None
 
     @classmethod
     def get_all_map_info(cls, limit=None):
@@ -1005,9 +1032,3 @@ class MapInfo(DBBase):
                 df = pd.DataFrame({col: [] for col in rs.keys()})
             con.close()
             return df
-
-    def get_layer_info(self, uuid):
-        for layer in self.layers:
-            if layer["uuid"] == uuid:
-                return layer
-        return None

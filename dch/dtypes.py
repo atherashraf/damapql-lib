@@ -205,7 +205,6 @@ class LayerInfoType(BaseModel):
     extent: Optional[List[float]]
     extent_3857: Optional[List[float]]
     data_model: Any  # Assuming ChoiceType was backed by str
-    model_type: Optional[Any]
     geom_type: Optional[List[str]]
     layer_styling: Optional[Dict[str, Any]]
     zoom_range: List[int]
@@ -267,39 +266,42 @@ class LayerInfoType(BaseModel):
     #     return v
 
 
-from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, ConfigDict
-
-
 class LayerItem(BaseModel):
-    # Core identification
     uuid: str
     layerName: Optional[str] = None
-    title: Optional[str] = None  # Added to mirror frontend title
+    title: Optional[str] = None
 
-    # State and Visualization
     visible: bool = True
     opacity: float = 1.0
-    zIndex: int = 0  # CRITICAL: This stores your drag-and-drop order
+    zIndex: int = 0
 
-    # Styling and Constraints
     style: Optional[Any] = None
     zoomRange: List[int] = Field(default_factory=lambda: [0, 30])
 
-    # Base Layer / Special Layer identifiers
     isBase: bool = False
-    key: Optional[str] = None  # Stores the base layer title (e.g., 'Google Satellite')
+    key: Optional[str] = None
 
-    # Flexibility for WMS/WFS (params, type, etc.)
+    groupKey: Optional[str] = None
+    groupTitle: Optional[str] = None
+    isGroupMeta: bool = False
+    groups: Optional[List[Dict[str, Any]]] = None
+
     model_config = ConfigDict(extra='allow', from_attributes=True)
+
+class LayerGroupItem(BaseModel):
+    key: str
+    title: str
+    order: int = 0
+    collapsed: bool = False
 
 
 class MapInfoType(BaseModel):
-    id: Optional[int] = None  # Optional because it's not present during initial creation
+    id: Optional[int] = None
     uuid: str
     title: str
-    extent: List[float]  # [minX, minY, maxX, maxY]
-    layers: List[LayerItem]  # This will now validate each item in the JSON array
+    extent: List[float]
+    groups: List[LayerGroupItem] = Field(default_factory=list)
+    layers: List[LayerItem]
     srid: int = 3857
     units: str = "m"
     description: Optional[str] = None

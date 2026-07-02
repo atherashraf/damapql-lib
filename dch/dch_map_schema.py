@@ -1,7 +1,8 @@
-# dch_map_schema.py (Pydantic v2)
 from __future__ import annotations
+
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
+
 
 class GeomStyle(BaseModel):
     pointShape: Optional[str] = None
@@ -27,31 +28,55 @@ class FeatureStyle(BaseModel):
     # keep flexible to match your TS structure: {"default"?: GeomStyle, "rules"?: Rule[]}
     style: Dict[str, Any]
 
-class DALayer(BaseModel):
-    uuid: str
-    opacity: float = Field(ge=0.0, le=1.0)
-    visible: bool
-    # allow client-side override
-    style: Optional[FeatureStyle] = None
+# class DALayer(BaseModel):
+#     uuid: str
+#     opacity: float = Field(ge=0.0, le=1.0)
+#     visible: bool
+#     # allow client-side override
+#     style: Optional[FeatureStyle] = None
+#
+# class OtherLayer(BaseModel):
+#     name: str
+#     type: str
+#     params: Dict[str, Any] = Field(default_factory=dict)
 
-class OtherLayer(BaseModel):
-    name: str
-    type: str
-    params: Dict[str, Any] = Field(default_factory=dict)
+class LayerGroupSaveSchema(BaseModel):
+    key: str
+    title: str
+    order: int = 0
+    collapsed: bool = False
+
 
 class LayerSaveSchema(BaseModel):
     uuid: str
     visible: bool
-    opacity: float
-    zIndex: int  # Added to capture the drag order
+    opacity: float = Field(ge=0.0, le=1.0)
+    zIndex: int
     title: Optional[str] = None
+    name: Optional[str] = None
     style: Optional[Any] = None
+    groupKey: Optional[str] = None
+    groupTitle: Optional[str] = None
+
+
+class OtherLayerSaveSchema(BaseModel):
+    uuid: str = "-1"
+    name: str
+    title: Optional[str] = None
+    type: str
+    visible: bool = True
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    zIndex: int = 0
+    groupKey: Optional[str] = None
+    groupTitle: Optional[str] = None
+    params: Dict[str, Any] = Field(default_factory=dict)
+
 
 class MapSaveRequest(BaseModel):
     uuid: str
     mapName: str
     extent: List[float]
     baseLayer: str = "Google Hybrid"
-    daLayers: List[LayerSaveSchema]
-    otherLayers: List[Any] = []
-
+    groups: List[LayerGroupSaveSchema] = Field(default_factory=list)
+    daLayers: List[LayerSaveSchema] = Field(default_factory=list)
+    otherLayers: List[OtherLayerSaveSchema] = Field(default_factory=list)
