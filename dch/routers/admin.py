@@ -583,7 +583,7 @@ async def save_map_info(
             ).scalar_one_or_none()
 
             if obj is None:
-                raise HTTPException(status_code=404, detail="LayerInfo not found")
+                raise HTTPException(status_code=404, detail="Map Info not found")
 
             for key, value in row_data.items():
                 if hasattr(obj, key):
@@ -594,6 +594,7 @@ async def save_map_info(
         return {"payload": {"status": "success", "updated": row_data}}
 
     except HTTPException:
+        da_logger.exception(f"Failed to save map info: {pk_val}")
         raise
     except Exception as e:
         da_logger.exception(f"Failed to save layer info: {e}")
