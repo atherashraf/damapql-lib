@@ -29,6 +29,8 @@ Create database tables:
      python -m app.damapql.manage sync_sequences --app_label dch
      python -m app.damapql.manage sync_sequences --app_label dch --table_names dch_map_info,dch_layer_info,dch_layer_accessibility
 
+    python -m app.damapql.manage sync_schema --model_name WASAComplaint
+    python -m app.damapql.manage sync_schema --table_name tbl_wasa_complaints
 
 Add DB Connections:
     python -m app.damapql.manage add_db_connection
@@ -61,8 +63,19 @@ Generate security keys:
     python -m app.damapql.manage generate_crypto_key
     python -m app.damapql.manage generate_secret_key_hex --length 64
 
-Add Layer Info
+Add and reconcile Layer Info
     python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
+    python -m app.damapql.manage reconcile_layerinfo
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --layer_uuid <uuid>
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --table_name wasa_asset_disposal
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --check true
+
 correct layer accessibility col names
     python -m app.damapql.manage sync_layer_accessibility_columns --table_name wasa_asset_disposal
 refreh layer accessibility
@@ -97,6 +110,7 @@ from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, Layer
 from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.utils.adapters.db import DBBase
+from app.damapql.utils.adapters.model_utils import ModelUtils
 # Project Imports
 
 from app.damapql.utils.crypto import CryptoUtils
@@ -330,56 +344,303 @@ def startapp(app_label: str):
 
 
 # --- SCHEMA & MIGRATIONS ---
-
-def sync_schema(app_label: str, rename_map: dict | None = None):
+def get_model_app_info(ModelCls):
     """
+    Resolve the DA_APPS entry and BaseCls for a model class.
+
+    Returns:
+        app_label, app_config, BaseCls
+    """
+    model_module = getattr(ModelCls, "__module__", "")
+
+    for app_label, app_config in DA_APPS.items():
+        models_prefix = f'{app_config["path"]}.models'
+
+        if not (
+            model_module == models_prefix
+            or model_module.startswith(f"{models_prefix}.")
+        ):
+            continue
+
+        configured_base = app_config.get("base")
+
+        if configured_base is None:
+            BaseCls = DBBase
+        elif isinstance(configured_base, str):
+            BaseCls = import_string(configured_base)
+        else:
+            BaseCls = configured_base
+
+        return app_label, app_config, BaseCls
+
+    raise ValueError(
+        f"Could not resolve DA_APPS configuration for model "
+        f"'{ModelCls.__module__}.{ModelCls.__name__}'."
+    )
+
+def sync_schema(
+        *,
+        app_label: str | None = None,
+        model_name: str | None = None,
+        table_name: str | None = None,
+        rename_map: dict | None = None,
+):
+    """
+    Synchronize database schema using exactly one selector.
+
+    Available selectors:
+        app_label
+            Synchronize all tables registered under the app Base.
+
+        model_name
+            Synchronize only the table mapped by the model.
+
+        table_name
+            Find the model by __tablename__ and synchronize its table.
+
     rename_map format:
-    {
-        "table_name": {
-            "old_col_name": "new_col_name"
+        {
+            "table_name": {
+                "old_col_name": "new_col_name"
+            }
         }
-    }
+
+    Examples:
+        sync_schema(app_label="wasa")
+
+        sync_schema(model_name="WASAComplaint")
+
+        sync_schema(table_name="tbl_wasa_complaints")
+
+    CLI:
+        python -m app.damapql.manage sync_schema --app_label wasa
+
+        python -m app.damapql.manage sync_schema --model_name WASAComplaint
+
+        python -m app.damapql.manage sync_schema --table_name tbl_wasa_complaints
     """
     rename_map = rename_map or {}
 
-    ap = DA_APPS.get(app_label)
-    if not ap:
-        print(f"❌ App label '{app_label}' not found.")
-        return
+    selectors = {
+        "app_label": app_label,
+        "model_name": model_name,
+        "table_name": table_name,
+    }
 
-    importlib.import_module(f'{ap["path"]}.models')
+    supplied_selectors = [
+        selector_name
+        for selector_name, selector_value in selectors.items()
+        if selector_value is not None
+        and str(selector_value).strip()
+    ]
 
-    if "base" not in ap:
-        BaseCls = DBBase
+    if not supplied_selectors:
+        raise ValueError(
+            "At least one selector is required: "
+            "app_label, model_name, or table_name."
+        )
+
+    if len(supplied_selectors) > 1:
+        raise ValueError(
+            "Only one selector can be supplied at a time. "
+            f"Received: {', '.join(supplied_selectors)}"
+        )
+
+    selected_app_label: str
+    ap: dict
+    BaseCls = None
+    selected_tables = []
+
+    # =========================================================
+    # Synchronize all models of one app
+    # =========================================================
+    if app_label:
+        selected_app_label = app_label.strip()
+        ap = DA_APPS.get(selected_app_label)
+
+        if not ap:
+            raise ValueError(
+                f"App label '{selected_app_label}' not found."
+            )
+
+        importlib.import_module(
+            f'{ap["path"]}.models'
+        )
+
+        configured_base = ap.get("base")
+
+        if configured_base is None:
+            BaseCls = DBBase
+        elif isinstance(configured_base, str):
+            BaseCls = import_string(configured_base)
+        else:
+            BaseCls = configured_base
+
+        selected_tables = list(
+            BaseCls.metadata.sorted_tables
+        )
+
+    # =========================================================
+    # Synchronize one model
+    # =========================================================
+    elif model_name:
+        ModelCls = ModelUtils.get_model(
+            model_name.strip()
+        )
+
+        if ModelCls is None:
+            raise ValueError(
+                f"Model '{model_name}' not found."
+            )
+
+        (
+            selected_app_label,
+            ap,
+            BaseCls,
+        ) = get_model_app_info(ModelCls)
+
+        selected_tables = [
+            ModelCls.__table__
+        ]
+
+    # =========================================================
+    # Synchronize one table by finding its model
+    # =========================================================
     else:
-        BaseCls = import_string(ap["base"]) if isinstance(ap["base"], str) else ap["base"]
+        ModelCls = ModelUtils.get_model_by_tablename(
+            table_name.strip()
+        )
 
-    engine = BaseCls.get_engine(db_key=ap["db_key"])
-    da_logger.info(engine)
+        (
+            selected_app_label,
+            ap,
+            BaseCls,
+        ) = get_model_app_info(ModelCls)
 
-    updater = TableSchemaUpdater(engine=engine, logger=da_logger)
+        selected_tables = [
+            ModelCls.__table__
+        ]
 
-    app_tables = [t for _, t in BaseCls.metadata.tables.items()]
-    da_logger.info(f"table_names {app_tables}")
+    if BaseCls is None:
+        raise RuntimeError(
+            "Could not resolve SQLAlchemy BaseCls."
+        )
 
-    # for table_obj in app_tables:
-    #     table_rename_map = rename_map.get(table_obj.name, {})
-    #     updater.sync_table(table_obj, rename_map=table_rename_map)
-    existing_table_names = updater.get_table_names()
-    for table_obj in app_tables:
-        table_name = table_obj.name
+    if not selected_tables:
+        raise ValueError(
+            "No SQLAlchemy tables were selected for synchronization."
+        )
 
-        # 1. Check if the table needs to be created from scratch
-        if table_name not in existing_table_names:
-            updater.create_table(table_obj)
-            continue  # Move to the next table, nothing to sync yet
+    db_key = ap.get("db_key")
 
-        # 2. If table exists, perform the synchronization
-        table_rename_map = rename_map.get(table_name, {})
-        updater.sync_table(table_obj, rename_map=table_rename_map)
+    if not db_key:
+        raise ValueError(
+            f"App '{selected_app_label}' does not define db_key."
+        )
 
-    print(f"✅ Schema sync for '{app_label}' complete.")
+    engine = BaseCls.get_engine(
+        db_key=db_key
+    )
 
+    da_logger.info(
+        f"Schema synchronization: "
+        f"app={selected_app_label}, "
+        f"base={BaseCls.__name__}, "
+        f"db_key={db_key}"
+    )
+
+    updater = TableSchemaUpdater(
+        engine=engine,
+        logger=da_logger,
+    )
+
+    existing_table_names = set(
+        updater.get_table_names()
+    )
+
+    da_logger.info(
+        "Selected tables: "
+        f"{[table.fullname for table in selected_tables]}"
+    )
+
+    created_tables = []
+    synchronized_tables = []
+    failed_tables = []
+
+    for table_obj in selected_tables:
+        table_name_value = table_obj.name
+
+        try:
+            if table_name_value not in existing_table_names:
+                updater.create_table(table_obj)
+
+                existing_table_names.add(
+                    table_name_value
+                )
+                created_tables.append(
+                    table_name_value
+                )
+
+                continue
+
+            table_rename_map = rename_map.get(
+                table_name_value,
+                {},
+            )
+
+            updater.sync_table(
+                table_obj,
+                rename_map=table_rename_map,
+            )
+
+            synchronized_tables.append(
+                table_name_value
+            )
+
+        except Exception as exc:
+            failed_tables.append(
+                (table_name_value, str(exc))
+            )
+
+            da_logger.exception(
+                f"Schema synchronization failed for "
+                f"'{table_name_value}': {exc}"
+            )
+
+    print("\n========================================")
+    print("Schema Synchronization Summary")
+    print("========================================")
+    print(f"App          : {selected_app_label}")
+    print(f"Base         : {BaseCls.__name__}")
+    print(f"Database key : {db_key}")
+    print(f"Created      : {len(created_tables)}")
+    print(f"Synchronized : {len(synchronized_tables)}")
+    print(f"Failed       : {len(failed_tables)}")
+
+    if created_tables:
+        print("\nCreated tables:")
+        for created_table in created_tables:
+            print(f"  - {created_table}")
+
+    if synchronized_tables:
+        print("\nSynchronized tables:")
+        for synchronized_table in synchronized_tables:
+            print(f"  - {synchronized_table}")
+
+    if failed_tables:
+        print("\nFailed tables:")
+        for failed_table, error in failed_tables:
+            print(f"  - {failed_table}: {error}")
+
+        raise RuntimeError(
+            f"Schema synchronization failed for "
+            f"{len(failed_tables)} table(s)."
+        )
+
+    print(
+        f"\n✅ Schema sync for "
+        f"'{selected_app_label}' complete."
+    )
 
 def sync_sequences(app_label: str, table_names: str = None):
     """
@@ -756,6 +1017,743 @@ def create_layerinfo_from_raster(
         }
     )
     return obj
+def reconcile_layerinfo(
+        layer_uuid: str = None,
+        table_name: str = None,
+        schema: str = "public",
+        check: bool = False,
+):
+    """
+    Reconcile LayerInfo and LayerAccessibility metadata against real DB tables.
+
+    The actual database table is treated as the source of truth.
+
+    Corrects:
+    - LayerAccessibility columns
+    - geometry column
+    - primary-key columns
+    - LayerInfo SRID
+    - LayerInfo geometry types
+    - native extent
+    - EPSG:3857 extent
+    - row count and reconciliation timestamp
+
+    Usage:
+        python -m app.damapql.manage reconcile_layerinfo
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --layer_uuid <uuid>
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --table_name wasa_asset_disposal
+
+        python -m app.damapql.manage reconcile_layerinfo \
+            --check true
+    """
+
+    import time
+    from datetime import datetime, timezone
+
+    check = _to_bool(check)
+    started_at = time.time()
+
+    def quote_ident(value: str) -> str:
+        """Safely quote a PostgreSQL identifier."""
+        return f'"{str(value).replace(chr(34), chr(34) * 2)}"'
+
+    def normalize_geometry_type(value: str | None) -> str | None:
+        """
+        Normalize PostGIS geometry names for DAMap frontend usage.
+
+        Supports values such as:
+            POINT
+            ST_Point
+            LINESTRING
+            MULTIPOLYGON
+            Polyline
+        """
+        if not value:
+            return None
+
+        raw = str(value).strip()
+
+        if raw.upper().startswith("ST_"):
+            raw = raw[3:]
+
+        normalized_key = (
+            raw.replace("_", "")
+            .replace(" ", "")
+            .lower()
+        )
+
+        geometry_map = {
+            "point": "Point",
+            "multipoint": "MultiPoint",
+            "linestring": "LineString",
+            "multilinestring": "MultiLineString",
+            "polyline": "LineString",
+            "multipolyline": "MultiLineString",
+            "polygon": "Polygon",
+            "multipolygon": "MultiPolygon",
+            "geometrycollection": "GeometryCollection",
+            "circularstring": "CircularString",
+            "compoundcurve": "CompoundCurve",
+            "curvepolygon": "CurvePolygon",
+            "multicurve": "MultiCurve",
+            "multisurface": "MultiSurface",
+            "triangle": "Triangle",
+            "tin": "TIN",
+            "polyhedralsurface": "PolyhedralSurface",
+        }
+
+        return geometry_map.get(normalized_key, raw)
+
+    def normalize_geometry_types(values) -> list[str] | None:
+        normalized = []
+
+        for value in values or []:
+            geometry_type = normalize_geometry_type(value)
+
+            if geometry_type and geometry_type not in normalized:
+                normalized.append(geometry_type)
+
+        return normalized or None
+
+    def values_different(old_value, new_value) -> bool:
+        """
+        Compare metadata values while handling tuples/lists consistently.
+        """
+        if isinstance(old_value, tuple):
+            old_value = list(old_value)
+
+        if isinstance(new_value, tuple):
+            new_value = list(new_value)
+
+        return old_value != new_value
+
+    with LayerInfo.managed_session() as session:
+        query = (
+            session.query(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+        )
+
+        if layer_uuid:
+            query = query.filter(LayerInfo.uuid == layer_uuid)
+
+        if table_name:
+            query = (
+                query.join(LayerInfo.layer_accessibility)
+                .filter(
+                    LayerAccessibility.params.op("->>")("table_name")
+                    == table_name
+                )
+            )
+
+        layers = query.all()
+
+        if not layers:
+            print("❌ No matching LayerInfo records found.")
+            return
+
+        print("\n================================================")
+        print("DAMap LayerInfo Metadata Reconciliation")
+        print("================================================")
+        print(f"Mode         : {'CHECK ONLY' if check else 'UPDATE'}")
+        print(f"Schema       : {schema}")
+        print(f"Layer UUID   : {layer_uuid or 'ALL'}")
+        print(f"Table filter : {table_name or 'ALL'}")
+        print(f"Layers found : {len(layers)}")
+        print("================================================\n")
+
+        checked_count = 0
+        changed_count = 0
+        updated_count = 0
+        unchanged_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        corrections = {
+            "columns": 0,
+            "geometry_column": 0,
+            "primary_key": 0,
+            "srid": 0,
+            "geometry_type": 0,
+            "extent": 0,
+            "extent_3857": 0,
+            "row_count": 0,
+        }
+
+        for layer in layers:
+            access = layer.layer_accessibility
+
+            print(f"Layer: {layer.title}")
+            print(f"   UUID       : {layer.uuid}")
+            print(f"   Layer name : {layer.layer_name}")
+
+            # ---------------------------------------------------------
+            # Validate accessibility
+            # ---------------------------------------------------------
+            if not access:
+                skipped_count += 1
+                print("   ⏭️ Skipped: LayerAccessibility is missing.\n")
+                continue
+
+            if (
+                not access.accessibility_type
+                or access.accessibility_type.code != AccessibilityType.DB.name
+            ):
+                skipped_count += 1
+                print("   ⏭️ Skipped: layer is not database-backed.\n")
+                continue
+
+            actual_table_name = access.table_name
+            connection_name = access.conn_name
+
+            if not actual_table_name or not connection_name:
+                skipped_count += 1
+                print(
+                    "   ⏭️ Skipped: table_name or conn_name is missing "
+                    "from LayerAccessibility.\n"
+                )
+                continue
+
+            db_conn = DBConnection.get_db_connection(
+                con_name=connection_name
+            )
+
+            if not db_conn:
+                skipped_count += 1
+                print(
+                    f"   ❌ Skipped: DB connection '{connection_name}' "
+                    "was not found.\n"
+                )
+                continue
+
+            engine = db_conn.get_sqlalchemy_engine()
+
+            safe_schema = quote_ident(schema)
+            safe_table_name = quote_ident(actual_table_name)
+            safe_table = f"{safe_schema}.{safe_table_name}"
+
+            try:
+                with engine.connect() as conn:
+                    # -------------------------------------------------
+                    # Read actual table columns
+                    # -------------------------------------------------
+                    column_rows = conn.execute(
+                        text("""
+                            SELECT
+                                column_name,
+                                data_type,
+                                udt_name
+                            FROM information_schema.columns
+                            WHERE table_schema = :schema
+                              AND table_name = :table_name
+                            ORDER BY ordinal_position
+                        """),
+                        {
+                            "schema": schema,
+                            "table_name": actual_table_name,
+                        },
+                    ).mappings().all()
+
+                    if not column_rows:
+                        skipped_count += 1
+                        print(
+                            f"   ❌ Skipped: table does not exist: "
+                            f"{schema}.{actual_table_name}\n"
+                        )
+                        continue
+
+                    # -------------------------------------------------
+                    # Read primary key columns
+                    # -------------------------------------------------
+                    pk_rows = conn.execute(
+                        text("""
+                            SELECT kcu.column_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                             AND tc.table_schema = kcu.table_schema
+                            WHERE tc.constraint_type = 'PRIMARY KEY'
+                              AND tc.table_schema = :schema
+                              AND tc.table_name = :table_name
+                            ORDER BY kcu.ordinal_position
+                        """),
+                        {
+                            "schema": schema,
+                            "table_name": actual_table_name,
+                        },
+                    ).mappings().all()
+
+                    pk_cols = [
+                        row["column_name"]
+                        for row in pk_rows
+                    ]
+
+                    # -------------------------------------------------
+                    # Detect geometry column
+                    # -------------------------------------------------
+                    geometry_columns = []
+                    columns = []
+
+                    for row in column_rows:
+                        column_name = row["column_name"]
+                        data_type = str(
+                            row["data_type"] or ""
+                        ).lower()
+                        udt_name = str(
+                            row["udt_name"] or ""
+                        ).lower()
+
+                        if udt_name in {
+                            "geometry",
+                            "geography",
+                        }:
+                            geometry_columns.append(column_name)
+                            continue
+
+                        columns.append({
+                            "name": column_name,
+                            "d_type":
+                                ManageDataFrameUtils.getColGenericType(
+                                    data_type
+                                ),
+                        })
+
+                    # Prefer the existing geometry column if it is valid.
+                    old_params = dict(access.params or {})
+                    old_geometry_column = old_params.get("g_col")
+
+                    if old_geometry_column in geometry_columns:
+                        geometry_column = old_geometry_column
+                    else:
+                        geometry_column = (
+                            geometry_columns[0]
+                            if geometry_columns
+                            else None
+                        )
+
+                    # -------------------------------------------------
+                    # Default metadata
+                    # -------------------------------------------------
+                    srid = None
+                    geometry_types = None
+                    extent = None
+                    extent_3857 = None
+                    row_count = 0
+                    non_null_geometry_count = 0
+
+                    # Total rows should also work for non-spatial tables.
+                    row_count = int(
+                        conn.execute(
+                            text(
+                                f"SELECT COUNT(*) FROM {safe_table}"
+                            )
+                        ).scalar() or 0
+                    )
+
+                    # -------------------------------------------------
+                    # Read spatial metadata
+                    # -------------------------------------------------
+                    if geometry_column:
+                        safe_geometry = quote_ident(geometry_column)
+
+                        # First use geometry_columns metadata. This works
+                        # even when the table contains no features.
+                        catalog_metadata = conn.execute(
+                            text("""
+                                SELECT
+                                    srid,
+                                    type
+                                FROM geometry_columns
+                                WHERE f_table_schema = :schema
+                                  AND f_table_name = :table_name
+                                  AND f_geometry_column = :geometry_column
+                                LIMIT 1
+                            """),
+                            {
+                                "schema": schema,
+                                "table_name": actual_table_name,
+                                "geometry_column": geometry_column,
+                            },
+                        ).mappings().first()
+
+                        if catalog_metadata:
+                            catalog_srid = catalog_metadata.get("srid")
+                            catalog_type = catalog_metadata.get("type")
+
+                            if catalog_srid not in (None, 0):
+                                srid = int(catalog_srid)
+
+                            if catalog_type and str(
+                                catalog_type
+                            ).upper() != "GEOMETRY":
+                                geometry_types = normalize_geometry_types(
+                                    [catalog_type]
+                                )
+
+                        # Inspect actual records. This corrects generic
+                        # geometry-column declarations and mixed tables.
+                        actual_metadata = conn.execute(
+                            text(f"""
+                                SELECT
+                                    COUNT(*) AS geometry_count,
+                                    ARRAY_AGG(
+                                        DISTINCT ST_GeometryType(
+                                            {safe_geometry}
+                                        )
+                                    ) AS geometry_types,
+                                    ARRAY_AGG(
+                                        DISTINCT ST_SRID(
+                                            {safe_geometry}
+                                        )
+                                    ) AS srids
+                                FROM {safe_table}
+                                WHERE {safe_geometry} IS NOT NULL
+                                  AND NOT ST_IsEmpty({safe_geometry})
+                            """)
+                        ).mappings().first()
+
+                        if actual_metadata:
+                            non_null_geometry_count = int(
+                                actual_metadata.get(
+                                    "geometry_count"
+                                ) or 0
+                            )
+
+                            actual_types = normalize_geometry_types(
+                                actual_metadata.get("geometry_types")
+                            )
+
+                            if actual_types:
+                                geometry_types = actual_types
+
+                            actual_srids = [
+                                int(value)
+                                for value in (
+                                    actual_metadata.get("srids") or []
+                                )
+                                if value not in (None, 0)
+                            ]
+
+                            if actual_srids:
+                                # Use the dominant/first valid SRID.
+                                # Mixed SRIDs are reported below.
+                                srid = actual_srids[0]
+
+                                if len(set(actual_srids)) > 1:
+                                    print(
+                                        "   ⚠️ Mixed SRIDs found: "
+                                        f"{sorted(set(actual_srids))}"
+                                    )
+
+                        # Native extent
+                        extent_row = conn.execute(
+                            text(f"""
+                                SELECT
+                                    ST_XMin(bounds)::float AS minx,
+                                    ST_YMin(bounds)::float AS miny,
+                                    ST_XMax(bounds)::float AS maxx,
+                                    ST_YMax(bounds)::float AS maxy
+                                FROM (
+                                    SELECT
+                                        ST_Extent(
+                                            {safe_geometry}
+                                        )::geometry AS bounds
+                                    FROM {safe_table}
+                                    WHERE {safe_geometry} IS NOT NULL
+                                      AND NOT ST_IsEmpty(
+                                          {safe_geometry}
+                                      )
+                                ) q
+                                WHERE bounds IS NOT NULL
+                            """)
+                        ).mappings().first()
+
+                        if extent_row:
+                            extent = [
+                                extent_row["minx"],
+                                extent_row["miny"],
+                                extent_row["maxx"],
+                                extent_row["maxy"],
+                            ]
+
+                        # EPSG:3857 extent
+                        if extent and srid and srid > 0:
+                            if srid == 3857:
+                                extent_3857 = list(extent)
+                            else:
+                                extent_3857_row = conn.execute(
+                                    text(f"""
+                                        SELECT
+                                            ST_XMin(bounds)::float AS minx,
+                                            ST_YMin(bounds)::float AS miny,
+                                            ST_XMax(bounds)::float AS maxx,
+                                            ST_YMax(bounds)::float AS maxy
+                                        FROM (
+                                            SELECT
+                                                ST_Extent(
+                                                    ST_Transform(
+                                                        {safe_geometry},
+                                                        3857
+                                                    )
+                                                )::geometry AS bounds
+                                            FROM {safe_table}
+                                            WHERE {safe_geometry}
+                                                  IS NOT NULL
+                                              AND NOT ST_IsEmpty(
+                                                  {safe_geometry}
+                                              )
+                                        ) q
+                                        WHERE bounds IS NOT NULL
+                                    """)
+                                ).mappings().first()
+
+                                if extent_3857_row:
+                                    extent_3857 = [
+                                        extent_3857_row["minx"],
+                                        extent_3857_row["miny"],
+                                        extent_3857_row["maxx"],
+                                        extent_3857_row["maxy"],
+                                    ]
+
+                checked_count += 1
+
+                # -----------------------------------------------------
+                # Build corrected accessibility params
+                # -----------------------------------------------------
+                new_params = {
+                    **old_params,
+                    "conn_name": connection_name,
+                    "table_name": actual_table_name,
+                    "columns": columns,
+                    "g_col": geometry_column,
+                    "pk_cols": pk_cols,
+                }
+
+                old_extra_metadata = dict(
+                    layer.extra_metadata or {}
+                )
+
+                new_extra_metadata = {
+                    **old_extra_metadata,
+                    "row_count": row_count,
+                    "non_null_geometry_count":
+                        non_null_geometry_count,
+                    "layerinfo_reconciled": True,
+                    "layerinfo_reconciled_at":
+                        datetime.now(timezone.utc).isoformat(),
+                    "layerinfo_reconciled_from":
+                        f"{schema}.{actual_table_name}",
+                }
+
+                field_changes = {}
+
+                if values_different(
+                    old_params.get("columns"),
+                    columns,
+                ):
+                    field_changes["columns"] = (
+                        old_params.get("columns"),
+                        columns,
+                    )
+                    corrections["columns"] += 1
+
+                if values_different(
+                    old_params.get("g_col"),
+                    geometry_column,
+                ):
+                    field_changes["geometry_column"] = (
+                        old_params.get("g_col"),
+                        geometry_column,
+                    )
+                    corrections["geometry_column"] += 1
+
+                if values_different(
+                    old_params.get("pk_cols", []),
+                    pk_cols,
+                ):
+                    field_changes["primary_key"] = (
+                        old_params.get("pk_cols", []),
+                        pk_cols,
+                    )
+                    corrections["primary_key"] += 1
+
+                if values_different(layer.srid, srid):
+                    field_changes["srid"] = (
+                        layer.srid,
+                        srid,
+                    )
+                    corrections["srid"] += 1
+
+                if values_different(
+                    layer.geom_type,
+                    geometry_types,
+                ):
+                    field_changes["geometry_type"] = (
+                        layer.geom_type,
+                        geometry_types,
+                    )
+                    corrections["geometry_type"] += 1
+
+                if values_different(layer.extent, extent):
+                    field_changes["extent"] = (
+                        layer.extent,
+                        extent,
+                    )
+                    corrections["extent"] += 1
+
+                if values_different(
+                    layer.extent_3857,
+                    extent_3857,
+                ):
+                    field_changes["extent_3857"] = (
+                        layer.extent_3857,
+                        extent_3857,
+                    )
+                    corrections["extent_3857"] += 1
+
+                if old_extra_metadata.get(
+                    "row_count"
+                ) != row_count:
+                    field_changes["row_count"] = (
+                        old_extra_metadata.get("row_count"),
+                        row_count,
+                    )
+                    corrections["row_count"] += 1
+
+                changed = bool(field_changes)
+
+                print(
+                    f"   Table      : "
+                    f"{schema}.{actual_table_name}"
+                )
+                print(f"   Connection : {connection_name}")
+                print(f"   Columns    : {len(columns)}")
+                print(f"   PK         : {pk_cols}")
+                print(f"   Geometry   : {geometry_column}")
+                print(f"   Geom types : {geometry_types}")
+                print(f"   SRID       : {srid}")
+                print(f"   Rows       : {row_count}")
+                print(
+                    f"   Spatial rows: "
+                    f"{non_null_geometry_count}"
+                )
+
+                if not changed:
+                    unchanged_count += 1
+                    print("   ✅ Metadata is already correct.\n")
+                    continue
+
+                changed_count += 1
+
+                print("   Changes:")
+
+                for field_name, (
+                    old_value,
+                    new_value,
+                ) in field_changes.items():
+                    print(
+                        f"      - {field_name}: "
+                        f"{old_value} -> {new_value}"
+                    )
+
+                if check:
+                    print(
+                        "   🟡 Check mode: changes were not saved.\n"
+                    )
+                    continue
+
+                # -----------------------------------------------------
+                # Save reconciliation
+                # -----------------------------------------------------
+                try:
+                    access.params = new_params
+                    flag_modified(access, "params")
+
+                    # Setting None is intentional because stale values
+                    # should be removed when the actual table no longer
+                    # contains valid spatial metadata.
+                    layer.srid = int(srid) if srid else None
+                    layer.geom_type = geometry_types
+                    layer.extent = extent
+                    layer.extent_3857 = extent_3857
+                    layer.extra_metadata = new_extra_metadata
+
+                    flag_modified(layer, "geom_type")
+                    flag_modified(layer, "extent")
+                    flag_modified(layer, "extent_3857")
+                    flag_modified(layer, "extra_metadata")
+
+                    session.commit()
+                    updated_count += 1
+
+                    print("   ✅ Reconciliation saved.\n")
+
+                except Exception as save_error:
+                    session.rollback()
+                    failed_count += 1
+
+                    print(
+                        f"   ❌ Failed to save reconciliation: "
+                        f"{save_error}\n"
+                    )
+
+            except Exception as error:
+                session.rollback()
+                failed_count += 1
+
+                print(
+                    f"   ❌ Reconciliation failed: {error}\n"
+                )
+                da_logger.exception(
+                    f"LayerInfo reconciliation failed for "
+                    f"{layer.layer_name}: {error}"
+                )
+
+        elapsed = time.time() - started_at
+
+        print("\n================================================")
+        print("LayerInfo Reconciliation Summary")
+        print("================================================")
+        print(f"Checked layers       : {checked_count}")
+        print(f"Changed layers       : {changed_count}")
+        print(f"Updated layers       : {updated_count}")
+        print(f"Unchanged layers     : {unchanged_count}")
+        print(f"Skipped layers       : {skipped_count}")
+        print(f"Failed layers        : {failed_count}")
+        print("------------------------------------------------")
+        print(f"Columns corrected    : {corrections['columns']}")
+        print(
+            f"Geometry col fixed   : "
+            f"{corrections['geometry_column']}"
+        )
+        print(
+            f"Primary keys fixed   : "
+            f"{corrections['primary_key']}"
+        )
+        print(f"SRIDs corrected      : {corrections['srid']}")
+        print(
+            f"Geometry types fixed : "
+            f"{corrections['geometry_type']}"
+        )
+        print(f"Extents corrected    : {corrections['extent']}")
+        print(
+            f"3857 extents fixed   : "
+            f"{corrections['extent_3857']}"
+        )
+        print(
+            f"Row counts updated   : "
+            f"{corrections['row_count']}"
+        )
+        print(f"Completed in         : {elapsed:.2f} seconds")
+
+        if check:
+            print(
+                "\nℹ️ Check mode was enabled. "
+                "No database changes were saved."
+            )
 
 def refresh_layer_accessibility(
         table_name: str = None,

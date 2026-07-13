@@ -65,3 +65,56 @@ class ModelUtils:
                 if hasattr(model, "__tablename__") and model.__tablename__ == table_name:
                     return model
         raise ValueError(f"Model with table '{table_name}' not found.")
+
+    @staticmethod
+    def get_model_info(model_name: str):
+        """
+        Returns:
+
+            {
+                "model": ModelClass,
+                "base": BaseClass,
+                "app_label": "wasa",
+                "app": DA_APPS["wasa"]
+            }
+        """
+
+        for app_label, app in DA_APPS.items():
+            try:
+                module = importlib.import_module(
+                    f'{app["path"]}.models'
+                )
+
+                for attr in dir(module):
+
+                    if attr.lower() != model_name.lower():
+                        continue
+
+                    model = getattr(module, attr)
+
+                    if not hasattr(model, "__table__"):
+                        continue
+
+                    if "base" not in app:
+                        base = DBBase
+                    else:
+                        from app.damapql.manage import import_string
+                        base = (
+                            import_string(app["base"])
+                            if isinstance(app["base"], str)
+                            else app["base"]
+                        )
+
+                    return {
+                        "model": model,
+                        "base": base,
+                        "app": app,
+                        "app_label": app_label,
+                    }
+
+            except Exception:
+                pass
+
+        raise ValueError(
+            f"Model '{model_name}' not found."
+        )
