@@ -429,7 +429,19 @@
             "d_type": "number"
           },
           {
+            "name": "div_name",
+            "d_type": "string"
+          },
+          {
             "name": "data_status",
+            "d_type": "string"
+          },
+          {
+            "name": "data_status_s",
+            "d_type": "string"
+          },
+          {
+            "name": "data_status_d",
             "d_type": "string"
           },
           {
@@ -439,6 +451,10 @@
           {
             "name": "description",
             "d_type": "string"
+          },
+          {
+            "name": "is_wasa_operated",
+            "d_type": "boolean"
           }
         ],
         "g_col": "geom",
