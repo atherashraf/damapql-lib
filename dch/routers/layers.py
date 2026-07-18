@@ -243,13 +243,20 @@ def get_layer_attributes(
     if info.data_model and info.data_model.code == DataModel.V.name:
         extent_filter = parse_extent_3857(extent_3857)
 
+        # if extent_filter:
+        #     gdf = info.to_layer_gdf(extent_3857=extent_filter)
+        #
+        #     # remove shapely geometry column before serialization
+        #     geom_col = info.layer_accessibility.geometry_col or "geom"
+        #
+        #     df = gdf.drop(columns=[geom_col], errors="ignore")
+        # else:
+        #     df = info.to_layer_df()
         if extent_filter:
             gdf = info.to_layer_gdf(extent_3857=extent_filter)
-
-            # remove shapely geometry column before serialization
             geom_col = info.layer_accessibility.geometry_col or "geom"
-
-            df = gdf.drop(columns=[geom_col], errors="ignore")
+            # Explicitly cast to vanilla pandas DataFrame
+            df = pd.DataFrame(gdf.drop(columns=[geom_col], errors="ignore"))
         else:
             df = info.to_layer_df()
 

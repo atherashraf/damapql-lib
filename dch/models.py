@@ -490,6 +490,23 @@ class LayerInfo(DBBase):
             )
             return session.execute(stmt).scalar_one_or_none()
 
+    def _get_default_attribute_cols(self, access) -> list[str]:
+        """Helper to unify column extraction across DF and GDF methods."""
+        pk_cols = access.pk_cols or []
+        g_col = (access.geometry_col or "").lower()
+
+        # NOTE: I picked access.cols_name here. If your database relies on
+        # access.params['columns'] instead, swap this line out.
+        raw_cols = access.cols_name or []
+
+        clean_cols = list(pk_cols) + [
+            c for c in raw_cols
+            if c and c.lower() not in {"extent", g_col, "geojson", "geom", "geometry"}
+        ]
+
+        seen = set()
+        return [c for c in clean_cols if c and not (c in seen or seen.add(c))]
+
     def to_layer_gdf(
             self,
             cols=(),
@@ -536,20 +553,7 @@ class LayerInfo(DBBase):
             srid = self.srid or 4326
 
             if not cols:
-                pk_cols = access.pk_cols or []
-                cols = list(pk_cols) + [
-                    c for c in (access.cols_name or [])
-                    if c and c.lower() not in {
-                        "extent",
-                        g_col.lower(),
-                        "geojson",
-                        "geom",
-                        "geometry",
-                    }
-                ]
-
-            seen = set()
-            cols = [c for c in cols if c and not (c in seen or seen.add(c))]
+                cols = self._get_default_attribute_cols(access)
 
             safe_table = DBQuery.safe_ident(access.table_name)
             safe_geom = DBQuery.safe_ident(g_col)
@@ -758,23 +762,7 @@ class LayerInfo(DBBase):
 
                 # Default selected columns
                 if not cols:
-                    pk_cols = access.pk_cols or []
-                    cols = list(pk_cols) + [
-                        info["name"]
-                        for info in ((access.params or {}).get("columns") or [])
-                        if info.get("name")
-                           and info["name"].lower() not in {
-                               "extent",
-                               (access.geometry_col or "").lower(),
-                               "geojson",
-                               "geom",
-                               "geometry",
-                           }
-                    ]
-
-                # De-duplicate while preserving order
-                seen = set()
-                cols = [c for c in cols if c and not (c in seen or seen.add(c))]
+                    cols = self._get_default_attribute_cols(access)
 
                 if not cols:
                     return pd.DataFrame()
