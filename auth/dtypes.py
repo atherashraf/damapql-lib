@@ -32,6 +32,7 @@ class UserUpdate(BaseModel):
     profile_email: Optional[EmailStr] = None
     profile_contact: Optional[str] = None
     designation: Optional[str] = None
+    password: Optional[str] = None
 
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None

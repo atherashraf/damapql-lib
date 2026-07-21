@@ -222,6 +222,10 @@ def create_user(
             if created_user.profile:
                 created_user.profile.designation = clean_str(user_data.designation)
 
+            if user_data.password:
+                created_user.is_active = True
+                created_user.is_verified = True
+
             session.flush()
             session.refresh(created_user)
 
@@ -376,6 +380,18 @@ def update_user(
         if user_data.designation is not None:
             user.profile.designation = clean_str(user_data.designation)
 
+        if user_data.password is not None:
+            password = user_data.password.strip()
+            if password:
+                if len(password) < 6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Password must be at least 6 characters.",
+                    )
+                user.password = CryptoUtils().encrypt_txt(password)
+                user.is_active = True
+                user.is_verified = True
+
         if user_data.roles is not None:
             normalized_roles = [r.strip().lower() for r in user_data.roles]
             role_objects = (
@@ -433,6 +449,52 @@ def update_user(
             raise HTTPException(status_code=404, detail="User not found after update.")
 
         return UserAOI.attach_user_aoi(updated_user.to_object())
+
+
+@auth_router.delete("/delete_user/{username}")
+def delete_user(
+    username: str,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    if not current_user.is_superuser and not AuthUtils.has_role(current_user, "app_manager"):
+        raise HTTPException(status_code=403, detail="Not authorized to delete users.")
+
+    normalized_username = username.strip().lower()
+    if normalized_username == current_user.username:
+        raise HTTPException(status_code=400, detail="You cannot delete your own user.")
+
+    with User.managed_session() as session:
+        user = (
+            session.query(User)
+            .options(selectinload(User.roles))
+            .filter(User.username == normalized_username)
+            .first()
+        )
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        if user.is_superuser:
+            raise HTTPException(status_code=403, detail="Superuser accounts cannot be deleted.")
+
+        user_id = user.id
+        user.roles = []
+        session.flush()
+        session.delete(user)
+
+    try:
+        with UserAOI.managed_session() as session:
+            user_aoi = session.query(UserAOI).filter(UserAOI.user_id == user_id).first()
+            if user_aoi:
+                session.delete(user_aoi)
+    except Exception as exc:
+        da_logger.exception("Error occurred while deleting user's AOI.")
+        raise HTTPException(
+            status_code=500,
+            detail=f"User deleted, but AOI cleanup failed: {str(exc)}",
+        )
+
+    return {"detail": "User deleted successfully."}
 
 
 @auth_router.post("/activate-account")
