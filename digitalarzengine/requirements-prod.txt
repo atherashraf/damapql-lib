@@ -1,0 +1,76 @@
+# ============================================================
+# Earth Observation & Remote Sensing
+# ============================================================
+earthengine-api==0.1.419
+earthaccess==0.11.0
+
+rasterio==1.4.4
+rio-cogeo~=7.0.1
+affine==2.4.0
+scikit-image==0.24.0
+xarray==2024.7.0
+
+# ============================================================
+# Geospatial Stack
+# ============================================================
+geopandas==1.0.1
+shapely==2.0.7
+pyproj==3.6.1
+pyogrio==0.11.0
+mercantile==1.2.1
+morecantile==6.2.0
+
+# ============================================================
+# Image Processing & Visualization
+# ============================================================
+opencv-python-headless
+matplotlib==3.9.2
+
+pillow==11.3.0
+imageio==2.37.0
+tifffile==2024.8.30
+
+# ============================================================
+# Data Science & Numerical Stack (CRITICAL PINS)
+# ============================================================
+numpy==1.26.4          # MUST stay < 2.0 for SciPy stability
+scipy==1.13.1
+pandas==2.3.1
+networkx==3.2.1
+lazy_loader==0.4
+openpyxl==3.1.5
+
+# ============================================================
+# Backend / API / Persistence
+# ============================================================
+pydantic==2.10.6
+SQLAlchemy==2.0.41
+GeoAlchemy2==0.17.1
+
+requests==2.32.4
+python-dotenv==1.1.1
+tqdm==4.67.1
+cryptography==42.0.8
+
+# ============================================================
+# Google / Earth Engine Dependencies
+# ============================================================
+google-api-core==2.25.1
+google-api-python-client==2.177.0
+google-auth==2.40.3
+google-auth-httplib2==0.2.0
+
+google-cloud-core==2.4.3
+google-cloud-storage==3.2.0
+google-crc32c==1.7.1
+google-resumable-media==2.7.2
+googleapis-common-protos==1.70.0
+protobuf==3.20.3
+
+# ============================================================
+# Runtime stability
+# ============================================================
+urllib3==1.26.20
+fiona
+GDAL==3.8.4
+folium
