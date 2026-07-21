@@ -76,6 +76,9 @@ class AuthUtils:
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")
 
+            if not user.is_active or not user.is_verified:
+                raise HTTPException(status_code=403, detail="User account is inactive.")
+
             return user
 
         except (ExpiredSignatureError, InvalidTokenError):
