@@ -120,6 +120,10 @@ def login_core(username: str, password: str, background_tasks: BackgroundTasks) 
         da_logger.warning(f"Failed login: {username} does not exist.")
         raise HTTPException(status_code=400, detail=INVALID_CREDENTIALS)
 
+    if not user_info.is_active or not user_info.is_verified:
+        da_logger.warning(f"Failed login: inactive user {username}.")
+        raise HTTPException(status_code=403, detail="User account is inactive.")
+
     stored_password = User.get_password(username)
     if not stored_password or not AuthUtils.verify_password(password, stored_password):
         da_logger.warning(f"Failed login: invalid password for {username}.")
