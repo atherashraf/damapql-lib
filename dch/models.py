@@ -40,7 +40,7 @@ class LayerCategory(DBBase):
     main = db.Column(db.VARCHAR, nullable=False)
     sub = db.Column(db.VARCHAR)
     __pydantic__ = LayerCategoryType
-
+    
     def __repr__(self):
         if self.sub:
             return f"{self.main} - {self.sub}"
