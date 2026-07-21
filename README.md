@@ -8,38 +8,90 @@ This repository provides shared modules used across multiple DAMap-based project
 It is extracted from the main **DAMapQL development repository** and maintained as a reusable library.
 
 ---
+## Installation
 
-# Installation
+DAMapQL can be installed either as a simple cloned repository or as a Git subtree. Choose only one method.
 
-Clone the library inside the **`app` directory** of your FastAPI project.
+### Option 1: Simple Clone
+
+Run from the FastAPI project root:
 
 ```bash
-cd app
-git clone https://github.com/atherashraf/damapql-lib.git damapql
+git clone https://github.com/atherashraf/damapql-lib.git app/damapql
 ```
 
-Your project structure should look like:
+Update it later with:
 
+```bash
+cd app/damapql
+git pull origin main
 ```
+
+Because this creates a nested Git repository, exclude it from the parent application repository by adding this entry to the parent `.gitignore`:
+
+```gitignore
+app/damapql/
+```
+
+When the main application is cloned on another machine, DAMapQL must be cloned separately using the same command.
+
+### Option 2: Clone as a Git Subtree
+
+This option includes DAMapQL files in the host application's repository while retaining the ability to pull and push changes to the standalone library.
+
+Run from the FastAPI project root:
+
+```bash
+git remote add damapql-lib https://github.com/atherashraf/damapql-lib.git
+git fetch damapql-lib
+git subtree add --prefix=app/damapql damapql-lib main --squash
+```
+
+Pull future DAMapQL updates:
+
+```bash
+git subtree pull --prefix=app/damapql damapql-lib main --squash
+```
+
+Push committed DAMapQL changes back to the library:
+
+```bash
+git subtree push --prefix=app/damapql damapql-lib main
+```
+
+After another developer clones the host application, the subtree files will already be present. They only need to configure the remote:
+
+```bash
+git remote add damapql-lib https://github.com/atherashraf/damapql-lib.git
+git fetch damapql-lib
+```
+
+They should not run `git subtree add` again.
+
+### Resulting Structure
+
+Both methods produce the same import structure:
+
+```text
 project-root
-│
-├── app
-│   ├── main.py
-│   ├── api
-│   └── damapql
-│       ├── auth
-│       ├── dch
-│       └── ...
+└── app
+    ├── main.py
+    ├── api
+    └── damapql
+        ├── auth
+        ├── dch
+        └── tests
 ```
-
-Then modules can be imported normally:
 
 ```python
 from app.damapql.auth import models
 from app.damapql.dch import routers
 ```
 
----
+The subtree option is preferable when DAMapQL should be versioned and distributed as part of the host application.
+
+
+___
 
 # Module Overview
 
