@@ -477,24 +477,11 @@ def delete_user(
         if user.is_superuser:
             raise HTTPException(status_code=403, detail="Superuser accounts cannot be deleted.")
 
-        user_id = user.id
-        user.roles = []
-        session.flush()
-        session.delete(user)
+        user.is_active = False
+        user.is_verified = False
+        user.save(session=session)
 
-    try:
-        with UserAOI.managed_session() as session:
-            user_aoi = session.query(UserAOI).filter(UserAOI.user_id == user_id).first()
-            if user_aoi:
-                session.delete(user_aoi)
-    except Exception as exc:
-        da_logger.exception("Error occurred while deleting user's AOI.")
-        raise HTTPException(
-            status_code=500,
-            detail=f"User deleted, but AOI cleanup failed: {str(exc)}",
-        )
-
-    return {"detail": "User deleted successfully."}
+    return {"detail": "User deactivated successfully."}
 
 
 @auth_router.post("/activate-account")
@@ -536,7 +523,7 @@ def get_user_list(current_user: UserInfo = Depends(AuthUtils.get_current_user)) 
             selectinload(User.profile).selectinload(Profile.organization),
             selectinload(User.profile).selectinload(Profile.department),
             selectinload(User.roles),
-        ) #.where(User.id=='20')
+        ).filter(User.is_active.is_(True)) #.where(User.id=='20')
 
         if current_user.is_superuser:
             query = query.filter(User.is_superuser.is_(False))
