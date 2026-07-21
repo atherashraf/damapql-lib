@@ -11,8 +11,11 @@ sqladmin==0.23.0
 SQLAlchemy-Utils==0.42.1
 python-dotenv==1.1.1
 uvicorn==0.41.0
-GDAL
-digitalarzengine
+numpy==1.26.4
+GDAL==3.8.4
+Cython>=3.0,<4
+rasterio==1.4.4
+#digitalarzengine
 
 pytest==9.0.2
 pytest-cov==7.0.0

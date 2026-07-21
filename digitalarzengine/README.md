@@ -11,13 +11,143 @@
 - **Pixel-wise Analysis:** Enable pixel-level operations for customized raster computations.
 - **Efficient I/O Handling:** Support for reading, writing, and converting between various raster formats.
 
+---
 ## 📦 Installation
 
-To install the library using pip:
+DigitalArzEngine can be installed using one of the following methods.
+
+> Choose only one installation method for a project.
+
+### Option 1: Install from PyPI
+
+This is the simplest option when you only want to use the library:
 
 ```bash
-pip install digitalarzengine
+python -m pip install digitalarzengine
 ```
+
+Upgrade to the latest published version:
+
+```bash
+python -m pip install --upgrade digitalarzengine
+```
+
+Verify the installation:
+
+```bash
+python -c "import digitalarzengine; print(digitalarzengine.__file__)"
+```
+
+This method is recommended for users who do not need to modify the DigitalArzEngine source code.
+
+---
+
+### Option 2: Install Using a Simple Git Clone
+
+Clone the library into your application:
+
+```bash
+git clone https://github.com/atherashraf/digitalarzengine.git digitalarzengine
+```
+
+Install the cloned library in editable mode:
+
+```bash
+python -m pip install -e ./digitalarzengine
+```
+
+Editable installation means changes made to the source code become immediately available without reinstalling the package.
+
+Update the library later with:
+
+```bash
+git -C digitalarzengine pull origin main
+```
+
+If `digitalarzengine` is cloned inside another Git repository, add it to the host application's `.gitignore`:
+
+```gitignore
+digitalarzengine/
+```
+
+This prevents the nested repository from being accidentally committed to the parent repository.
+
+When the host application is cloned on another machine, DigitalArzEngine must be cloned and installed separately.
+
+---
+
+### Option 3: Install as a Git Subtree
+
+A Git subtree includes the DigitalArzEngine source code directly in the host application's repository while preserving the ability to exchange updates with the original library repository.
+
+Run the following commands from the host application's root directory:
+
+```bash
+git remote add digitalarzengine https://github.com/atherashraf/digitalarzengine.git
+git fetch digitalarzengine
+git subtree add --prefix=digitalarzengine digitalarzengine main --squash
+```
+
+Install the subtree package in editable mode:
+
+```bash
+python -m pip install -e ./digitalarzengine
+```
+
+#### Pull Library Updates
+
+Run from the host application's root directory:
+
+```bash
+git subtree pull --prefix=digitalarzengine digitalarzengine main --squash
+```
+
+#### Push Changes Back to the Library
+
+First commit changes made inside the subtree:
+
+```bash
+git add digitalarzengine
+git commit -m "Update DigitalArzEngine"
+```
+
+Then push the subtree changes:
+
+```bash
+git subtree push --prefix=digitalarzengine digitalarzengine main
+```
+
+Only committed changes are included in a subtree push.
+
+#### After Cloning the Host Application
+
+The DigitalArzEngine source code will already be present. Install it locally:
+
+```bash
+python -m pip install -e ./digitalarzengine
+```
+
+To enable future subtree pull and push operations, configure the remote once:
+
+```bash
+git remote add digitalarzengine https://github.com/atherashraf/digitalarzengine.git
+git fetch digitalarzengine
+```
+
+Do not run `git subtree add` again because the subtree already exists.
+
+---
+
+### Which Installation Method Should You Use?
+
+| Method       | Recommended use                                                 |
+| ------------ | --------------------------------------------------------------- |
+| PyPI         | Using the library without modifying its source                  |
+| Simple clone | Developing DigitalArzEngine as an independent repository        |
+| Git subtree  | Including and versioning the library inside another application |
+
+For applications that must remain self-contained for Docker, deployment, or CI/CD, the Git subtree method is recommended.
+
 
 ---
 
