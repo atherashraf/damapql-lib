@@ -4,10 +4,9 @@ from digitalarzengine.io.managers.db_manager import GeoDBManager
 from digitalarzengine.utils.singletons import da_logger
 from sqlalchemy import insert
 from app.damapql.utils.adapters.db import DBBase
-from app.wasa.utils.adapters.db import WASABase
+
 from settings import DA_APPS
 
-MODEL_BASES = [DBBase, WASABase]
 
 class ModelUtils:
     @staticmethod

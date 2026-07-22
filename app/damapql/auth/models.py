@@ -277,16 +277,60 @@ class User(DBBase):
             is_staff=self.is_staff,
             is_active=self.is_active,
             is_verified=self.is_verified,
-            roles=[role.name for role in self.roles] if self.roles else [],
-            organization=organization.name if organization else None,
-            department=department.name if department else None,
-            dist_id=organization.dist_id if organization else None,
-            dist_name=organization.dist_name if organization else None,
-            subdiv_id=department.subdiv_id if department else None,
-            subdiv_name=department.subdiv_name if department else None,
-            name=profile.name if profile else None,
-            email=profile.email if profile else None,
-            contact=profile.contact if profile else None,
+            roles=[
+                role.name
+                for role in self.roles
+            ] if self.roles else [],
+            organization=(
+                organization.name
+                if organization
+                else None
+            ),
+            department=(
+                department.name
+                if department
+                else None
+            ),
+            dist_id=(
+                organization.dist_id
+                if organization
+                else None
+            ),
+            dist_name=(
+                organization.dist_name
+                if organization
+                else None
+            ),
+            subdiv_id=(
+                department.subdiv_id
+                if department
+                else None
+            ),
+            subdiv_name=(
+                department.subdiv_name
+                if department
+                else None
+            ),
+            name=(
+                profile.name
+                if profile
+                else None
+            ),
+            email=(
+                profile.email
+                if profile
+                else None
+            ),
+            contact=(
+                profile.contact
+                if profile
+                else None
+            ),
+            designation=(
+                profile.designation
+                if profile
+                else None
+            ),
         )
 
     def has_role(self, role_name: str) -> bool:
@@ -329,26 +373,25 @@ class User(DBBase):
             return user
 
     @classmethod
-    def get_user_info(cls, username: str) -> Optional[UserInfo]:
+    def get_user_info(
+            cls,
+            username: str,
+    ) -> Optional[UserInfo]:
         with cls.managed_session() as session:
             user = (
                 session.query(cls)
                 .options(
                     selectinload(cls.roles),
-                    selectinload(cls.profile).selectinload(Profile.organization),
-                    selectinload(cls.profile).selectinload(Profile.department),
+                    selectinload(cls.profile)
+                    .selectinload(Profile.organization),
+                    selectinload(cls.profile)
+                    .selectinload(Profile.department),
                 )
                 .filter(cls.username == username)
                 .first()
             )
 
-            if not user:
-                return None
-
-            # return user.to_object()
-            user_info = user.to_object()
-            from app.wasa.models import UserAOI
-            return UserAOI.attach_user_aoi(user_info)
+            return user.to_object() if user else None
 
     @classmethod
     def get_user_department(cls, username: str) -> Optional[str]:

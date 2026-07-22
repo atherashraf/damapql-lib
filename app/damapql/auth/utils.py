@@ -16,7 +16,9 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.models import User, Profile, Role, Department, Organization
 from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES
-
+from app.damapql.auth.user_aoi_service import (
+    UserAOIService,
+)
 
 JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 JWT_REFRESH_SECRET_KEY = os.environ["JWT_REFRESH_SECRET_KEY"]
@@ -65,21 +67,40 @@ class AuthUtils:
             raise HTTPException(status_code=401, detail="Invalid token")
 
     @staticmethod
-    def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> UserInfo:
+    def get_current_user(
+            token: Annotated[
+                str,
+                Depends(oauth2_scheme),
+            ],
+    ) -> UserInfo:
         try:
             payload = AuthUtils.decode_token(token)
             username = payload.get("sub")
+
             if not username:
-                raise HTTPException(status_code=401, detail="Invalid token payload")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token payload",
+                )
 
             user = User.get_user_info(username)
+
             if not user:
-                raise HTTPException(status_code=401, detail="User not found")
+                raise HTTPException(
+                    status_code=401,
+                    detail="User not found",
+                )
 
-            return user
+            return UserAOIService.attach(user)
 
-        except (ExpiredSignatureError, InvalidTokenError):
-            raise HTTPException(status_code=401, detail="Could not validate credentials")
+        except (
+                ExpiredSignatureError,
+                InvalidTokenError,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Could not validate credentials",
+            )
 
     @classmethod
     def get_current_superuser(cls, user: Annotated[UserInfo, Depends(get_current_user)]) -> UserInfo:

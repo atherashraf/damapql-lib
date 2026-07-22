@@ -1,405 +1,407 @@
+# DAMapQL Project Initialization Guide
+
+This guide describes how to initialize a new FastAPI project that uses DAMapQL. It covers Docker and local execution, core and application-specific databases, schema creation, fixtures, access-control records, application extensions, and optional maintenance tasks.
+
+Project-specific commandsâ€”such as WASA dummy-data loadersâ€”should be documented in the host application. They should not be required by DAMapQL itself.
 
 ---
 
-# 🚀 Project Initialization Guide
+## 1. Prerequisites
 
-This guide explains how to initialize a new project using **DAMapQL**, including environment setup, schema creation, fixtures, organizations, departments, roles, and administrative users.
+Before initializing the database, confirm that the project has:
 
-All management commands should be run using:
+- DAMapQL installed under `app/damapql`;
+- a configured `settings.py`;
+- a `.env` file containing the required secrets and database connections;
+- the required PostgreSQL databases and PostGIS extensions;
+- the backend container running, if Docker is used;
+- application modules registered in `DA_APPS`;
+- application extension callables registered in `DAMAPQL_APP_EXTENSIONS`.
+
+The recommended entry point is:
+
+```python
+from app.damapql.app_bootstrap import create_app
+
+
+app = create_app()
+```
+
+---
+
+## 2. Choose an execution mode
+
+### Docker
+
+Commands in this guide use a replaceable container name:
+
+```bash
+BACKEND_CONTAINER=your_backend_container
+```
+
+For WASA, for example:
+
+```bash
+BACKEND_CONTAINER=wasa_be
+```
+
+Run a DAMapQL command with:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" python -m app.damapql.manage <command>
+```
+
+In CI/CD, omit `-it`:
+
+```bash
+docker exec "$BACKEND_CONTAINER" python -m app.damapql.manage <command>
+```
+
+### Local Python environment
+
+When the application runs outside Docker:
 
 ```bash
 python -m app.damapql.manage <command>
 ```
 
-For example:
-
-```bash
-python -m app.damapql.manage help
-```
+Use one execution mode consistently during initialization.
 
 ---
 
-## 1️⃣ Environment Configuration (`.env`)
+## 3. Configure applications and extensions
 
-Create a `.env` file in your project root and define the required database and security settings.
+Register DAMapQL and project applications in `settings.py`:
 
-```ini
-# -----------------------------
-# Database Configuration
-# -----------------------------
-DCH_HOST=localhost
-DCH_PORT=5432
-DCH_USER=postgres
-DCH_PASSWORD=your_password
-DCH_NAME=wasa_dch
-DCH_ENGINE=postgresql
+```python
+DCH_DB_KEY = "dch"
+APP_DATA_DB_KEY = "app_data"
 
-DATA_HOST=localhost
-DATA_PORT=5432
-DATA_USER=postgres
-DATA_PASSWORD=your_password
-DATA_NAME=wasa_data
-DATA_ENGINE=postgresql
+DA_APPS = {
+    "auth": {
+        "path": "app.damapql.auth",
+        "db_key": DCH_DB_KEY,
+    },
+    "dch": {
+        "path": "app.damapql.dch",
+        "db_key": DCH_DB_KEY,
+    },
+    "my_app": {
+        "path": "app.my_app",
+        "db_key": APP_DATA_DB_KEY,
+    },
+}
 
-# -----------------------------
-# Security Keys
-# -----------------------------
-SECRET_KEY=
-CRYPTO_KEY=
-JWT_SECRET_KEY=
-JWT_REFRESH_SECRET_KEY=
-
-# -----------------------------
-# Email Configuration
-# -----------------------------
-GMAIL_PASS_CODE=your_app_specific_password
+DAMAPQL_APP_EXTENSIONS = [
+    "app.my_app.app_extension:configure_my_app_extension",
+]
 ```
 
-If your project uses only one PostgreSQL database for both `dch` and `data`, both keys may point to the same database instance.
+An extension can register routers and concrete implementations:
+
+```python
+from fastapi import FastAPI
+
+from app.damapql.auth.user_aoi import BaseUserAOI
+from app.my_app.models.admin import UserAOI
+from app.my_app.routers import my_app_router
+
+
+def configure_my_app_extension(app: FastAPI) -> None:
+    BaseUserAOI.register_implementation(UserAOI)
+
+    app.include_router(
+        my_app_router,
+        prefix="/my-app",
+    )
+```
+
+Replace `my_app`, `APP_DATA_DB_KEY`, and the import paths with the current project's values.
 
 ---
 
-## 2️⃣ Generate Security Keys
+## 4. Generate security keys
 
-Use the DAMapQL management module to generate the required keys.
-
-### Generate `CRYPTO_KEY`
+Generate each required secret independently:
 
 ```bash
 python -m app.damapql.manage generate_crypto_key
-```
-
-### Generate `SECRET_KEY`
-
-```bash
 python -m app.damapql.manage generate_secret_key_hex --length 32
 ```
 
-### Generate `JWT_SECRET_KEY`
+Run the secret-key command separately for:
+
+- `SECRET_KEY`;
+- `JWT_SECRET_KEY`;
+- `JWT_REFRESH_SECRET_KEY`.
+
+Copy the generated values into `.env`. Do not reuse production secrets in development or commit `.env` to Git.
+
+For Docker, prefix each command with:
 
 ```bash
-python -m app.damapql.manage generate_secret_key_hex --length 32
-```
-
-### Generate `JWT_REFRESH_SECRET_KEY`
-
-```bash
-python -m app.damapql.manage generate_secret_key_hex --length 32
-```
-
-Copy the generated values into your `.env` file.
-
-> `generate_secret_key_hex --length 32` produces a 64-character hex value.
-
----
-
-## 3️⃣ Database Schema Setup
-
-Initialize the tables for the DAMapQL applications.
-
-### Create authentication tables
-
-```bash
-python -m app.damapql.manage migrate --app_label auth
-```
-
-### Create DCH tables
-
-```bash
-python -m app.damapql.manage migrate --app_label dch
-```
-
-### Load DCH fixture data
-
-```bash
-python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layercategory.json
-python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layerqualitylevel.json
+docker exec -it "$BACKEND_CONTAINER"
 ```
 
 ---
 
-## 4️⃣ Create the Superuser
+## 5. Create configured databases
 
-Create the first administrative user for the system.
+Create the databases configured for the project:
 
 ```bash
-python -m app.damapql.manage createsuperuser
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_dch_databases
 ```
 
-You will be prompted for:
-
-* Email
-* Full Name
-* Contact Number
-* Username
-* Password
-
-This user will have:
-
-* `is_superuser = True`
-* `is_staff = True`
-* full access to the SQLAdmin panel and protected operations
+The exact databases created depend on the project's `DATABASES` configuration. Confirm that spatial databases have PostGIS enabled.
 
 ---
 
-## 5️⃣ Configure Core Access Control
+## 6. Create database schemas
 
-Before creating regular application users, define the base organizational structure.
-
-### Create organization
+Migrate DAMapQL core applications first:
 
 ```bash
-python -m app.damapql.manage create_organization --name "Digital Arz"
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label auth
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label dch
 ```
 
-### Create department
+Then migrate every registered project application:
 
 ```bash
-python -m app.damapql.manage create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core Development Team"
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label <app_label>
 ```
-
-### Create role
-
-```bash
-python -m app.damapql.manage create_role --name app_manager --description "Full access to manage DCH layers and DB connections"
-```
-
----
-
-## 6️⃣ Create an Application User
-
-Create a standard application user and assign the appropriate role.
-
-```bash
-python -m app.damapql.manage create_app_user --role_name app_manager --organization_name "Digital Arz" --department_name "GeoAI development"
-```
-
-You will be prompted for:
-
-* Email
-* Full Name
-* Contact Number
-* Username
-* Password
-
----
-
-## 7️⃣ Optional Additional Roles
-
-You can add more roles depending on project needs.
-
-```bash
-python -m app.damapql.manage create_role --name data_editor --description "Can edit DCH data"
-python -m app.damapql.manage create_role --name reviewer --description "Can review submitted records"
-python -m app.damapql.manage create_role --name publisher --description "Can publish approved content"
-```
-
----
-
-## 8️⃣ Data Portability
-
-DAMapQL supports JSON-based data export and import.
-
-### Dump records to JSON
-
-```bash
-python -m app.damapql.manage dumpdata --app_label auth --model User --output users_backup.json
-```
-
-### Load records from JSON
-
-```bash
-python -m app.damapql.manage loaddata --app_label auth --file users_backup.json
-```
-
----
-
-# 📈 Scaling & Application Management Guide
-
-Once the base project is initialized, you can extend it with additional apps and modules.
-
----
-
-## 1️⃣ Scaffold a New App
-
-Use `startapp` to create a new application module.
-
-```bash
-python -m app.damapql.manage startapp --app_label inventory
-```
-
-This creates:
-
-* `__init__.py`
-* `routers.py`
-* `models.py`
-* `admin.py`
-
-under your configured `APP_DIR`.
-
----
-
-## 2️⃣ Register the App in `settings.py`
-
-Add the new app to `DA_APPS`.
 
 Example:
 
-```python
-DA_APPS = {
-    "auth": {"path": "app.damapql.auth", "db_key": "dch"},
-    "dch": {"path": "app.damapql.dch", "db_key": "dch"},
-    "inventory": {"path": "app.inventory", "db_key": "dch"},
-    "migration": {"path": "app.migration", "db_key": "legacy_db"},
-}
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label my_app
 ```
 
-> The `db_key` defines which database connection the app should use.
+If Survey is enabled:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label survey
+```
+
+Use `migrate` for initial table creation. Use `sync_schema` later only for supported additive changes.
 
 ---
 
-## 3️⃣ Implement Models
+## 7. Register application data connections
 
-In your new app’s `models.py`, inherit from `DBBase`.
+If the DCH catalogue needs a stored connection for an application database, register its configured database key:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage add_db_connection \
+    --db_key <app_database_key>
+```
 
 Example:
 
-```python
-from datetime import datetime
-
-from sqlalchemy import String, func
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy_utils import ChoiceType
-
-from app.damapql.utils.adapters.db import DBBase
-
-
-class InventoryItem(DBBase):
-    __tablename__ = "inventory_item"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    sku: Mapped[str] = mapped_column(String(50), unique=True, index=True)
-    name: Mapped[str] = mapped_column(String(150), nullable=False)
-
-    status: Mapped[str] = mapped_column(
-        ChoiceType({"active": "Active", "archived": "Archived"}),
-        default="active"
-    )
-
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage add_db_connection \
+    --db_key app_data
 ```
+
+The supplied key must exist in `DATABASES`. This command is only required when the application database should be represented in the DCH connection catalogue.
 
 ---
 
-## 4️⃣ Apply Schema Changes
+## 8. Load core fixtures
 
-DAMapQL supports two schema workflows.
-
-### Initial table creation
-
-Use `migrate` when creating tables for the first time.
+Load DAMapQL DCH fixtures:
 
 ```bash
-python -m app.damapql.manage migrate --app_label inventory
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage loaddata \
+    --app_label dch \
+    --file app/damapql/dch/fixtures/layercategory.json
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage loaddata \
+    --app_label dch \
+    --file app/damapql/dch/fixtures/layerqualitylevel.json
 ```
 
-### Add missing columns to existing tables
+---
 
-Use `sync_schema` after adding new columns to existing models.
+## 9. Load application fixtures
+
+Load application-specific fixtures after the application's schema exists:
 
 ```bash
-python -m app.damapql.manage sync_schema --app_label inventory
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage loaddata \
+    --app_label <app_label> \
+    --file app/<app_label>/fixtures/<fixture_file>.json
 ```
 
-> `sync_schema` is designed for additive schema updates only.
-> It is not a replacement for a full migration tool for renames, type changes, or dropped columns.
+Repeat the command for each required fixture. Fixtures must be loaded in dependency order; parent/reference records should be loaded before records that depend on them.
+
+Application fixture names belong in the host project's setup notes or command template rather than DAMapQL's generic initialization sequence.
 
 ---
 
-## 5️⃣ Multi-Database Configuration
-
-If an app uses another database key, define it in `settings.py`.
-
-Example:
-
-```python
-import os
-
-DATABASES = {
-    "dch": {
-        "engine": "postgresql",
-        "host": os.environ.get("DCH_HOST"),
-        "name": os.environ.get("DCH_NAME"),
-        "user": os.environ.get("DCH_USER"),
-        "password": os.environ.get("DCH_PASSWORD"),
-        "port": os.environ.get("DCH_PORT"),
-    },
-    "data": {
-        "engine": "postgresql",
-        "host": os.environ.get("DATA_HOST"),
-        "name": os.environ.get("DATA_NAME"),
-        "user": os.environ.get("DATA_USER"),
-        "password": os.environ.get("DATA_PASSWORD"),
-        "port": os.environ.get("DATA_PORT"),
-    },
-    "legacy_db": {
-        "engine": "postgresql",
-        "host": "192.168.1.50",
-        "name": "old_system_db",
-        "user": "readonly_user",
-        "password": "password_here",
-        "port": 5432,
-    },
-}
-```
-
----
-
-# 🛠 Recommended Initialization Order
-
-For a fresh project, use this order:
+## 10. Create the superuser
 
 ```bash
-python -m app.damapql.manage migrate --app_label auth
-python -m app.damapql.manage migrate --app_label dch
-python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layercategory.json
-python -m app.damapql.manage loaddata --app_label dch --file app/damapql/dch/fixtures/layerqualitylevel.json
-python -m app.damapql.manage createsuperuser
-python -m app.damapql.manage create_organization --name "Digital Arz"
-python -m app.damapql.manage create_department --organization_name "Digital Arz" --name "GeoAI development" --description "Core Development Team"
-python -m app.damapql.manage create_role --name app_manager --description "Full access to manage DCH layers and DB connections"
-python -m app.damapql.manage create_app_user --role_name app_manager --organization_name "Digital Arz" --department_name "GeoAI development"
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage createsuperuser
+```
+
+The command prompts for the administrator's identity and credentials.
+
+---
+
+## 11. Configure roles and organizational structure
+
+Create the application manager role:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_role \
+    --name app_manager \
+    --description "Manage application users and configuration"
+```
+
+Create an organization:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_organization \
+    --name "Example Organization"
+```
+
+Create a department:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_department \
+    --organization_name "Example Organization" \
+    --name "Application Team" \
+    --description "Core application team"
+```
+
+Organization and department describe the user's organizational placement. They are separate from spatial access such as district, division, subdivision, tehsil, UC, or mauza AOI assignments.
+
+---
+
+## 12. Create an application user
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_app_user \
+    --role_name app_manager \
+    --organization_name "Example Organization" \
+    --department_name "Application Team"
+```
+
+Assign application-specific AOI information through the host application's user-management API or administrative workflow after the user exists.
+
+---
+
+## 13. Verify the installation
+
+Start or restart the backend, then verify:
+
+```text
+GET /api/ping
+GET /api/docs
+GET /api/dch_admin/
+```
+
+Also verify that:
+
+- login returns a valid token and `UserInfo`;
+- core and application routers appear in OpenAPI;
+- the registered AOI implementation is reported in startup logs;
+- the DCH database connection is available;
+- application fixtures are present.
+
+Run the DAMapQL test suite:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    pytest -v app/damapql/tests
 ```
 
 ---
 
-# 🛠 Quick Reference
+## 14. Optional application data and maintenance
 
-| Command                                                                                                                    | Purpose                                |
-| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `python -m app.damapql.manage help`                                                                                        | Show all available commands            |
-| `python -m app.damapql.manage migrate --app_label <app>`                                                                   | Create tables for an app               |
-| `python -m app.damapql.manage sync_schema --app_label <app>`                                                               | Add missing columns to existing tables |
-| `python -m app.damapql.manage loaddata --app_label <app> --file <file>`                                                    | Import fixture/data JSON               |
-| `python -m app.damapql.manage dumpdata --app_label <app> --model <model> --output <file>`                                  | Export model data to JSON              |
-| `python -m app.damapql.manage create_organization --name "<org>"`                                                          | Create organization                    |
-| `python -m app.damapql.manage create_department --organization_name "<org>" --name "<dept>"`                               | Create department                      |
-| `python -m app.damapql.manage create_role --name "<role>"`                                                                 | Create role                            |
-| `python -m app.damapql.manage create_app_user --role_name "<role>" --organization_name "<org>" --department_name "<dept>"` | Create standard app user               |
-| `python -m app.damapql.manage createsuperuser`                                                                             | Create admin/superuser                 |
-| `python -m app.damapql.manage generate_crypto_key`                                                                         | Generate CRYPTO_KEY                    |
-| `python -m app.damapql.manage generate_secret_key_hex --length 32`                                                         | Generate a hex secret                  |
+Dummy-data scripts are project-specific and should run only in development or test environments:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.scripts.<dummy_data_module> \
+    <arguments>
+```
+
+Add missing columns supported by DAMapQL's additive schema synchronization:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage sync_schema \
+    --app_label <app_label>
+```
+
+Synchronize one model when supported:
+
+```bash
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage sync_schema \
+    --model_name <ModelName>
+```
+
+Other maintenance commands, such as layer-accessibility synchronization or layer reconciliation, should be documented by the application that owns those tables and workflows.
+
+> `sync_schema` is intended for supported additive changes. Use a proper migration workflow for destructive changes, column renames, type conversions, or complex data migrations.
 
 ---
 
-# ✅ Notes
+## 15. Recommended initialization order
 
-* Use `migrate` for first-time table creation.
-* Use `sync_schema` only for adding newly defined columns.
-* `loaddata` also resets PostgreSQL sequences after import.
-* `dch` and `data` may point to the same database or separate databases depending on project design.
-* `DA_APPS` controls app registration and database routing.
+1. Configure `.env`, `DATABASES`, `DA_APPS`, and `DAMAPQL_APP_EXTENSIONS`.
+2. Start the backend container.
+3. Run `create_dch_databases`.
+4. Migrate `auth` and `dch`.
+5. Migrate every project application.
+6. Register required DCH database connections.
+7. Load core DCH fixtures.
+8. Load application fixtures in dependency order.
+9. Create the superuser.
+10. Create roles, organizations, and departments.
+11. Create application users.
+12. Assign application-specific AOIs.
+13. Verify routes, login, admin, data connections, and tests.
+14. Run optional dummy-data or maintenance commands only when needed.
 
 ---
 
-\
+## Quick reference
+
+| Command | Purpose |
+| --- | --- |
+| `create_dch_databases` | Create configured project databases |
+| `migrate --app_label <app>` | Create tables for an application |
+| `sync_schema --app_label <app>` | Add supported missing columns |
+| `add_db_connection --db_key <key>` | Register a database in the DCH catalogue |
+| `loaddata --app_label <app> --file <file>` | Load JSON fixture data |
+| `dumpdata --app_label <app> --model <model> --output <file>` | Export model data |
+| `createsuperuser` | Create an administrative user |
+| `create_role --name <role>` | Create an application role |
+| `create_organization --name <name>` | Create an organization |
+| `create_department ...` | Create a department |
+| `create_app_user ...` | Create a regular application user |
+| `generate_crypto_key` | Generate `CRYPTO_KEY` |
+| `generate_secret_key_hex --length 32` | Generate an application or JWT secret |

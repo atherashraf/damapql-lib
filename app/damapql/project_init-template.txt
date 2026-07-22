@@ -1,0 +1,141 @@
+# DAMapQL Project Initialization Command Template
+#
+# Replace the values in the PROJECT CONFIGURATION section before running.
+# Run from the project root using Bash, Git Bash, WSL, or a Linux shell.
+
+# -----------------------------------------------------------------------------
+# PROJECT CONFIGURATION
+# -----------------------------------------------------------------------------
+
+BACKEND_CONTAINER="your_backend_container"
+APP_LABEL="your_app_label"
+APP_DB_KEY="app_data"
+APP_FIXTURE_DIR="app/your_app/fixtures"
+
+# Optional additional application label. Leave empty when not used.
+SECONDARY_APP_LABEL=""
+
+# -----------------------------------------------------------------------------
+# 1. CREATE CONFIGURED DATABASES
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_dch_databases
+
+# -----------------------------------------------------------------------------
+# 2. CREATE CORE SCHEMAS
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label auth
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label dch
+
+# -----------------------------------------------------------------------------
+# 3. CREATE APPLICATION SCHEMAS
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage migrate --app_label "$APP_LABEL"
+
+# Optional example:
+# docker exec -it "$BACKEND_CONTAINER" \
+#     python -m app.damapql.manage migrate --app_label survey
+
+# -----------------------------------------------------------------------------
+# 4. REGISTER THE APPLICATION DATABASE IN DCH, WHEN REQUIRED
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage add_db_connection --db_key "$APP_DB_KEY"
+
+# -----------------------------------------------------------------------------
+# 5. LOAD DAMAPQL CORE FIXTURES
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage loaddata \
+    --app_label dch \
+    --file app/damapql/dch/fixtures/layercategory.json
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage loaddata \
+    --app_label dch \
+    --file app/damapql/dch/fixtures/layerqualitylevel.json
+
+# -----------------------------------------------------------------------------
+# 6. LOAD APPLICATION FIXTURES IN DEPENDENCY ORDER
+# -----------------------------------------------------------------------------
+
+# Copy and customize one command per fixture:
+# docker exec -it "$BACKEND_CONTAINER" \
+#     python -m app.damapql.manage loaddata \
+#     --app_label "$APP_LABEL" \
+#     --file "$APP_FIXTURE_DIR/FixtureName.json"
+
+# -----------------------------------------------------------------------------
+# 7. CREATE THE SUPERUSER
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage createsuperuser
+
+# -----------------------------------------------------------------------------
+# 8. CREATE CORE ROLE AND ORGANIZATIONAL RECORDS
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_role \
+    --name app_manager \
+    --description "Manage application users and configuration"
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_organization \
+    --name "Example Organization"
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_department \
+    --organization_name "Example Organization" \
+    --name "Application Team" \
+    --description "Core application team"
+
+# -----------------------------------------------------------------------------
+# 9. CREATE AN APPLICATION USER
+# -----------------------------------------------------------------------------
+
+docker exec -it "$BACKEND_CONTAINER" \
+    python -m app.damapql.manage create_app_user \
+    --role_name app_manager \
+    --organization_name "Example Organization" \
+    --department_name "Application Team"
+
+# -----------------------------------------------------------------------------
+# 10. OPTIONAL DEVELOPMENT DATA
+# -----------------------------------------------------------------------------
+
+# Never run dummy-data commands in production.
+# docker exec -it "$BACKEND_CONTAINER" \
+#     python -m app.scripts.your_dummy_data_module --count 10
+
+# -----------------------------------------------------------------------------
+# 11. OPTIONAL ADDITIVE SCHEMA MAINTENANCE
+# -----------------------------------------------------------------------------
+
+# docker exec -it "$BACKEND_CONTAINER" \
+#     python -m app.damapql.manage sync_schema --app_label "$APP_LABEL"
+
+# docker exec -it "$BACKEND_CONTAINER" \
+#     python -m app.damapql.manage sync_schema --model_name YourModel
+
+# -----------------------------------------------------------------------------
+# 12. VERIFY
+# -----------------------------------------------------------------------------
+
+# Open or call:
+#   GET /api/ping
+#   GET /api/docs
+#   GET /api/dch_admin/
+
+docker exec -it "$BACKEND_CONTAINER" \
+    pytest -v app/damapql/tests
