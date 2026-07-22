@@ -1,7 +1,7 @@
 from app.damapql.app_bootstrap import create_app
 from digitalarzengine.utils.singletons import da_logger
 
-port = 9000
+port = 8998
 title = "WASA APP"
 description = "API for the WASA platform",
 app = create_app(port, title, description)
