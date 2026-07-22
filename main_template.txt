@@ -1,0 +1,18 @@
+from app.damapql.app_bootstrap import create_app
+from digitalarzengine.utils.singletons import da_logger
+
+port = 9000
+title = "WASA APP"
+description = "API for the WASA platform",
+app = create_app(port, title, description)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )

@@ -37,15 +37,24 @@ class DCHAuth(BaseAdminAuth):
 
         return True
 
-def create_dch_admin(app, secret_key, port, db_key="dch", base_url="/dch_admin", title="DAFastMap Admin") -> Admin:
+def create_dch_admin(
+    app,
+    secret_key,
+    port,
+    db_key="dch",
+    base_url="/dch_admin",
+    title="DAFastMap Admin",
+) -> Admin:
     global _dch_admin
-    if _dch_admin is not None: return _dch_admin
+
+    if _dch_admin is not None:
+        return _dch_admin
 
     auth_engine = get_async_engine_instance(db_key)
 
     _dch_admin = Admin(
-        app,
-        auth_engine,
+        app=app,
+        engine=auth_engine,
         base_url=base_url,
         authentication_backend=DCHAuth(
             secret_key=secret_key,
@@ -53,12 +62,20 @@ def create_dch_admin(app, secret_key, port, db_key="dch", base_url="/dch_admin",
         ),
         title=title,
     )
-    da_logger.success(f"Admin URL is running at http://127.0.0.1:{port}/api{base_url}/")
-    # da_logger.success(
-    #     f"Admin URL is running at http://139.162.3.208:{port}{base_url}/"
-    # )
-    return _dch_admin
 
+    # Import locally to avoid initialization/circular-import problems.
+    from app.damapql.dch.admin import (
+        register_dch_admin_views,
+    )
+
+    register_dch_admin_views(_dch_admin)
+
+    da_logger.success(
+        f"Admin URL is running at "
+        f"http://127.0.0.1:{port}/api{base_url}/"
+    )
+
+    return _dch_admin
 
 def get_dch_admin():
     if _dch_admin is None:

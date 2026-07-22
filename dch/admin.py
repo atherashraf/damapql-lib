@@ -1,52 +1,101 @@
-from sqladmin import ModelView
+from sqladmin import Admin, ModelView
 
-from .admin_setup import get_dch_admin
-from .models import *
+from .models import (
+    DBConnection,
+    LayerAccessibility,
+    LayerCategory,
+    LayerInfo,
+    LayerQualityLevel,
+    MapInfo,
+)
 
-
-dch_admin = get_dch_admin()
 
 class LayerCategoryAdmin(ModelView, model=LayerCategory):
+    name = "Layer Category"
+    name_plural = "Layer Categories"
     icon = "fa-solid fa-layer-group"
+    category = "DCH"
+
     column_list = LayerCategory.get_fields()
 
-dch_admin.add_view(LayerCategoryAdmin)
 
-
-class LayerQualityLevelAdmin(ModelView, model=LayerQualityLevel):
+class LayerQualityLevelAdmin(
+    ModelView,
+    model=LayerQualityLevel,
+):
+    name = "Layer Quality Level"
+    name_plural = "Layer Quality Levels"
     icon = "fa-solid fa-star"
+    category = "DCH"
+
     column_list = LayerQualityLevel.get_fields()
 
-dch_admin.add_view(LayerQualityLevelAdmin)
 
-
-class DBConnectionAdmin(ModelView, model=DBConnection, engine=LayerAccessibility.get_engine()):
+class DBConnectionAdmin(ModelView, model=DBConnection):
+    name = "Database Connection"
+    name_plural = "Database Connections"
     icon = "fa-solid fa-database"
+    category = "DCH"
+
     column_list = DBConnection.get_fields()
 
-dch_admin.add_view(DBConnectionAdmin)
 
-
-class LayerAccessibilityAdmin(ModelView, model=LayerAccessibility, engine=LayerAccessibility.get_engine()):
+class LayerAccessibilityAdmin(
+    ModelView,
+    model=LayerAccessibility,
+):
+    name = "Layer Accessibility"
+    name_plural = "Layer Accessibility"
     icon = "fa-solid fa-universal-access"
+    category = "DCH"
+
     column_list = LayerAccessibility.get_fields()
 
-dch_admin.add_view(LayerAccessibilityAdmin)
+
+class LayerInfoAdmin(ModelView, model=LayerInfo):
+    name = "Layer Information"
+    name_plural = "Layer Information"
+    icon = "fa-solid fa-circle-info"
+    category = "DCH"
+
+    column_list = LayerInfo.get_fields(
+        skip_fields=[
+            "layer_accessibility",
+            "extent",
+            "geom_type",
+            "extent_3857",
+            "layer_access_id",
+            "data_model",
+            "model_type",
+        ]
+    )
+
+    column_searchable_list = [
+        LayerInfo.title,
+    ]
 
 
-class LayerInfoAdmin(ModelView, model=LayerInfo, engine=LayerInfo.get_engine()):
-    icon = "fa-solid fa-info-circle"
-    column_list = LayerInfo.get_fields(skip_fields=[
-        'layer_accessibility', 'extent', 'geom_type',
-        'extent_3857', 'layer_access_id', 'data_model', 'model_type'
-    ])
-    column_searchable_list = ['title']
-
-dch_admin.add_view(LayerInfoAdmin)
-
-
-class MapInfoAdmin(ModelView, model=MapInfo, engine=MapInfo.get_engine()):
+class MapInfoAdmin(ModelView, model=MapInfo):
+    name = "Map Information"
+    name_plural = "Map Information"
     icon = "fa-solid fa-map"
+    category = "DCH"
+
     column_list = MapInfo.get_fields()
 
-dch_admin.add_view(MapInfoAdmin)
+
+DCH_ADMIN_VIEWS = (
+    LayerCategoryAdmin,
+    LayerQualityLevelAdmin,
+    DBConnectionAdmin,
+    LayerAccessibilityAdmin,
+    LayerInfoAdmin,
+    MapInfoAdmin,
+)
+
+
+def register_dch_admin_views(admin: Admin) -> None:
+    """Register all DCH model views with SQLAdmin."""
+
+    for admin_view in DCH_ADMIN_VIEWS:
+        admin.add_view(admin_view)

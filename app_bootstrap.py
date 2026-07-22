@@ -85,10 +85,7 @@ def configure_core_routers(app: FastAPI) -> None:
     )
 
 
-def create_app() -> FastAPI:
-    """
-    Create DAMapQL and inject configured application extensions.
-    """
+def create_app(port, title, description) -> FastAPI:
     from settings import (
         SECRET_KEY,
         ALLOWED_ORIGINS,
@@ -98,8 +95,8 @@ def create_app() -> FastAPI:
     )
 
     app = create_damapql_app(
-        title="WASA API",
-        description="API for the WASA platform",
+        title=title,
+        description=description,
         version="0.1.0",
         secret_key=SECRET_KEY,
         allowed_origins=ALLOWED_ORIGINS,
@@ -108,18 +105,24 @@ def create_app() -> FastAPI:
         root_path="/api",
     )
 
-    # Must happen before extension admin modules are imported.
-    create_dch_admin(
+    # First create the SQLAdmin instance.
+    dch_admin = create_dch_admin(
         app,
         secret_key=DCH_SECRET_KEY,
-        port=8998,
+        port=port,
         db_key=DCH_DB_KEY,
         base_url="/dch_admin",
     )
 
+    # Then explicitly register the core admin views.
+    from app.damapql.auth.admin_views import (
+        register_auth_admin_views,
+    )
+
+    register_auth_admin_views(dch_admin)
+
     configure_core_routers(app)
 
-    # Inject WASA, Survey or other application functionality.
     configure_extensions(
         app,
         DAMAPQL_APP_EXTENSIONS,
@@ -127,6 +130,11 @@ def create_app() -> FastAPI:
 
     da_logger.info(
         "FastAPI application configuration completed."
+    )
+    da_logger.success("Server started successfully.")
+    da_logger.info(
+        f"Uvicorn running on http://127.0.0.1:{port} "
+        f"(Press CTRL+C to quit)"
     )
 
     return app

@@ -39,6 +39,7 @@ DCH_APPS = {
     "dch": {"path": "app.damapql.dch", "db_key": DCH_DB_KEY},
 }
 
+
 def get_dch_model_bases() -> list[type]:
     """
     Return DAMapQL database model bases.
