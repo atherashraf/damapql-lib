@@ -14,6 +14,9 @@ class UserCreate(BaseModel):
     profile_contact: Optional[str] = None
     designation: Optional[str] = None
 
+    organization: Optional[str] = None
+    department: Optional[str] = None
+
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None
 
@@ -57,6 +60,9 @@ class UserInfo(BaseModel):
     contact: Optional[str] = None
     designation: Optional[str] = None
 
+    organization: Optional[str] = None
+    department: Optional[str] = None
+
     dist_id: Optional[int] = None
     dist_name: Optional[str] = None
 
@@ -66,7 +72,6 @@ class UserInfo(BaseModel):
     wasa_subdiv_id: Optional[int] = None
     wasa_subdiv_name: Optional[str] = None
 
-    # Effective scope description from wasa_subdivision or wasa_division (subdiv wins).
     description: Optional[str] = None
 
     is_active: bool = False
@@ -75,13 +80,20 @@ class UserInfo(BaseModel):
 
     model_config = ConfigDict(
         populate_by_name=True,
-        alias_generator=lambda s: s.split('_')[0].lower() + ''.join(
-            word.capitalize() for word in s.split('_')[1:]
+        alias_generator=lambda s: (
+            s.split("_")[0].lower()
+            + "".join(
+                word.capitalize()
+                for word in s.split("_")[1:]
+            )
         ),
     )
 
     def has_role(self, role: str) -> bool:
-        return role.lower() in {r.lower() for r in self.roles}
+        return role.lower() in {
+            item.lower()
+            for item in self.roles
+        }
 
 class ProfileType(BaseModel):
     id: int
