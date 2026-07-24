@@ -67,9 +67,7 @@ class ModelUtils:
 
     @staticmethod
     def get_model_class_by_name(model_name: str):
-        # Loop through all loaded classes
         for base in _get_model_bases():
-            da_logger.info(f"working on {base.__name__}")
             for cls in ModelUtils.get_all_subclasses(base):
                 if cls.__name__ == model_name:
                     return cls
