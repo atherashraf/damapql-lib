@@ -8,6 +8,25 @@ from app.damapql.utils.adapters.db import DBBase
 from settings import DA_APPS
 
 
+def _get_model_bases() -> list[type]:
+    """
+    Resolve declarative bases from the host ``settings.get_model_bases``.
+
+    Falls back to ``DBBase`` only so DCH-only tooling still works if the host
+    helper is unavailable.
+    """
+    try:
+        from settings import get_model_bases
+
+        bases = get_model_bases()
+        if bases:
+            return list(bases)
+    except Exception as exc:
+        da_logger.warning("get_model_bases unavailable (%s); using DBBase only", exc)
+
+    return [DBBase]
+
+
 class ModelUtils:
     @staticmethod
     def get_model(model_name):
@@ -49,17 +68,23 @@ class ModelUtils:
     @staticmethod
     def get_model_class_by_name(model_name: str):
         # Loop through all loaded classes
-        for base in MODEL_BASES:
+        for base in _get_model_bases():
             da_logger.info(f"working on {base.__name__}")
-            for cls in base.__subclasses__():
+            for cls in ModelUtils.get_all_subclasses(base):
                 if cls.__name__ == model_name:
                     return cls
         raise ValueError(f"Model '{model_name}' not found among DBBase subclasses.")
 
     @classmethod
     def get_model_by_tablename(cls, table_name: str):
+        # Ensure app models are imported so subclasses are registered.
+        for key, app in DA_APPS.items():
+            try:
+                importlib.import_module(f'{app["path"]}.models')
+            except Exception as exc:
+                da_logger.warning("Failed importing models for app '%s': %s", key, exc)
 
-        for base in MODEL_BASES:
+        for base in _get_model_bases():
             for model in cls.get_all_subclasses(base):
                 if hasattr(model, "__tablename__") and model.__tablename__ == table_name:
                     return model
