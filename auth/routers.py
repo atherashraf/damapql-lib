@@ -398,6 +398,8 @@ def create_user(
                 contact=clean_str(user_data.profile_contact),
                 is_superuser=False,
                 is_staff=True,
+                is_active=password_was_provided,
+                is_verified=password_was_provided,
                 roles=user_data.roles,
                 organization=None,
                 department=None,
@@ -415,17 +417,6 @@ def create_user(
                     user_data.designation
                 )
 
-            # SQLAlchemy tracks these assignments and the outer
-            # managed session commits them when it exits.
-            created_user.is_active = (
-                password_was_provided
-            )
-            created_user.is_verified = (
-                password_was_provided
-            )
-
-            # AuthUtils.create_user() already adds and flushes the
-            # user, so another save()/flush() is unnecessary.
             user_info = created_user.to_object()
 
             auth_user_id = user_info.id

@@ -88,8 +88,8 @@ def test_create_user_success_for_app_manager(client, monkeypatch):
         def rollback(self):
             return None
 
-    fake_created_user = SimpleNamespace(
-        to_object=lambda: UserInfo(
+    fake_created_user = SimpleNamespace()
+    fake_created_user.to_object = lambda: UserInfo(
             id=99,
             username="newuser",
             is_superuser=False,
@@ -97,13 +97,12 @@ def test_create_user_success_for_app_manager(client, monkeypatch):
             roles=["data_editor"],
             organization="Digital Arz",
             department="survey",
-            is_active=False,
-            is_verified=False,
+            is_active=True,
+            is_verified=True,
             name="New User",
             email="new@example.com",
             contact="12345",
         )
-    )
 
     app.dependency_overrides[AuthUtils.get_current_user] = override_user
 
@@ -139,6 +138,7 @@ def test_create_user_success_for_app_manager(client, monkeypatch):
             "profile_contact": "12345",
             "organization": "Digital Arz",
             "department": "survey",
+            "password": "Secret123",
             "roles": ["data_editor"],
         },
     )
@@ -149,5 +149,7 @@ def test_create_user_success_for_app_manager(client, monkeypatch):
     assert data["organization"] == "Digital Arz"
     assert data["department"] == "survey"
     assert data["roles"] == ["data_editor"]
+    assert data["isActive"] is True
+    assert data["isVerified"] is True
 
     app.dependency_overrides.clear()

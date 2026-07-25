@@ -117,6 +117,8 @@ class AuthUtils:
         contact: str = "",
         is_superuser: bool = False,
         is_staff: bool = False,
+        is_active: Optional[bool] = None,
+        is_verified: Optional[bool] = None,
         roles: Optional[List[str]] = None,
         organization: Optional[str] = None,
         department: Optional[str] = None,
@@ -205,8 +207,8 @@ class AuthUtils:
                 profile_id=saved_profile.id,
                 is_superuser=is_superuser,
                 is_staff=is_staff,
-                is_active=is_superuser,
-                is_verified=True,
+                is_active=is_superuser if is_active is None else is_active,
+                is_verified=True if is_verified is None else is_verified,
             )
             s.add(user)
             s.flush()
