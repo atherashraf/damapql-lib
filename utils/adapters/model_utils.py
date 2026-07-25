@@ -3,9 +3,11 @@ import importlib
 from digitalarzengine.io.managers.db_manager import GeoDBManager
 from digitalarzengine.utils.singletons import da_logger
 from sqlalchemy import insert
+
+import settings
 from app.damapql.utils.adapters.db import DBBase
 
-from settings import DA_APPS
+from settings import DA_APPS, get_model_bases
 
 
 class ModelUtils:
@@ -49,7 +51,7 @@ class ModelUtils:
     @staticmethod
     def get_model_class_by_name(model_name: str):
         # Loop through all loaded classes
-        for base in MODEL_BASES:
+        for base in settings.get_model_bases():
             da_logger.info(f"working on {base.__name__}")
             for cls in base.__subclasses__():
                 if cls.__name__ == model_name:
@@ -59,7 +61,7 @@ class ModelUtils:
     @classmethod
     def get_model_by_tablename(cls, table_name: str):
 
-        for base in MODEL_BASES:
+        for base in get_model_bases():
             for model in cls.get_all_subclasses(base):
                 if hasattr(model, "__tablename__") and model.__tablename__ == table_name:
                     return model

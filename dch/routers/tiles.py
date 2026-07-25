@@ -12,6 +12,8 @@ from app.damapql.dch.utils.mvt_utils import MVTCache
 from app.damapql.utils.adapters.db import DBBase
 from digitalarzengine.utils.singletons import da_logger
 
+from app.damapql.utils.adapters.model_utils import ModelUtils
+
 dch_tiles_router = APIRouter(tags=["dch"])
 
 
@@ -59,139 +61,168 @@ async def get_raster_tile(uuid: str, z: int, x: int, y: int):
     return Response(content=result.content, media_type=result.media_type)
 
 
-@dch_tiles_router.get("/layer_mvt/{uuid}/{tile_size}/{z}/{x}/{y}")
+
+
+
+@dch_tiles_router.get("/layer_mvt/{identifier}/{tile_size}/{z}/{x}/{y}")
 async def get_layer_mvt(
-        uuid: str,
+        identifier: str,
         tile_size: int,
         z: int,
         x: int,
         y: int,
+        model_name: str | None = Query(None),
+        table_name: str | None = Query(None),
+        geom_col: str | None = Query(None),
+        db_key: str | None = Query(None),
         resolution: float = 0,
         cols: list[str] | None = Query(None),
 ):
     """
-    Public endpoint to serve Mapbox Vector Tiles (MVT) with per-layer DB cache.
-    Optimized to minimize DB property lookups and reuse PK logic.
-    Enforces zoom level boundaries before hitting cache or generating tiles.
+    Unified MVT tile endpoint supporting:
+    1) LayerInfo UUID lookup (`identifier = layer_uuid`)
+    2) Model Name resolution via ModelUtils (`model_name=WASAPipeModel`)
+    3) Direct PostGIS table name lookup (`table_name=public.canals`)
     """
-    info = LayerInfo.get_layer_info_by_uuid(uuid)
-    if not info:
-        raise HTTPException(status_code=404, detail="Layer not found")
+    external_engine = None
+    target_table = None
+    target_geom = None
+    pk_sql_fragment = "id as pk"
+    allowed_cols = set()
+    layer_name = identifier
+    zoom_range = [0, 30]
 
-    # 👇 1) ZOOM RANGE VALIDATION
-    # Expects info.zoom_range to be a list, e.g., [14, 30]
-    if info.zoom_range and isinstance(info.zoom_range, list) and len(info.zoom_range) == 2:
-        min_zoom, max_zoom = info.zoom_range
+    # -------------------------------------------------------------
+    # RESOLUTION PATH 1: Standard LayerInfo UUID
+    # -------------------------------------------------------------
+    info = LayerInfo.get_layer_info_by_uuid(identifier)
 
-        if z < min_zoom or z > max_zoom:
-            da_logger.debug(
-                f"[MVTZoomSkip] Requested z={z} is outside allowed range [{min_zoom}, {max_zoom}] for uuid={uuid}"
-            )
-            # Return a standard empty MVT response so the frontend map doesn't choke or throw 400s
-            return Response(
-                content=b"",
-                media_type="application/vnd.mapbox-vector-tile"
-            )
-
-    access = info.layer_accessibility
-    if not access:
-        return Response(status_code=204)
-
-    # Check row count before expensive engine connection
-    if info.count_layer_rows() == 0:
-        return Response(
-            content=b"",
-            media_type="application/vnd.mapbox-vector-tile"
-        )
-
-    try:
-        external_engine = access.get_external_engine()
-        if not external_engine:
+    if info:
+        zoom_range = info.zoom_range or zoom_range
+        access = info.layer_accessibility
+        if not access:
             return Response(status_code=204)
 
-        # --- OPTIMIZATION: Fetch PK and Column data once ---
-        pk_list = access.pk_cols or []
-        pk_sql_fragment = info.pk_cols_as_pk  # "col1 || '-' || col2 as pk"
+        if info.count_layer_rows() == 0:
+            return Response(content=b"", media_type="application/vnd.mapbox-vector-tile")
 
+        external_engine = access.get_external_engine()
+        target_table = access.table_name
+        target_geom = access.geometry_col
+        pk_sql_fragment = info.pk_cols_as_pk
         allowed_cols = set(access.cols_name or [])
-        requested_cols = cols or list(allowed_cols)
-        requested_cols = sorted(set(requested_cols))
+        layer_name = info.layer_name or identifier
 
-        # Validate requested columns
-        bad = [c for c in requested_cols if c not in allowed_cols]
-        if bad:
-            raise HTTPException(status_code=400, detail=f"Invalid columns requested: {bad}")
-
-        # Build variant using PK list to ensure cache uniqueness
-        variant = MVTCache.build_variant(
-            cols=requested_cols,
-            resolution=resolution,
-            extra={"pk_cols": pk_list}
-        )
-
-        da_logger.debug(
-            f"[MVTRequest] uuid={uuid}, z={z}, x={x}, y={y}, variant={variant}"
-        )
-
-        # 2) Cache Read
+    # -------------------------------------------------------------
+    # RESOLUTION PATH 2: Dynamic SQLAlchemy Model Class Name
+    # -------------------------------------------------------------
+    elif model_name or hasattr(ModelUtils, "get_model_info"):
+        target_model_name = model_name or identifier
         try:
-            cached = MVTCache.get_cached_tile(uuid, x, y, z, variant)
-            if cached:
-                da_logger.debug(f"[MVTCacheHit] uuid={uuid}, variant={variant}")
-                return Response(
-                    content=bytes(cached),
-                    media_type="application/vnd.mapbox-vector-tile"
-                )
-        except Exception as cache_err:
-            da_logger.exception(f"[MVTCacheReadError] uuid={uuid} - {cache_err}")
+            info_dict = ModelUtils.get_model_info(target_model_name)
+            model_cls = info_dict["model"]
 
-        # 3) Generate on cache miss
-        # Prepare safe column identifiers
-        safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
+            # ModelHelpersMixin utilities
+            external_engine = model_cls.get_engine()
+            target_table = model_cls.__tablename__
 
-        # Merge the pre-computed PK fragment with other columns
-        all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols)
+            detected_geom, _ = model_cls.get_geom_col_name_srid()
+            target_geom = geom_col or detected_geom or "geom"
 
-        geom_col = DBQuery.safe_ident(access.geometry_col)
-        table = DBQuery.safe_ident(access.table_name)
+            pk_fields = model_cls.get_primary_key_fields()
+            if pk_fields:
+                pk_sql_fragment = " || '-' || ".join([f'"{f}"' for f in pk_fields]) + " as pk"
 
-        stmt = f"SELECT {all_cols_sql}, {geom_col} FROM {table}"
+            # Auto-detect accessible columns from SQLAlchemy table keys
+            all_fields = model_cls.get_fields()
+            allowed_cols = set([f for f in all_fields if f != target_geom])
+            layer_name = model_cls.__name__
 
-        da_logger.debug(f"[MVTGenerate] uuid={uuid}, stmt={stmt}")
+        except ValueError:
+            # Fallback if model_name was not found and table_name was not provided
+            if not table_name:
+                raise HTTPException(status_code=404, detail=f"Model or Layer '{identifier}' not found")
 
-        with Session(external_engine) as ext_session:
-            mvt_bytes = DBQuery.execute_query_as_mvt(
-                session=ext_session,
-                stmt=stmt,
-                z=z,
-                x=x,
-                y=y,
-                geom_col=access.geometry_col,
-                layer_name=info.layer_name or "layer",
-                extent=tile_size,
-                resolution=resolution,
-            )
+    # -------------------------------------------------------------
+    # RESOLUTION PATH 3: Direct PostGIS Table Name
+    # -------------------------------------------------------------
+    if not external_engine and table_name:
+        try:
+            target_db_key = db_key or "default"
+            external_engine = DBBase.get_engine(db_key=target_db_key)
+            target_table = table_name
+            target_geom = geom_col or "geom"
+            allowed_cols = set(cols or [])
+            layer_name = identifier
+        except KeyError:
+            raise HTTPException(status_code=400, detail="Invalid DB connection engine")
 
-        # 4) Cache Write
-        if mvt_bytes:
-            try:
-                MVTCache.set_cached_tile(uuid, x, y, z, variant, mvt_bytes)
-                da_logger.debug(f"[MVTCacheWrite] uuid={uuid}, variant={variant}, size={len(mvt_bytes)}")
-            except Exception as cache_err:
-                da_logger.exception(f"[MVTCacheWriteError] uuid={uuid} - {cache_err}")
-        else:
-            da_logger.debug(f"[MVTEmptyTile] uuid={uuid}, variant={variant}")
+    if not external_engine or not target_table:
+        raise HTTPException(status_code=404, detail="Unable to resolve layer database target")
 
-        return Response(
-            content=mvt_bytes or b"",
-            media_type="application/vnd.mapbox-vector-tile"
+    # -------------------------------------------------------------
+    # ZOOM RANGE VALIDATION
+    # -------------------------------------------------------------
+    if zoom_range and len(zoom_range) == 2:
+        min_zoom, max_zoom = zoom_range
+        if z < min_zoom or z > max_zoom:
+            return Response(content=b"", media_type="application/vnd.mapbox-vector-tile")
+
+    # -------------------------------------------------------------
+    # COLUMN & VARIANT CACHING PIPELINE
+    # -------------------------------------------------------------
+    requested_cols = cols or list(allowed_cols)
+    if allowed_cols:
+        requested_cols = [c for c in requested_cols if c in allowed_cols]
+    requested_cols = sorted(set(requested_cols))
+
+    variant = MVTCache.build_variant(
+        cols=requested_cols,
+        resolution=resolution,
+        extra={"table": target_table, "model": model_name or ""}
+    )
+
+    # Cache Read
+    try:
+        cached = MVTCache.get_cached_tile(identifier, x, y, z, variant)
+        if cached:
+            return Response(content=bytes(cached), media_type="application/vnd.mapbox-vector-tile")
+    except Exception as cache_err:
+        da_logger.exception(f"[MVTCacheReadError] identifier={identifier} - {cache_err}")
+
+    # Generate MVT SQL
+    safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
+    all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols) if safe_cols else pk_sql_fragment
+
+    safe_geom = DBQuery.safe_ident(target_geom)
+    safe_table = DBQuery.safe_ident(target_table)
+
+    stmt = f"SELECT {all_cols_sql}, {safe_geom} FROM {safe_table}"
+
+    with Session(external_engine) as ext_session:
+        mvt_bytes = DBQuery.execute_query_as_mvt(
+            session=ext_session,
+            stmt=stmt,
+            z=z,
+            x=x,
+            y=y,
+            geom_col=target_geom,
+            layer_name=layer_name,
+            extent=tile_size,
+            resolution=resolution,
         )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        da_logger.exception(f"[MVTError] uuid={uuid} - {e}")
-        return Response(status_code=500)
+    # Cache Write
+    if mvt_bytes:
+        try:
+            MVTCache.set_cached_tile(identifier, x, y, z, variant, mvt_bytes)
+        except Exception as cache_err:
+            da_logger.exception(f"[MVTCacheWriteError] identifier={identifier} - {cache_err}")
+
+    return Response(
+        content=mvt_bytes or b"",
+        media_type="application/vnd.mapbox-vector-tile"
+    )
 
 
 
