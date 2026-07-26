@@ -2511,6 +2511,13 @@ def generate_crypto_key():
 def generate_secret_key_hex(length: int = 32):
     print(binascii.hexlify(os.urandom(int(length))).decode())
 
+def encrypt_txt(txt: str, key: str = None):
+    """Encrypt a string using CryptoUtils."""
+    print(CryptoUtils().encrypt_txt(txt, key))
+
+def decrypt_txt(txt: str, key: str = None):
+    """Decrypt an encrypted string using CryptoUtils."""
+    print(CryptoUtils().decrypt_txt(txt, key))
 
 # --- SYSTEM ---
 

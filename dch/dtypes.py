@@ -286,6 +286,17 @@ class LayerItem(BaseModel):
     isGroupMeta: bool = False
     groups: Optional[List[Dict[str, Any]]] = None
 
+    @field_validator("zoomRange", mode="before")
+    @classmethod
+    def normalize_zoom_range(
+            cls,
+            value: Any,
+    ) -> List[int]:
+        if value is None:
+            return [0, 30]
+
+        return value
+
     model_config = ConfigDict(extra='allow', from_attributes=True)
 
 class LayerGroupItem(BaseModel):

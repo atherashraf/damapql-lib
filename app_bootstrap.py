@@ -15,7 +15,7 @@ from app.damapql.settings import (
     DCH_DB_KEY,
     DCH_SECRET_KEY,
 )
-
+from app.lbdc.routers import lbdc_router
 
 AppExtension = Callable[[FastAPI], None]
 
@@ -73,6 +73,37 @@ def configure_extensions(
         extension(app)
 
 
+# app/core/model_loader.py or directly in create_app file
+
+import importlib
+from digitalarzengine.utils.singletons import da_logger
+
+def load_all_app_models() -> None:
+    """
+    Dynamically imports the 'models' module for every registered app in DA_APPS.
+    Triggers each app's `models/__init__.py` to prime SQLAlchemy's ORM registry.
+    """
+    from settings import DA_APPS  # Your dict containing app paths
+
+    for app_label, app_config in DA_APPS.items():
+        app_path = app_config.get("path")
+        if not app_path:
+            continue
+
+        models_module_path = f"{app_path}.models"
+
+        try:
+            importlib.import_module(models_module_path)
+            da_logger.info(f"Loaded models for app: '{app_label}' ({models_module_path})")
+        except ModuleNotFoundError as e:
+            # Handle case where an app simply doesn't have a models package/file
+            if f"No module named '{models_module_path}'" in str(e):
+                da_logger.debug(f"App '{app_label}' has no models module to load.")
+            else:
+                da_logger.error(f"Failed to load models for app '{app_label}': {e}")
+        except Exception as e:
+            da_logger.exception(f"Error initializing models for app '{app_label}': {e}")
+
 def configure_core_routers(app: FastAPI) -> None:
     app.include_router(
         auth_router,
@@ -82,6 +113,11 @@ def configure_core_routers(app: FastAPI) -> None:
     app.include_router(
         dch_router,
         prefix="/dch",
+    )
+
+    app.include_router(
+        lbdc_router,
+        prefix="/lbdc",
     )
 
 
@@ -105,7 +141,10 @@ def create_app(port, title, description) -> FastAPI:
         root_path="/api",
     )
 
-    # First create the SQLAdmin instance.
+    # 🌟 1. Load all application ORM models upfront to populate SQLAlchemy's registry
+    load_all_app_models()
+
+    # 2. First create the SQLAdmin instance.
     dch_admin = create_dch_admin(
         app,
         secret_key=DCH_SECRET_KEY,
@@ -114,13 +153,14 @@ def create_app(port, title, description) -> FastAPI:
         base_url="/dch_admin",
     )
 
-    # Then explicitly register the core admin views.
+    # 3. Then explicitly register the core admin views.
     from app.damapql.auth.admin_views import (
         register_auth_admin_views,
     )
 
     register_auth_admin_views(dch_admin)
 
+    # 4. Configure core routers & app extensions
     configure_core_routers(app)
 
     configure_extensions(
