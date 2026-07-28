@@ -56,8 +56,18 @@ def cache_table_name(uuid: str) -> str:
     response_class=Response,
 )
 async def get_raster_tile(uuid: str, z: int, x: int, y: int):
-    result = RasterTileService.render_tile(uuid=uuid, z=z, x=x, y=y)
-    return Response(content=result.content, media_type=result.media_type)
+    tile_result = RasterTileService.render_tile(uuid=uuid, z=z, x=x, y=y)
+    # Return raw binary bytes with the proper headers
+    return Response(
+        content=tile_result.content,
+        media_type="image/png",
+        headers={
+            "Content-Type": "image/png",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        }
+    )
 
 
 @dch_tiles_router.get("/layer_mvt/{identifier}/{tile_size}/{z}/{x}/{y}")

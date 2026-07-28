@@ -26,35 +26,51 @@ def handle_timestamp(obj):
         return obj.strftime("%Y-%m-%d %H:%M:%S")
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
+
+
 @dch_layers_router.get("/layer_categories/")
-async def layer_categories():
-    """
-    Returns layer categories.
-    Public endpoint.
-    """
+def get_layer_categories(
+    current_user: UserInfo = Depends(
+        AuthUtils.get_current_user
+    ),
+):
     with LayerCategory.managed_session() as session:
-        stmt = select(LayerCategory)
-        categories = session.execute(stmt).scalars().all()
+        categories = session.execute(
+            select(
+                LayerCategory.id,
+                LayerCategory.main,
+                LayerCategory.sub,
+            ).order_by(
+                LayerCategory.main,
+                LayerCategory.sub,
+            )
+        ).all()
 
-        payload = [
-            {
-                "pk": obj.id,
-                "name": f"{obj.main}-{obj.sub}" if obj.sub else obj.main
-            }
-            for obj in categories
-        ]
-
-    return {"payload": payload}
+        return {
+            "payload": [
+                {
+                    "pk": category.id,
+                    "main": category.main,
+                    "sub": category.sub,
+                    "name": (
+                        f"{category.main} — {category.sub}"
+                        if category.sub
+                        else category.main
+                    ),
+                }
+                for category in categories
+            ]
+        }
 
 
 @dch_layers_router.get("/wfs/{uuid}/{format}/")
 async def get_wfs(
-    uuid: str,
-    format: str,
-    limit: int = Query(20000, ge=1, le=200000),
-    offset: int = Query(0, ge=0),
-    cols: Optional[List[str]] = Query(None),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        format: str,
+        limit: int = Query(20000, ge=1, le=200000),
+        offset: int = Query(0, ge=0),
+        cols: Optional[List[str]] = Query(None),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns vector layer features as GeoJSON.
@@ -127,8 +143,8 @@ async def get_wfs(
 
 @dch_layers_router.get("/layer_fields/{uuid}/")
 async def get_layer_fields(
-    uuid: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns available column names for a layer.
@@ -148,12 +164,12 @@ async def get_layer_fields(
 
 @dch_layers_router.get("/layer_field_distinct_values/{uuid}/{field_name}/{field_type}/")
 async def get_field_distinct_values(
-    uuid: str,
-    field_name: str,
-    field_type: str,
-    classification: str = "Stats",
-    no_of_classes: int = 0,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        field_name: str,
+        field_type: str,
+        classification: str = "Stats",
+        no_of_classes: int = 0,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns distinct field values or classification breaks.
@@ -166,7 +182,7 @@ async def get_field_distinct_values(
         if obj is None:
             return Response(status_code=204)
 
-        df = obj.to_layer_df(cols=[field_name]  )
+        df = obj.to_layer_df(cols=[field_name])
 
     if df.empty or field_name not in df.columns:
         return {"payload": []}
@@ -213,15 +229,16 @@ def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
 
     return values
 
+
 @dch_layers_router.get(
     "/layer_attributes/{uuid}/",
     response_model=Union[AttributeTableResponse, dict],
     summary="Get Layer Attributes",
 )
 def get_layer_attributes(
-    uuid: str,
-    extent_3857: Optional[str] = Query(None),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        extent_3857: Optional[str] = Query(None),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns attribute table for vector layers or summary data for raster layers.
@@ -261,23 +278,23 @@ def get_layer_attributes(
             df = info.to_layer_df()
 
         if not df.empty:
-            return ManageDataFrameUtils.grid_response(
+            return {"payload": ManageDataFrameUtils.grid_response(
                 df,
                 pkCols=info.layer_accessibility.pk_cols
-            )
+            )}
 
     elif info.data_model and info.data_model.code == DataModel.R.name:
-        return RasterStatsService.get_attribute_summary_grid(uuid)
+        return {"payload": RasterStatsService.get_attribute_summary_grid(uuid)}
 
     return Response(status_code=204)
 
 
 @dch_layers_router.get("/get_feature_detail/{uuid}/{col_name}/{col_val}/")
 async def get_feature_detail(
-    uuid: str,
-    col_name: str,
-    col_val: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        col_name: str,
+        col_val: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns non-geometry details for a single feature.
@@ -301,13 +318,11 @@ async def get_feature_detail(
     return Response(status_code=204)
 
 
-
-
 @dch_layers_router.get("/get_feature_geometry/{uuid}/{pk_values}/")
 async def get_feature_geometry(
-    uuid: str,
-    pk_values: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        pk_values: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns feature geometry as WKT in EPSG:3857 for a given primary key set.
@@ -361,10 +376,10 @@ async def get_feature_geometry(
 
 @dch_layers_router.get("/column_value/{uuid}/{pk_val}/{col_name}/")
 async def get_column_value(
-    uuid: str,
-    pk_val: str,
-    col_name: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        pk_val: str,
+        col_name: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns a single column value for a feature identified by its PK value(s).
@@ -414,8 +429,9 @@ async def get_column_value(
 
     return {"payload": {col_name: val if val is not None else ""}}
 
+
 class SpatialSelectRequest(BaseModel):
-    geometry: str # This matches your frontend key
+    geometry: str  # This matches your frontend key
     srid: int = 3857
 
 
@@ -460,8 +476,8 @@ async def spatial_selection(
 
 @dch_layers_router.get("/layer_pk_cols/{uuid}/")
 async def get_layer_pk_cols(
-    uuid: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        uuid: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Returns the primary key column names for a specific layer.

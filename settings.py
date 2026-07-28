@@ -13,6 +13,8 @@ DCH_BASE_DIR = Path(__file__).resolve().parent
 DCH_MEDIA_DIR = DCH_BASE_DIR / "media"
 DCH_COG_DIR = DCH_BASE_DIR / "cog"
 
+MEDIA_BASE = Path(os.getenv("MEDIA_BASE", "/media"))
+
 IS_LOCAL = os.environ.get("IS_LOCAL", "True") == "True"
 IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
 DCH_APP_NAME = os.getenv("APP_NAME", "DAMapQL")

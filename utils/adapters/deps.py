@@ -55,7 +55,7 @@ import os
 from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.settings import IS_LOCAL
 
-# Expected structure from your settings.py
+# Expected structure from your digitalarzengine_settings.py
 from app.damapql.settings import DCH_APPS, DCH_DB_KEY
 from settings import DATABASES
 

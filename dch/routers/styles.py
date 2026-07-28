@@ -339,11 +339,13 @@ async def update_layer_zoom(
         da_logger.exception(f"Failed to update visibility scale ranges on layer {uuid}: {e}")
         raise HTTPException(status_code=500, detail="Internal update processing error")
 
+
 @dch_styles_router.get("/get_legend_graphic/{uuid}", response_class=Response)
 @dch_styles_router.get("/get_legend_graphic/{uuid}/", response_class=Response)
 async def get_legend_graphic(uuid: str):
     """
     Generates a PNG legend graphic from the saved layer style.
+    Falls back to a dynamic Black & White min/max legend if no custom style is defined.
     Public endpoint.
     """
     try:
@@ -352,47 +354,64 @@ async def get_legend_graphic(uuid: str):
                 select(LayerInfo).where(LayerInfo.uuid == uuid)
             ).scalar_one_or_none()
 
-        if not info or not info.layer_styling:
-            raise HTTPException(status_code=404, detail="Layer style not found")
+        if not info:
+            raise HTTPException(status_code=404, detail="Layer not found")
 
-        style = info.layer_styling
-        cp = COGRaster.create_color_map(style)
+        style = info.layer_styling or {}
+        cp = COGRaster.create_color_map(style) if style else None
 
-        if "labels" in style:
-            labels = style["labels"]
-        elif isinstance(cp, dict):
-            labels = [str(k) for k in cp.keys()]
-        elif isinstance(cp, list):
-            labels = [str(round(v[0][0], 2)) for v in cp]
-            if cp and cp[-1][0]:
-                labels.append(str(round(cp[-1][0][-1], 2)))
-        else:
-            labels = []
+        labels = []
+        palette = []
 
-        if not labels:
-            raise HTTPException(status_code=400, detail="No labels available for legend")
+        # --- PATH A: Custom Styling Exists ---
+        if cp or style:
+            if "labels" in style and isinstance(style["labels"], list):
+                labels = [str(lbl) for lbl in style["labels"]]
+            elif isinstance(cp, list) and len(cp) > 0:
+                labels = [str(round(v[0][0], 2)) for v in cp if isinstance(v[0], (tuple, list))]
+                if isinstance(cp[-1][0], (tuple, list)) and cp[-1][0][1] != float("inf"):
+                    labels.append(str(round(cp[-1][0][1], 2)))
+            elif isinstance(cp, dict) and len(cp) > 0:
+                labels = [str(k) for k in cp.keys()]
+
+            palette = (
+                style.get("palette")
+                or style.get("colors")
+                or style.get("color_ramp")
+            )
+
+            if not palette and isinstance(cp, list):
+                palette = [f"#{r:02x}{g:02x}{b:02x}" for _, (r, g, b, *_) in cp]
+
+        # --- PATH B: Fallback Grayscale Mode (Matches Tile Renderer Min/Max) ---
+        if not labels or not palette:
+            min_v, max_v = 0.0, 100.0
+            try:
+                # Retrieve actual raster file path from LayerInfo OR DataModel
+                raster_path = getattr(info, "file_path", None) or getattr(info, "s3_path", None)
+
+                if raster_path:
+                    cog = COGRaster.open_cog(raster_path)
+                    min_v, max_v = cog.global_minmax
+                elif hasattr(info, "to_raster"):
+                    cog = info.to_raster()
+                    min_v, max_v = cog.global_minmax
+            except Exception as err:
+                da_logger.error(f"Failed to fetch min/max from raster for legend: {err}")
+
+            # Display rounded actual raster range (e.g. 0.0 to 42.5)
+            labels = [str(round(min_v, 2)), str(round(max_v, 2))]
+            palette = ["#000000", "#FFFFFF"]  # Black to White gradient
 
         ticks = list(range(len(labels)))
-        if len(ticks) != len(labels):
-            raise HTTPException(status_code=400, detail="Mismatch between ticks and labels")
-
         is_horizontal = False
+
         fig: Figure = plt.figure(
-            figsize=[500 / 96, 1] if is_horizontal else [500 / 96, 0.4 * len(labels)]
+            figsize=[500 / 96, 1] if is_horizontal else [500 / 96, max(0.4 * len(labels), 1.2)]
         )
         ax: Axes = fig.add_axes(
             [0.05, 0.8, 0.9, 0.8] if is_horizontal else [0.1, 0.15, 0.05, 0.8]
         )
-
-        palette = style.get("palette")
-        if not palette:
-            raise HTTPException(status_code=400, detail="Palette is missing")
-
-        if isinstance(palette, dict):
-            palette = list(palette.values())
-
-        if not isinstance(palette, list) or len(palette) < 2:
-            raise HTTPException(status_code=400, detail="Invalid color palette")
 
         cmap = LinearSegmentedColormap.from_list("cdict", palette)
 
@@ -412,7 +431,7 @@ async def get_legend_graphic(uuid: str):
             cbar.ax.set_yticklabels(labels)
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight")
+        fig.savefig(buf, format="png", bbox_inches="tight", transparent=True)
         plt.close(fig)
 
         return Response(

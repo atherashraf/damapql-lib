@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
+
+from app.damapql.dch.dtypes import AttributeTablePayload
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import HTTPException
 
@@ -123,6 +125,6 @@ class RasterStatsService:
         return raster.get_band_summaries()
 
     @classmethod
-    def get_attribute_summary_grid(cls, uuid: str) -> dict[str, Any]:
+    def get_attribute_summary_grid(cls, uuid: str) -> AttributeTablePayload:
         df = cls.get_attribute_summary_df(uuid)
         return ManageDataFrameUtils.grid_response(df, pkCols=[])

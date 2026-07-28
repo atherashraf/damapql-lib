@@ -90,12 +90,12 @@ async def get_all_layer_info(current_user: UserInfo =
 
         ]
         df = df[column_order]
-    return ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])
+    return {"payload": ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])}
 
 @dch_maps_router.get("/all_map_info/")
 async def get_all_map_info(current_user: UserInfo = Depends(AuthUtils.get_current_user)):
     df = MapInfo.get_all_map_info()
-    return ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])
+    return {"payload": ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])}
 
 
 @dch_maps_router.post("/save_map/")

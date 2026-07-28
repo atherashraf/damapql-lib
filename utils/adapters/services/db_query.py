@@ -327,23 +327,193 @@ class DBQuery:
             cols_str = select_part[7:].strip()
 
             quoted_cols = []
+            seen_cols = set()
+
             for col in cols_str.split(","):
                 col = col.strip()
                 if not col:
                     continue
+
                 if " as " in col.lower():
                     parts = re.split(r"\s+[aA][sS]\s+", col, maxsplit=1)
                     raw_col = parts[0].strip().strip('"')
                     alias = parts[1].strip().strip('"')
+
+                    if alias in seen_cols:
+                        continue
+                    seen_cols.add(alias)
                     quoted_cols.append(f'"{raw_col}" AS "{alias}"')
+
                 elif not col.startswith('"') and not col.endswith('"') and "(" not in col:
-                    quoted_cols.append(f'"{col}"')
+                    clean_col = col.strip('"')
+                    if clean_col in seen_cols:
+                        continue
+                    seen_cols.add(clean_col)
+                    quoted_cols.append(f'"{clean_col}"')
+
                 else:
+                    if col in seen_cols:
+                        continue
+                    seen_cols.add(col)
                     quoted_cols.append(col)
 
             return f"SELECT {', '.join(quoted_cols)} FROM {from_part}"
         except Exception:
             return raw_sql
+
+    @staticmethod
+    def _compile_stmt(stmt: Union[str, Select]) -> str:
+        """Utility to compile a SQLAlchemy Select or raw string into SQL text."""
+        if isinstance(stmt, str):
+            return stmt
+        return str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+    @staticmethod
+    def _build_mvt_sql(
+        stmt: Union[str, Select],
+        z: int,
+        x: int,
+        y: int,
+        geom_col: str = "geom",
+        layer_name: str = "default_layer",
+        buffer: int = 64,
+        extent: int = 4096,
+        resolution: float = 0
+    ) -> str:
+        """Constructs unified PostGIS ST_AsMVT SQL string."""
+        raw_sql = DBQuery._compile_stmt(stmt)
+        sanitized_sql = DBQuery._quote_raw_select_stmt(raw_sql)
+        clean_geom = geom_col.replace('"', '').strip()
+        geom_ref = f't."{clean_geom}"'
+
+        geom_expression = f"ST_Simplify({geom_ref}, {resolution})" if resolution > 0 else geom_ref
+
+        return f"""
+            WITH 
+            bounds AS (
+              SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
+            ),
+            subquery AS (
+              {sanitized_sql}
+            ),
+            mvt_geoms AS (
+              SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform({geom_expression}, 3857), 
+                    bounds.envelope, 
+                    {extent}, 
+                    {buffer}, 
+                    true
+                ) AS mvt_geom,
+                t.*
+              FROM subquery AS t, bounds
+              WHERE ST_Intersects(
+                  ST_Transform({geom_ref}, 3857), 
+                  bounds.envelope
+              )
+            )
+            SELECT ST_AsMVT(
+                mvt_geoms, 
+                '{layer_name}', 
+                {extent}, 
+                'mvt_geom'
+            ) 
+            FROM mvt_geoms;
+        """
+
+    @staticmethod
+    def _build_geojson_sql(
+        stmt: Union[str, Select],
+        geom_col: str = "geom",
+        id_col: str = "id"
+    ) -> str:
+        """Constructs unified PostGIS GeoJSON FeatureCollection SQL string."""
+        raw_sql = DBQuery._compile_stmt(stmt)
+        clean_geom = geom_col.replace('"', '').strip()
+        clean_id = id_col.replace('"', '').strip()
+
+        return f"""
+            SELECT jsonb_build_object(
+                'type', 'FeatureCollection',
+                'crs', jsonb_build_object('type', 'name', 'properties', jsonb_build_object('name', 'EPSG:4326')),
+                'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
+            )
+            FROM (
+                SELECT jsonb_build_object(
+                    'type', 'Feature',
+                    'id', inputs."{clean_id}",
+                    'geometry', ST_AsGeoJSON((inputs."{clean_geom}")::geometry)::jsonb,
+                    'properties', to_jsonb(inputs) - '{clean_geom}'
+                ) AS feature
+                FROM ({raw_sql}) inputs
+                WHERE inputs."{clean_geom}" IS NOT NULL
+            ) features;
+        """
+
+    # =========================================================================
+    # MVT EXECUTORS
+    # =========================================================================
+
+    @staticmethod
+    def execute_query_as_mvt(
+        session: Session,
+        stmt: Union[str, Select],
+        z: int,
+        x: int,
+        y: int,
+        geom_col: str = "geom",
+        layer_name: str = "default_layer",
+        buffer: int = 64,
+        extent: int = 4096,
+        resolution: float = 0
+    ) -> bytes:
+        """Generates Mapbox Vector Tile (MVT) binary protocol buffer data via PostGIS."""
+        if session.get_bind().dialect.name != "postgresql":
+            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
+
+        mvt_sql = DBQuery._build_mvt_sql(
+            stmt, z, x, y, geom_col, layer_name, buffer, extent, resolution
+        )
+
+        try:
+            result = session.execute(text(mvt_sql)).scalar()
+            return bytes(result) if result else b""
+        except Exception:
+            da_logger.exception("Error during MVT generation")
+            return b""
+
+    @staticmethod
+    async def execute_query_as_mvt_async(
+        session: AsyncSession,
+        stmt: Union[str, Select],
+        z: int,
+        x: int,
+        y: int,
+        geom_col: str = "geom",
+        layer_name: str = "default_layer",
+        buffer: int = 64,
+        extent: int = 4096,
+        resolution: float = 0
+    ) -> bytes:
+        """Async generation of Mapbox Vector Tile (MVT) binary protocol buffer data via PostGIS."""
+        if session.get_bind().dialect.name != "postgresql":
+            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
+
+        mvt_sql = DBQuery._build_mvt_sql(
+            stmt, z, x, y, geom_col, layer_name, buffer, extent, resolution
+        )
+
+        try:
+            result = await session.execute(text(mvt_sql))
+            tile = result.scalar()
+            return bytes(tile) if tile else b""
+        except Exception:
+            da_logger.exception("Error during async MVT generation")
+            return b""
+
+    # =========================================================================
+    # GEOJSON EXECUTORS
+    # =========================================================================
 
     @staticmethod
     def execute_query_as_geojson(
@@ -352,56 +522,27 @@ class DBQuery:
         geom_col: str = "geom",
         id_col: str = "id",
     ) -> Dict[str, Any]:
-        """
-        Builds a GeoJSON FeatureCollection.
-        Uses C-level PostGIS aggregation on PostgreSQL and Python parsing on other dialects.
-        """
+        """Builds a GeoJSON FeatureCollection synchronously."""
         engine = session.get_bind()
 
         if engine.dialect.name == "postgresql":
-            raw_sql = (
-                str(stmt.compile(compile_kwargs={"literal_binds": True}))
-                if not isinstance(stmt, str)
-                else stmt
-            )
-
-            pg_geojson_sql = f"""
-                SELECT jsonb_build_object(
-                    'type', 'FeatureCollection',
-                    'crs', jsonb_build_object('type', 'name', 'properties', jsonb_build_object('name', 'EPSG:4326')),
-                    'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
-                )
-                FROM (
-                    SELECT jsonb_build_object(
-                        'type', 'Feature',
-                        'id', inputs.{id_col},
-                        'geometry', ST_AsGeoJSON((inputs.{geom_col})::geometry)::jsonb,
-                        'properties', to_jsonb(inputs) - '{geom_col}'
-                    ) AS feature
-                    FROM ({raw_sql}) inputs
-                    WHERE inputs.{geom_col} IS NOT NULL
-                ) features;
-            """
-
+            pg_geojson_sql = DBQuery._build_geojson_sql(stmt, geom_col, id_col)
             result = session.execute(text(pg_geojson_sql)).scalar()
             return result if result else {"type": "FeatureCollection", "features": []}
 
-        # Fallback for non-Postgres engines
+        # Fallback for non-PostgreSQL dialects
         result = session.execute(text(stmt) if isinstance(stmt, str) else stmt)
         features = []
-
         for row in result.mappings():
             geom = row.get(geom_col)
             if geom is None:
                 continue
-
             features.append({
                 "type": "Feature",
                 "id": row.get(id_col),
                 "geometry": json.loads(geom) if isinstance(geom, str) else geom,
                 "properties": {k: v for k, v in row.items() if k != geom_col},
             })
-
         return {"type": "FeatureCollection", "features": features}
 
     @staticmethod
@@ -415,24 +556,7 @@ class DBQuery:
         engine = session.get_bind()
 
         if engine.dialect.name == "postgresql":
-            raw_sql = str(stmt.compile(compile_kwargs={"literal_binds": True})) if not isinstance(stmt, str) else stmt
-
-            pg_geojson_sql = f"""
-                SELECT jsonb_build_object(
-                    'type', 'FeatureCollection',
-                    'features', COALESCE(jsonb_agg(features.feature), '[]'::jsonb)
-                )
-                FROM (
-                  SELECT jsonb_build_object(
-                    'type', 'Feature',
-                    'id', inputs.{id_col},
-                    'geometry', ST_AsGeoJSON(inputs.{geom_col})::jsonb,
-                    'properties', to_jsonb(inputs) - '{geom_col}'
-                  ) AS feature
-                  FROM ({raw_sql}) inputs
-                  WHERE inputs.{geom_col} IS NOT NULL
-                ) features;
-            """
+            pg_geojson_sql = DBQuery._build_geojson_sql(stmt, geom_col, id_col)
             result = await session.execute(text(pg_geojson_sql))
             return result.scalar() or {"type": "FeatureCollection", "features": []}
 
@@ -449,6 +573,10 @@ class DBQuery:
                 "properties": {k: v for k, v in row.items() if k != geom_col}
             })
         return {"type": "FeatureCollection", "features": features}
+
+    # =========================================================================
+    # GEOPANDAS EXECUTOR
+    # =========================================================================
 
     @staticmethod
     def execute_query_as_gdf(
@@ -483,144 +611,3 @@ class DBQuery:
             return gpd.GeoDataFrame(df, geometry=geom_col, crs=crs)
 
         raise ValueError(f"Geometry column '{geom_col}' not found in query results.")
-
-    @staticmethod
-    def execute_query_as_mvt(
-        session: Session,
-        stmt: Union[str, Select],
-        z: int,
-        x: int,
-        y: int,
-        geom_col: str = "geom",
-        layer_name: str = "default_layer",
-        buffer: int = 64,
-        extent: int = 4096,
-        resolution: float = 0
-    ) -> bytes:
-        """Generates Mapbox Vector Tile (MVT) binary protocol buffer data via PostGIS."""
-        engine = session.get_bind()
-        if engine.dialect.name != "postgresql":
-            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
-
-        raw_sql = (
-            str(stmt.compile(compile_kwargs={"literal_binds": True}))
-            if not isinstance(stmt, str)
-            else stmt
-        )
-
-        sanitized_sql = DBQuery._quote_raw_select_stmt(raw_sql)
-        clean_geom_col = geom_col.strip(' "')
-        geom_ref = f't."{clean_geom_col}"'
-
-        geom_expression = f"ST_Simplify({geom_ref}, {resolution})" if resolution > 0 else geom_ref
-
-        mvt_sql = f"""
-            WITH 
-            bounds AS (
-              SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
-            ),
-            subquery AS (
-              {sanitized_sql}
-            ),
-            mvt_geoms AS (
-              SELECT 
-                ST_AsMVTGeom(
-                    ST_Transform({geom_expression}, 3857), 
-                    bounds.envelope, 
-                    {extent}, 
-                    {buffer}, 
-                    true
-                ) AS mvt_geom,
-                t.*
-              FROM subquery AS t, bounds
-              WHERE ST_Intersects(
-                  ST_Transform({geom_ref}, 3857), 
-                  bounds.envelope
-              )
-            )
-            SELECT ST_AsMVT(
-                mvt_geoms.*, 
-                '{layer_name}', 
-                {extent}, 
-                'mvt_geom'
-            ) 
-            FROM mvt_geoms;
-        """
-
-        try:
-            result = session.execute(text(mvt_sql)).scalar()
-            return bytes(result) if result else b""
-        except Exception:
-            da_logger.exception("Error during MVT generation")
-            return b""
-
-    @staticmethod
-    async def execute_query_as_mvt_async(
-        session: AsyncSession,
-        stmt: Union[str, Select],
-        z: int,
-        x: int,
-        y: int,
-        geom_col: str = "geom",
-        layer_name: str = "default_layer",
-        buffer: int = 64,
-        extent: int = 4096,
-        resolution: float = 0
-    ) -> bytes:
-        """Async generation of Mapbox Vector Tile (MVT) binary protocol buffer data via PostGIS."""
-        engine = session.get_bind()
-        if engine.dialect.name != "postgresql":
-            raise NotImplementedError("MVT generation is only supported on PostgreSQL/PostGIS.")
-
-        raw_sql = (
-            str(stmt.compile(compile_kwargs={"literal_binds": True}))
-            if not isinstance(stmt, str)
-            else stmt
-        )
-
-        sanitized_sql = DBQuery._quote_raw_select_stmt(raw_sql)
-        clean_geom = geom_col.replace('"', '').strip()
-        geom_ref = f't."{clean_geom}"'
-
-        geom_expression = f"ST_Simplify({geom_ref}, {resolution})" if resolution > 0 else geom_ref
-
-        mvt_sql = f"""
-            WITH 
-            bounds AS (
-              SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
-            ),
-            subquery AS (
-              {sanitized_sql}
-            ),
-            mvt_geoms AS (
-              SELECT 
-                ST_AsMVTGeom(
-                    ST_Transform({geom_expression}, 3857), 
-                    bounds.envelope, 
-                    {extent}, 
-                    {buffer}, 
-                    true
-                ) AS mvt_geom,
-                t.*
-              FROM subquery AS t, bounds
-              WHERE ST_Intersects(
-                  ST_Transform({geom_ref}, 3857), 
-                  bounds.envelope
-              )
-            )
-            SELECT ST_AsMVT(
-                mvt_geoms.*, 
-                '{layer_name}', 
-                {extent}, 
-                'mvt_geom'
-            ) 
-            FROM mvt_geoms;
-        """
-
-        try:
-            result = await session.execute(text(mvt_sql))
-            tile = result.scalar()
-            return bytes(tile) if tile else b""
-        except Exception:
-            da_logger.exception("Error during async MVT generation")
-            return b""
