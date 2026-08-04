@@ -897,31 +897,78 @@ def reset_pk_sequences(engine, session, touched_models):
 
 
 def create_layerinfo_from_app_models(
-        app_label: str,
-        layer_category_id=None,
-        overwrite: bool = True,
-        include_non_spatial: bool = False,
+    app_label: Optional[str] = None,
+    model_name: Optional[str] = None,
+    table_name: Optional[str] = None,
+    layer_category_id: Optional[int] = None,
+    overwrite: bool = True,
+    include_non_spatial: bool = False,
 ):
+    """
+    Generate LayerInfo and LayerAccessibility entries from SQLAlchemy app models.
+
+    Supports targeting an entire app, a specific model, or a specific table name.
+
+    CLI Examples:
+        python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
+        python -m app.damapql.manage create_layerinfo_from_app_models --model_name WASAComplaint
+        python -m app.damapql.manage create_layerinfo_from_app_models --table_name tbl_wasa_complaints
+    """
+    overwrite = _to_bool(overwrite)
+    include_non_spatial = _to_bool(include_non_spatial)
+
+    # --- Step 1: Validate and Resolve Selector ---
+    selectors = {
+        "app_label": app_label,
+        "model_name": model_name,
+        "table_name": table_name,
+    }
+
+    supplied = [k for k, v in selectors.items() if v is not None and str(v).strip()]
+
+    if not supplied:
+        raise ValueError(
+            "At least one selector is required: app_label, model_name, or table_name."
+        )
+    if len(supplied) > 1:
+        raise ValueError(
+            f"Only one selector can be supplied at a time. Received: {', '.join(supplied)}"
+        )
+
+    target_model_cls = None
+
+    # Resolve app_label if model_name or table_name was provided
+    if model_name:
+        target_model_cls = ModelUtils.get_model(model_name.strip())
+        if not target_model_cls:
+            raise ValueError(f"Model '{model_name}' not found.")
+        app_label, _, _ = get_model_app_info(target_model_cls)
+
+    elif table_name:
+        target_model_cls = ModelUtils.get_model_by_tablename(table_name.strip())
+        if not target_model_cls:
+            raise ValueError(f"Table '{table_name}' mapped model not found.")
+        app_label, _, _ = get_model_app_info(target_model_cls)
+
     service = LayerInfoService()
 
     with LayerInfo.managed_session() as session:
+        # --- Step 2: Resolve Default Fallback Defaults ---
         if layer_category_id is None:
             qs = select(LayerCategory).where(LayerCategory.main == "Other")
-            result = session.execute(qs)
-            category = result.scalar_one_or_none()
-
+            category = session.execute(qs).scalar_one_or_none()
             if category is None:
                 raise ValueError("LayerCategory with main='Other' not found")
-
             layer_category_id = category.id
 
         qs = select(LayerQualityLevel).where(LayerQualityLevel.name == "Not Accessed")
-        result = session.execute(qs)
-        quality = result.scalar_one_or_none()
-
+        quality = session.execute(qs).scalar_one_or_none()
         if quality is None:
             raise ValueError("QualityLevel with name='Not Accessed' not found")
 
+        # --- Step 3: Execute Service Generation ---
+        # Note: Ensure your LayerInfoService.save_app_layer_infos accepts
+        # target_model or target_table parameters if you want to skip other models in the app.
         result = service.save_app_layer_infos(
             db=session,
             app_label=app_label,
@@ -930,6 +977,7 @@ def create_layerinfo_from_app_models(
             user=None,
             overwrite=overwrite,
             include_non_spatial=include_non_spatial,
+            target_model=target_model_cls,  # Pass the target model class down
         )
 
         session.commit()
