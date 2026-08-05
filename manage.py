@@ -1065,42 +1065,33 @@ def create_layerinfo_from_raster(
         }
     )
     return obj
+
+import time
+from datetime import datetime, timezone
+from sqlalchemy import text
+from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
+
+
 def reconcile_layerinfo(
-        layer_uuid: str = None,
-        table_name: str = None,
-        schema: str = "public",
-        check: bool = False,
+    layer_uuid: str = None,
+    table_name: str = None,
+    schema: str = "public",
+    check: bool = False,
 ):
     """
     Reconcile LayerInfo and LayerAccessibility metadata against real DB tables.
 
     The actual database table is treated as the source of truth.
-
-    Corrects:
-    - LayerAccessibility columns
-    - geometry column
-    - primary-key columns
-    - LayerInfo SRID
-    - LayerInfo geometry types
-    - native extent
-    - EPSG:3857 extent
-    - row count and reconciliation timestamp
+    Orphan LayerInfo records (where the underlying table does not exist)
+    will be deleted from the database unless check=True.
 
     Usage:
         python -m app.damapql.manage reconcile_layerinfo
-
-        python -m app.damapql.manage reconcile_layerinfo \
-            --layer_uuid <uuid>
-
-        python -m app.damapql.manage reconcile_layerinfo \
-            --table_name wasa_asset_disposal
-
-        python -m app.damapql.manage reconcile_layerinfo \
-            --check true
+        python -m app.damapql.manage reconcile_layerinfo --layer_uuid <uuid>
+        python -m app.damapql.manage reconcile_layerinfo --table_name wasa_asset_disposal
+        python -m app.damapql.manage reconcile_layerinfo --check true
     """
-
-    import time
-    from datetime import datetime, timezone
 
     check = _to_bool(check)
     started_at = time.time()
@@ -1110,16 +1101,7 @@ def reconcile_layerinfo(
         return f'"{str(value).replace(chr(34), chr(34) * 2)}"'
 
     def normalize_geometry_type(value: str | None) -> str | None:
-        """
-        Normalize PostGIS geometry names for DAMap frontend usage.
-
-        Supports values such as:
-            POINT
-            ST_Point
-            LINESTRING
-            MULTIPOLYGON
-            Polyline
-        """
+        """Normalize PostGIS geometry names for DAMap frontend usage."""
         if not value:
             return None
 
@@ -1128,11 +1110,7 @@ def reconcile_layerinfo(
         if raw.upper().startswith("ST_"):
             raw = raw[3:]
 
-        normalized_key = (
-            raw.replace("_", "")
-            .replace(" ", "")
-            .lower()
-        )
+        normalized_key = raw.replace("_", "").replace(" ", "").lower()
 
         geometry_map = {
             "point": "Point",
@@ -1158,43 +1136,31 @@ def reconcile_layerinfo(
 
     def normalize_geometry_types(values) -> list[str] | None:
         normalized = []
-
         for value in values or []:
             geometry_type = normalize_geometry_type(value)
-
             if geometry_type and geometry_type not in normalized:
                 normalized.append(geometry_type)
-
         return normalized or None
 
     def values_different(old_value, new_value) -> bool:
-        """
-        Compare metadata values while handling tuples/lists consistently.
-        """
+        """Compare metadata values while handling tuples/lists consistently."""
         if isinstance(old_value, tuple):
             old_value = list(old_value)
-
         if isinstance(new_value, tuple):
             new_value = list(new_value)
-
         return old_value != new_value
 
     with LayerInfo.managed_session() as session:
-        query = (
-            session.query(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
+        query = session.query(LayerInfo).options(
+            selectinload(LayerInfo.layer_accessibility)
         )
 
         if layer_uuid:
             query = query.filter(LayerInfo.uuid == layer_uuid)
 
         if table_name:
-            query = (
-                query.join(LayerInfo.layer_accessibility)
-                .filter(
-                    LayerAccessibility.params.op("->>")("table_name")
-                    == table_name
-                )
+            query = query.join(LayerInfo.layer_accessibility).filter(
+                LayerAccessibility.params.op("->>")("table_name") == table_name
             )
 
         layers = query.all()
@@ -1216,6 +1182,7 @@ def reconcile_layerinfo(
         checked_count = 0
         changed_count = 0
         updated_count = 0
+        deleted_count = 0
         unchanged_count = 0
         skipped_count = 0
         failed_count = 0
@@ -1265,9 +1232,7 @@ def reconcile_layerinfo(
                 )
                 continue
 
-            db_conn = DBConnection.get_db_connection(
-                con_name=connection_name
-            )
+            db_conn = DBConnection.get_db_connection(con_name=connection_name)
 
             if not db_conn:
                 skipped_count += 1
@@ -1288,8 +1253,9 @@ def reconcile_layerinfo(
                     # -------------------------------------------------
                     # Read actual table columns
                     # -------------------------------------------------
-                    column_rows = conn.execute(
-                        text("""
+                    column_rows = (
+                        conn.execute(
+                            text("""
                             SELECT
                                 column_name,
                                 data_type,
@@ -1299,25 +1265,48 @@ def reconcile_layerinfo(
                               AND table_name = :table_name
                             ORDER BY ordinal_position
                         """),
-                        {
-                            "schema": schema,
-                            "table_name": actual_table_name,
-                        },
-                    ).mappings().all()
-
-                    if not column_rows:
-                        skipped_count += 1
-                        print(
-                            f"   ❌ Skipped: table does not exist: "
-                            f"{schema}.{actual_table_name}\n"
+                            {
+                                "schema": schema,
+                                "table_name": actual_table_name,
+                            },
                         )
+                        .mappings()
+                        .all()
+                    )
+
+                    # -------------------------------------------------
+                    # Handle non-existent table (Delete Record)
+                    # -------------------------------------------------
+                    if not column_rows:
+                        if check:
+                            skipped_count += 1
+                            print(
+                                f"   🗑️ Check Mode: Layer marked for deletion (table does not exist: {schema}.{actual_table_name})\n"
+                            )
+                            continue
+
+                        try:
+                            session.delete(layer)
+                            session.commit()
+                            deleted_count += 1
+                            print(
+                                f"   🗑️ Deleted orphan LayerInfo record '{layer.layer_name}' "
+                                f"({layer.uuid}) because table {schema}.{actual_table_name} does not exist.\n"
+                            )
+                        except Exception as delete_error:
+                            session.rollback()
+                            failed_count += 1
+                            print(
+                                f"   ❌ Failed to delete orphan LayerInfo record: {delete_error}\n"
+                            )
                         continue
 
                     # -------------------------------------------------
                     # Read primary key columns
                     # -------------------------------------------------
-                    pk_rows = conn.execute(
-                        text("""
+                    pk_rows = (
+                        conn.execute(
+                            text("""
                             SELECT kcu.column_name
                             FROM information_schema.table_constraints tc
                             JOIN information_schema.key_column_usage kcu
@@ -1328,16 +1317,16 @@ def reconcile_layerinfo(
                               AND tc.table_name = :table_name
                             ORDER BY kcu.ordinal_position
                         """),
-                        {
-                            "schema": schema,
-                            "table_name": actual_table_name,
-                        },
-                    ).mappings().all()
+                            {
+                                "schema": schema,
+                                "table_name": actual_table_name,
+                            },
+                        )
+                        .mappings()
+                        .all()
+                    )
 
-                    pk_cols = [
-                        row["column_name"]
-                        for row in pk_rows
-                    ]
+                    pk_cols = [row["column_name"] for row in pk_rows]
 
                     # -------------------------------------------------
                     # Detect geometry column
@@ -1347,27 +1336,21 @@ def reconcile_layerinfo(
 
                     for row in column_rows:
                         column_name = row["column_name"]
-                        data_type = str(
-                            row["data_type"] or ""
-                        ).lower()
-                        udt_name = str(
-                            row["udt_name"] or ""
-                        ).lower()
+                        data_type = str(row["data_type"] or "").lower()
+                        udt_name = str(row["udt_name"] or "").lower()
 
-                        if udt_name in {
-                            "geometry",
-                            "geography",
-                        }:
+                        if udt_name in {"geometry", "geography"}:
                             geometry_columns.append(column_name)
                             continue
 
-                        columns.append({
-                            "name": column_name,
-                            "d_type":
-                                ManageDataFrameUtils.getColGenericType(
+                        columns.append(
+                            {
+                                "name": column_name,
+                                "d_type": ManageDataFrameUtils.getColGenericType(
                                     data_type
                                 ),
-                        })
+                            }
+                        )
 
                     # Prefer the existing geometry column if it is valid.
                     old_params = dict(access.params or {})
@@ -1377,9 +1360,7 @@ def reconcile_layerinfo(
                         geometry_column = old_geometry_column
                     else:
                         geometry_column = (
-                            geometry_columns[0]
-                            if geometry_columns
-                            else None
+                            geometry_columns[0] if geometry_columns else None
                         )
 
                     # -------------------------------------------------
@@ -1392,13 +1373,11 @@ def reconcile_layerinfo(
                     row_count = 0
                     non_null_geometry_count = 0
 
-                    # Total rows should also work for non-spatial tables.
                     row_count = int(
                         conn.execute(
-                            text(
-                                f"SELECT COUNT(*) FROM {safe_table}"
-                            )
-                        ).scalar() or 0
+                            text(f"SELECT COUNT(*) FROM {safe_table}")
+                        ).scalar()
+                        or 0
                     )
 
                     # -------------------------------------------------
@@ -1407,10 +1386,9 @@ def reconcile_layerinfo(
                     if geometry_column:
                         safe_geometry = quote_ident(geometry_column)
 
-                        # First use geometry_columns metadata. This works
-                        # even when the table contains no features.
-                        catalog_metadata = conn.execute(
-                            text("""
+                        catalog_metadata = (
+                            conn.execute(
+                                text("""
                                 SELECT
                                     srid,
                                     type
@@ -1420,12 +1398,15 @@ def reconcile_layerinfo(
                                   AND f_geometry_column = :geometry_column
                                 LIMIT 1
                             """),
-                            {
-                                "schema": schema,
-                                "table_name": actual_table_name,
-                                "geometry_column": geometry_column,
-                            },
-                        ).mappings().first()
+                                {
+                                    "schema": schema,
+                                    "table_name": actual_table_name,
+                                    "geometry_column": geometry_column,
+                                },
+                            )
+                            .mappings()
+                            .first()
+                        )
 
                         if catalog_metadata:
                             catalog_srid = catalog_metadata.get("srid")
@@ -1434,17 +1415,17 @@ def reconcile_layerinfo(
                             if catalog_srid not in (None, 0):
                                 srid = int(catalog_srid)
 
-                            if catalog_type and str(
+                            if (
                                 catalog_type
-                            ).upper() != "GEOMETRY":
+                                and str(catalog_type).upper() != "GEOMETRY"
+                            ):
                                 geometry_types = normalize_geometry_types(
                                     [catalog_type]
                                 )
 
-                        # Inspect actual records. This corrects generic
-                        # geometry-column declarations and mixed tables.
-                        actual_metadata = conn.execute(
-                            text(f"""
+                        actual_metadata = (
+                            conn.execute(
+                                text(f"""
                                 SELECT
                                     COUNT(*) AS geometry_count,
                                     ARRAY_AGG(
@@ -1461,13 +1442,14 @@ def reconcile_layerinfo(
                                 WHERE {safe_geometry} IS NOT NULL
                                   AND NOT ST_IsEmpty({safe_geometry})
                             """)
-                        ).mappings().first()
+                            )
+                            .mappings()
+                            .first()
+                        )
 
                         if actual_metadata:
                             non_null_geometry_count = int(
-                                actual_metadata.get(
-                                    "geometry_count"
-                                ) or 0
+                                actual_metadata.get("geometry_count") or 0
                             )
 
                             actual_types = normalize_geometry_types(
@@ -1486,8 +1468,6 @@ def reconcile_layerinfo(
                             ]
 
                             if actual_srids:
-                                # Use the dominant/first valid SRID.
-                                # Mixed SRIDs are reported below.
                                 srid = actual_srids[0]
 
                                 if len(set(actual_srids)) > 1:
@@ -1497,8 +1477,9 @@ def reconcile_layerinfo(
                                     )
 
                         # Native extent
-                        extent_row = conn.execute(
-                            text(f"""
+                        extent_row = (
+                            conn.execute(
+                                text(f"""
                                 SELECT
                                     ST_XMin(bounds)::float AS minx,
                                     ST_YMin(bounds)::float AS miny,
@@ -1517,7 +1498,10 @@ def reconcile_layerinfo(
                                 ) q
                                 WHERE bounds IS NOT NULL
                             """)
-                        ).mappings().first()
+                            )
+                            .mappings()
+                            .first()
+                        )
 
                         if extent_row:
                             extent = [
@@ -1532,8 +1516,9 @@ def reconcile_layerinfo(
                             if srid == 3857:
                                 extent_3857 = list(extent)
                             else:
-                                extent_3857_row = conn.execute(
-                                    text(f"""
+                                extent_3857_row = (
+                                    conn.execute(
+                                        text(f"""
                                         SELECT
                                             ST_XMin(bounds)::float AS minx,
                                             ST_YMin(bounds)::float AS miny,
@@ -1556,7 +1541,10 @@ def reconcile_layerinfo(
                                         ) q
                                         WHERE bounds IS NOT NULL
                                     """)
-                                ).mappings().first()
+                                    )
+                                    .mappings()
+                                    .first()
+                                )
 
                                 if extent_3857_row:
                                     extent_3857 = [
@@ -1580,20 +1568,17 @@ def reconcile_layerinfo(
                     "pk_cols": pk_cols,
                 }
 
-                old_extra_metadata = dict(
-                    layer.extra_metadata or {}
-                )
+                old_extra_metadata = dict(layer.extra_metadata or {})
 
                 new_extra_metadata = {
                     **old_extra_metadata,
                     "row_count": row_count,
-                    "non_null_geometry_count":
-                        non_null_geometry_count,
+                    "non_null_geometry_count": non_null_geometry_count,
                     "layerinfo_reconciled": True,
-                    "layerinfo_reconciled_at":
-                        datetime.now(timezone.utc).isoformat(),
-                    "layerinfo_reconciled_from":
-                        f"{schema}.{actual_table_name}",
+                    "layerinfo_reconciled_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                    "layerinfo_reconciled_from": f"{schema}.{actual_table_name}",
                 }
 
                 field_changes = {}
@@ -1662,9 +1647,7 @@ def reconcile_layerinfo(
                     )
                     corrections["extent_3857"] += 1
 
-                if old_extra_metadata.get(
-                    "row_count"
-                ) != row_count:
+                if old_extra_metadata.get("row_count") != row_count:
                     field_changes["row_count"] = (
                         old_extra_metadata.get("row_count"),
                         row_count,
@@ -1673,10 +1656,7 @@ def reconcile_layerinfo(
 
                 changed = bool(field_changes)
 
-                print(
-                    f"   Table      : "
-                    f"{schema}.{actual_table_name}"
-                )
+                print(f"   Table      : {schema}.{actual_table_name}")
                 print(f"   Connection : {connection_name}")
                 print(f"   Columns    : {len(columns)}")
                 print(f"   PK         : {pk_cols}")
@@ -1684,10 +1664,7 @@ def reconcile_layerinfo(
                 print(f"   Geom types : {geometry_types}")
                 print(f"   SRID       : {srid}")
                 print(f"   Rows       : {row_count}")
-                print(
-                    f"   Spatial rows: "
-                    f"{non_null_geometry_count}"
-                )
+                print(f"   Spatial rows: {non_null_geometry_count}")
 
                 if not changed:
                     unchanged_count += 1
@@ -1703,14 +1680,11 @@ def reconcile_layerinfo(
                     new_value,
                 ) in field_changes.items():
                     print(
-                        f"      - {field_name}: "
-                        f"{old_value} -> {new_value}"
+                        f"      - {field_name}: {old_value} -> {new_value}"
                     )
 
                 if check:
-                    print(
-                        "   🟡 Check mode: changes were not saved.\n"
-                    )
+                    print("   🟡 Check mode: changes were not saved.\n")
                     continue
 
                 # -----------------------------------------------------
@@ -1720,9 +1694,6 @@ def reconcile_layerinfo(
                     access.params = new_params
                     flag_modified(access, "params")
 
-                    # Setting None is intentional because stale values
-                    # should be removed when the actual table no longer
-                    # contains valid spatial metadata.
                     layer.srid = int(srid) if srid else None
                     layer.geom_type = geometry_types
                     layer.extent = extent
@@ -1744,20 +1715,16 @@ def reconcile_layerinfo(
                     failed_count += 1
 
                     print(
-                        f"   ❌ Failed to save reconciliation: "
-                        f"{save_error}\n"
+                        f"   ❌ Failed to save reconciliation: {save_error}\n"
                     )
 
             except Exception as error:
                 session.rollback()
                 failed_count += 1
 
-                print(
-                    f"   ❌ Reconciliation failed: {error}\n"
-                )
+                print(f"   ❌ Reconciliation failed: {error}\n")
                 da_logger.exception(
-                    f"LayerInfo reconciliation failed for "
-                    f"{layer.layer_name}: {error}"
+                    f"LayerInfo reconciliation failed for {layer.layer_name}: {error}"
                 )
 
         elapsed = time.time() - started_at
@@ -1768,49 +1735,36 @@ def reconcile_layerinfo(
         print(f"Checked layers       : {checked_count}")
         print(f"Changed layers       : {changed_count}")
         print(f"Updated layers       : {updated_count}")
+        print(f"Deleted layers       : {deleted_count}")
         print(f"Unchanged layers     : {unchanged_count}")
         print(f"Skipped layers       : {skipped_count}")
         print(f"Failed layers        : {failed_count}")
         print("------------------------------------------------")
         print(f"Columns corrected    : {corrections['columns']}")
-        print(
-            f"Geometry col fixed   : "
-            f"{corrections['geometry_column']}"
-        )
-        print(
-            f"Primary keys fixed   : "
-            f"{corrections['primary_key']}"
-        )
+        print(f"Geometry col fixed   : {corrections['geometry_column']}")
+        print(f"Primary keys fixed   : {corrections['primary_key']}")
         print(f"SRIDs corrected      : {corrections['srid']}")
-        print(
-            f"Geometry types fixed : "
-            f"{corrections['geometry_type']}"
-        )
+        print(f"Geometry types fixed : {corrections['geometry_type']}")
         print(f"Extents corrected    : {corrections['extent']}")
-        print(
-            f"3857 extents fixed   : "
-            f"{corrections['extent_3857']}"
-        )
-        print(
-            f"Row counts updated   : "
-            f"{corrections['row_count']}"
-        )
+        print(f"3857 extents fixed   : {corrections['extent_3857']}")
+        print(f"Row counts updated   : {corrections['row_count']}")
         print(f"Completed in         : {elapsed:.2f} seconds")
 
         if check:
             print(
-                "\nℹ️ Check mode was enabled. "
-                "No database changes were saved."
+                "\nℹ️ Check mode was enabled. No database changes were saved."
             )
 
+
 def refresh_layer_accessibility(
-        table_name: str = None,
-        layer_uuid: str = None,
-        check: bool = False,
-        schema: str = "public",
+    table_name: str = None,
+    layer_uuid: str = None,
+    check: bool = False,
+    schema: str = "public",
 ):
     """
     Refresh DB-backed LayerAccessibility metadata from the real database table.
+    Orphan LayerInfo records (where table does not exist) are deleted unless check=True.
 
     Usage:
         python -m app.damapql.manage refresh_layer_accessibility
@@ -1819,16 +1773,12 @@ def refresh_layer_accessibility(
         python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal --check true
     """
 
-    import time
-    from datetime import datetime, timezone
-
     check = _to_bool(check)
     started_at = time.time()
 
     with LayerInfo.managed_session() as session:
-        query = (
-            session.query(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
+        query = session.query(LayerInfo).options(
+            selectinload(LayerInfo.layer_accessibility)
         )
 
         if table_name:
@@ -1854,6 +1804,7 @@ def refresh_layer_accessibility(
 
         checked_count = 0
         updated_count = 0
+        deleted_count = 0
         skipped_count = 0
         failed_count = 0
 
@@ -1882,20 +1833,26 @@ def refresh_layer_accessibility(
 
             if not access.table_name or not access.conn_name:
                 skipped_count += 1
-                print(f"⏭️  {layer.layer_name}: missing table_name or conn_name")
+                print(
+                    f"⏭️  {layer.layer_name}: missing table_name or conn_name"
+                )
                 continue
 
             db_conn = DBConnection.get_db_connection(con_name=access.conn_name)
             if not db_conn:
                 skipped_count += 1
-                print(f"❌ {layer.layer_name}: DB connection not found: {access.conn_name}")
+                print(
+                    f"❌ {layer.layer_name}: DB connection not found: {access.conn_name}"
+                )
                 continue
 
             engine = db_conn.get_sqlalchemy_engine()
 
             try:
                 with engine.connect() as conn:
-                    col_rows = conn.execute(text("""
+                    col_rows = (
+                        conn.execute(
+                            text("""
                         SELECT 
                             column_name,
                             data_type,
@@ -1904,17 +1861,42 @@ def refresh_layer_accessibility(
                         WHERE table_schema = :schema
                           AND table_name = :table_name
                         ORDER BY ordinal_position
-                    """), {
-                        "schema": schema,
-                        "table_name": access.table_name
-                    }).mappings().all()
+                    """),
+                            {"schema": schema, "table_name": access.table_name},
+                        )
+                        .mappings()
+                        .all()
+                    )
 
+                    # -------------------------------------------------
+                    # Handle non-existent table (Delete Record)
+                    # -------------------------------------------------
                     if not col_rows:
-                        skipped_count += 1
-                        print(f"❌ {layer.layer_name}: table not found: {schema}.{access.table_name}")
+                        if check:
+                            skipped_count += 1
+                            print(
+                                f"🗑️  {layer.layer_name}: marked for deletion (table not found: {schema}.{access.table_name})"
+                            )
+                            continue
+
+                        try:
+                            session.delete(layer)
+                            session.commit()
+                            deleted_count += 1
+                            print(
+                                f"🗑️  {layer.layer_name}: deleted orphan layer record (table not found: {schema}.{access.table_name})\n"
+                            )
+                        except Exception as del_err:
+                            session.rollback()
+                            failed_count += 1
+                            print(
+                                f"❌ {layer.layer_name}: failed to delete orphan layer: {del_err}\n"
+                            )
                         continue
 
-                    pk_rows = conn.execute(text("""
+                    pk_rows = (
+                        conn.execute(
+                            text("""
                         SELECT kcu.column_name
                         FROM information_schema.table_constraints tc
                         JOIN information_schema.key_column_usage kcu
@@ -1924,10 +1906,12 @@ def refresh_layer_accessibility(
                           AND tc.table_schema = :schema
                           AND tc.table_name = :table_name
                         ORDER BY kcu.ordinal_position
-                    """), {
-                        "schema": schema,
-                        "table_name": access.table_name
-                    }).mappings().all()
+                    """),
+                            {"schema": schema, "table_name": access.table_name},
+                        )
+                        .mappings()
+                        .all()
+                    )
 
                     geom_col = None
                     columns = []
@@ -1941,10 +1925,14 @@ def refresh_layer_accessibility(
                             geom_col = col_name
                             continue
 
-                        columns.append({
-                            "name": col_name,
-                            "d_type": ManageDataFrameUtils.getColGenericType(data_type)
-                        })
+                        columns.append(
+                            {
+                                "name": col_name,
+                                "d_type": ManageDataFrameUtils.getColGenericType(
+                                    data_type
+                                ),
+                            }
+                        )
 
                     pk_cols = [r["column_name"] for r in pk_rows]
 
@@ -1955,12 +1943,16 @@ def refresh_layer_accessibility(
                     row_count = 0
 
                     if geom_col:
-                        safe_geom = f'"{geom_col.replace(chr(34), chr(34) * 2)}"'
+                        safe_geom = (
+                            f'"{geom_col.replace(chr(34), chr(34) * 2)}"'
+                        )
                         safe_schema = schema.replace('"', '""')
                         safe_table_name = access.table_name.replace('"', '""')
                         safe_table = f'"{safe_schema}"."{safe_table_name}"'
 
-                        meta = conn.execute(text(f"""
+                        meta = (
+                            conn.execute(
+                                text(f"""
                             SELECT 
                                 COUNT(*) AS row_count,
                                 ST_SRID({safe_geom}) AS srid,
@@ -1970,14 +1962,20 @@ def refresh_layer_accessibility(
                             GROUP BY ST_SRID({safe_geom}), GeometryType({safe_geom})
                             ORDER BY COUNT(*) DESC
                             LIMIT 1
-                        """)).mappings().first()
+                        """)
+                            )
+                            .mappings()
+                            .first()
+                        )
 
                         if meta:
                             srid = meta["srid"]
                             geom_type = meta["geom_type"]
                             row_count = int(meta["row_count"] or 0)
 
-                        ext = conn.execute(text(f"""
+                        ext = (
+                            conn.execute(
+                                text(f"""
                             SELECT 
                                 ST_XMin(e)::float AS minx,
                                 ST_YMin(e)::float AS miny,
@@ -1989,7 +1987,11 @@ def refresh_layer_accessibility(
                                 WHERE {safe_geom} IS NOT NULL
                             ) AS q
                             WHERE e IS NOT NULL
-                        """)).mappings().first()
+                        """)
+                            )
+                            .mappings()
+                            .first()
+                        )
 
                         if ext:
                             extent = [
@@ -2000,7 +2002,9 @@ def refresh_layer_accessibility(
                             ]
 
                         if extent and srid:
-                            ext3857 = conn.execute(text(f"""
+                            ext3857 = (
+                                conn.execute(
+                                    text(f"""
                                 SELECT 
                                     ST_XMin(e)::float AS minx,
                                     ST_YMin(e)::float AS miny,
@@ -2014,7 +2018,11 @@ def refresh_layer_accessibility(
                                     WHERE {safe_geom} IS NOT NULL
                                 ) AS q
                                 WHERE e IS NOT NULL
-                            """)).mappings().first()
+                            """)
+                                )
+                                .mappings()
+                                .first()
+                            )
 
                             if ext3857:
                                 extent_3857 = [
@@ -2032,11 +2040,7 @@ def refresh_layer_accessibility(
                     if c.get("name")
                 }
 
-                new_cols = {
-                    c.get("name")
-                    for c in columns
-                    if c.get("name")
-                }
+                new_cols = {c.get("name") for c in columns if c.get("name")}
 
                 added_cols = sorted(new_cols - old_cols)
                 removed_cols = sorted(old_cols - new_cols)
@@ -2055,15 +2059,17 @@ def refresh_layer_accessibility(
                 extent_changed = layer.extent != extent
                 extent_3857_changed = layer.extent_3857 != extent_3857
 
-                changed = any([
-                    columns_changed,
-                    geom_changed,
-                    pk_changed,
-                    srid_changed,
-                    geom_type_changed,
-                    extent_changed,
-                    extent_3857_changed,
-                ])
+                changed = any(
+                    [
+                        columns_changed,
+                        geom_changed,
+                        pk_changed,
+                        srid_changed,
+                        geom_type_changed,
+                        extent_changed,
+                        extent_3857_changed,
+                    ]
+                )
 
                 checked_count += 1
 
@@ -2096,7 +2102,9 @@ def refresh_layer_accessibility(
                     print(f"   SRID Fix     : {layer.srid} -> {srid}")
 
                 if geom_type_changed:
-                    print(f"   Type Fix     : {old_geom_type} -> {new_geom_type}")
+                    print(
+                        f"   Type Fix     : {old_geom_type} -> {new_geom_type}"
+                    )
 
                 if extent_changed:
                     print("   Extent       : updated")
@@ -2197,6 +2205,7 @@ def refresh_layer_accessibility(
         print("=========================================")
         print(f"Checked layers  : {checked_count}")
         print(f"Updated layers  : {updated_count}")
+        print(f"Deleted layers  : {deleted_count}")
         print(f"Skipped layers  : {skipped_count}")
         print(f"Failed layers   : {failed_count}")
         print(f"Columns added   : {total_added_cols}")
