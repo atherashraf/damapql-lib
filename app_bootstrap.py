@@ -17,6 +17,7 @@ from app.damapql.settings import (
 )
 from app.lbdc.routers import lbdc_router
 
+
 AppExtension = Callable[[FastAPI], None]
 
 
@@ -75,8 +76,6 @@ def configure_extensions(
 
 # app/core/model_loader.py or directly in create_app file
 
-import importlib
-from digitalarzengine.utils.singletons import da_logger
 
 def load_all_app_models() -> None:
     """

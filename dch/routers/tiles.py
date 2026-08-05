@@ -97,6 +97,7 @@ async def get_layer_mvt(
     allowed_cols = set()
     layer_name = identifier
     zoom_range = [0, 30]
+    feature_count: int | None = None
 
     # -------------------------------------------------------------
     # RESOLUTION PATH 1: Standard LayerInfo UUID
@@ -109,9 +110,11 @@ async def get_layer_mvt(
         if not access:
             return Response(status_code=204)
 
-        if info.count_layer_rows() == 0:
+        layer_total_rows = info.count_layer_rows()
+        if layer_total_rows == 0:
             return Response(content=b"", media_type="application/vnd.mapbox-vector-tile")
 
+        feature_count = layer_total_rows
         external_engine = access.get_external_engine()
         target_table = access.table_name
         target_geom = access.geometry_col
@@ -182,9 +185,11 @@ async def get_layer_mvt(
         requested_cols = [c for c in requested_cols if c in allowed_cols]
     requested_cols = sorted(set(requested_cols))
 
+    # Incorporate feature_count into variant hash
     variant = MVTCache.build_variant(
         cols=requested_cols,
         resolution=resolution,
+        feature_count=feature_count,
         extra={"table": target_table, "model": model_name or ""}
     )
 

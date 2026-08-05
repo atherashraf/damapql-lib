@@ -158,6 +158,7 @@ async def upload_sld_style(
         try:
             parsed_style = json.loads(content.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            da_logger.exception(f"Failed to parse JSON style file: {content}")
             raise HTTPException(status_code=400, detail="Invalid JSON style file")
 
     else:
@@ -361,7 +362,7 @@ async def get_legend_graphic(uuid: str):
         cp = COGRaster.create_color_map(style) if style else None
 
         labels = []
-        palette = []
+        raw_palette = []
 
         # --- PATH A: Custom Styling Exists ---
         if cp or style:
@@ -374,20 +375,31 @@ async def get_legend_graphic(uuid: str):
             elif isinstance(cp, dict) and len(cp) > 0:
                 labels = [str(k) for k in cp.keys()]
 
-            palette = (
+            raw_palette = (
                 style.get("palette")
                 or style.get("colors")
                 or style.get("color_ramp")
             )
 
-            if not palette and isinstance(cp, list):
-                palette = [f"#{r:02x}{g:02x}{b:02x}" for _, (r, g, b, *_) in cp]
+            if not raw_palette and isinstance(cp, list):
+                raw_palette = [f"#{r:02x}{g:02x}{b:02x}" for _, (r, g, b, *_) in cp]
+
+        # Convert raw_palette into a clean list of colors regardless of input structure
+        palette = []
+        if isinstance(raw_palette, dict):
+            # If dictionary keys are numeric/sortable, preserve sorted order
+            try:
+                sorted_keys = sorted(raw_palette.keys(), key=lambda k: float(k))
+                palette = [raw_palette[k] for k in sorted_keys]
+            except (ValueError, TypeError):
+                palette = list(raw_palette.values())
+        elif isinstance(raw_palette, (list, tuple)):
+            palette = list(raw_palette)
 
         # --- PATH B: Fallback Grayscale Mode (Matches Tile Renderer Min/Max) ---
         if not labels or not palette:
             min_v, max_v = 0.0, 100.0
             try:
-                # Retrieve actual raster file path from LayerInfo OR DataModel
                 raster_path = getattr(info, "file_path", None) or getattr(info, "s3_path", None)
 
                 if raster_path:
@@ -399,7 +411,6 @@ async def get_legend_graphic(uuid: str):
             except Exception as err:
                 da_logger.error(f"Failed to fetch min/max from raster for legend: {err}")
 
-            # Display rounded actual raster range (e.g. 0.0 to 42.5)
             labels = [str(round(min_v, 2)), str(round(max_v, 2))]
             palette = ["#000000", "#FFFFFF"]  # Black to White gradient
 
@@ -407,11 +418,13 @@ async def get_legend_graphic(uuid: str):
         is_horizontal = False
 
         fig: Figure = plt.figure(
-            figsize=[500 / 96, 1] if is_horizontal else [500 / 96, max(0.4 * len(labels), 1.2)]
+            figsize=[500 / 96, 1] if is_horizontal else [500 / 96, max(0.4 * len(labels), 1.2)],
+            facecolor="white"  # Ensure figure backdrop is white
         )
         ax: Axes = fig.add_axes(
             [0.05, 0.8, 0.9, 0.8] if is_horizontal else [0.1, 0.15, 0.05, 0.8]
         )
+        ax.set_facecolor("white")  # Ensure axes backdrop is white
 
         cmap = LinearSegmentedColormap.from_list("cdict", palette)
 
@@ -431,7 +444,8 @@ async def get_legend_graphic(uuid: str):
             cbar.ax.set_yticklabels(labels)
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", transparent=True)
+        # Changed transparent=True to facecolor="white"
+        fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
         return Response(

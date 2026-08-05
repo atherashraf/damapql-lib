@@ -109,16 +109,19 @@ class RasterStatsService:
             data = raster.get_data_array(1)
             labels = style.get("labels", [])
 
-            spatial_res = raster.get_spatial_resolution(in_meter=True)
-            res_in_km = (spatial_res[0] / 1000, spatial_res[1] / 1000)
-
+            # spatial_res = raster.get_spatial_resolution(in_meter=True)
+            # res_in_km = (spatial_res[0] , spatial_res[1] )
+            # da_logger.info("res in km", res_in_km)
             res = BandProcess.get_value_area_data(
                 data,
                 raster.get_nodata_value(),
-                res_in_km,
+                raster.get_spatial_resolution(in_meter=True),
                 values,
                 labels,
-                "sq. km.",
+                unit="m2",
+                to_km2=True,
+                include_percent=True,
+
             )
             return pd.DataFrame(res).rename(columns={"area": "area_sq_km"})
 

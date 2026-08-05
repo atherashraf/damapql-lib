@@ -593,7 +593,7 @@ class DBQuery:
         df = pd.DataFrame(rs.mappings().all())
 
         if df.empty:
-            return gpd.GeoDataFrame(columns=df.columns, crs=crs)
+            return gpd.GeoDataFrame(columns=df.columns)
 
         if geom_col in df.columns:
             def parse_geom(x):

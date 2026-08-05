@@ -3,21 +3,21 @@ import json
 import math
 import re
 
-import mercantile
 import geopandas as gpd
+import mapbox_vector_tile
+import mercantile
 import numpy as np
 import shapely
-from digitalarzengine.io.managers.db_manager import GeoDBManager
-from digitalarzengine.utils.singletons import da_logger
 from shapely import transform
-from shapely.geometry import box, LineString, Point, MultiLineString, MultiPoint, mapping
-import mapbox_vector_tile
+from shapely.geometry import box, LineString, Point, MultiLineString, MultiPoint, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.damapql.dch.models import LayerInfo
 from app.damapql.utils.adapters.db import DBBase
+from digitalarzengine.io.managers.db_manager import GeoDBManager
+from digitalarzengine.utils.singletons import da_logger
 
 
 class MVTUtils:
@@ -56,8 +56,7 @@ class MVTUtils:
 
         def to_tile_coord(coord):
             x_merc, y_merc = coord.x, coord.y
-            tile_coord = (int((x_merc - x0) * cls.MVT_EXTENT / x_span),
-                          int((y_merc - y0) * cls.MVT_EXTENT / y_span))
+            tile_coord = (int((x_merc - x0) * cls.MVT_EXTENT / x_span), int((y_merc - y0) * cls.MVT_EXTENT / y_span))
             return tile_coord
 
         geom_gdf['geom'] = geom_gdf['geom'].apply(lambda geom: geom_to_tile(geom))
@@ -108,8 +107,8 @@ class MVTUtils:
                 'AS geom, %s ' \
                 'FROM "%s" ' \
                 'WHERE "%s" && ST_TileEnvelope(%s, %s, %s)' \
-                ') SELECT ST_AsMVT(mvtgeom.*) FROM mvtgeom' % (
-                    geom_field, z, x, y, fields, table_name, geom_field, z, x, y)
+                ') SELECT ST_AsMVT(mvtgeom.*) FROM mvtgeom' % (geom_field, z, x, y, fields, table_name, geom_field, z,
+                                                               x, y)
         da_logger.debug(query)
         return query
 
@@ -126,17 +125,12 @@ class MVTUtils:
         pk_col = info.pk_cols_as_pk
 
         geom_col = layer_access.geometry_col
-        safe_cols_list = [
-            f'"{c}"' for c in layer_access.cols_name
-            if c != geom_col and c.lower() != 'geom' and c.lower() != 'pk'
-        ]
+        safe_cols_list = [f'"{c}"' for c in layer_access.cols_name if
+            c != geom_col and c.lower() != 'geom' and c.lower() != 'pk']
         cols = ", ".join(safe_cols_list) if safe_cols_list else ""
 
         geom_transform = (
-            f'ST_Simplify(ST_Transform("{geom_col}", 3857), {resolution})'
-            if resolution > 0
-            else f'ST_Transform("{geom_col}", 3857)'
-        )
+            f'ST_Simplify(ST_Transform("{geom_col}", 3857), {resolution})' if resolution > 0 else f'ST_Transform("{geom_col}", 3857)')
 
         g_select_attrs = (", " + cols) if cols else ""
         mvtgeom_select_attrs = (", " + cols) if cols else ""
@@ -226,6 +220,7 @@ class MVTUtils:
         gdf = gdf[gdf[g_col].notnull()]
         return gdf
 
+
     @classmethod
     def gdf_to_mvt(cls, gdf: gpd.GeoDataFrame, tile_extent_3857: tuple, name: str) -> bytes:
         if gdf.empty:
@@ -259,23 +254,103 @@ class MVTUtils:
                     else:
                         raise NotImplementedError(f"Geometry type {geom_type} not supported.")
 
-                    features.append({
-                        "geometry": geom,
-                        "properties": {
-                            k: v for k, v in row.items() if k != geometry_column
-                        }
-                    })
+                    def clean_val(v):
+                        if v is None or (isinstance(v, float) and math.isnan(v)):
+                            return ""  # Or None, if you prefer, but "" keeps the key in JS clients
+                        if isinstance(v, (np.integer, np.floating)):
+                            return v.item()
+                        return str(v) if not isinstance(v, (str, int, float, bool)) else v
+
+                    features.append({"geometry": geom,
+                        "properties": {k: clean_val(v) for k, v in row.items() if k != geometry_column}})
 
                 except Exception as e:
                     da_logger.exception(f"Failed to process geometry: {e}")
 
         if features:
-            return mapbox_vector_tile.encode({
-                "name": name,
-                "features": features
-            }, y_coord_down=True, extents=4096)
+            return mapbox_vector_tile.encode({"name": name, "features": features}, y_coord_down=True, extents=4096)
         else:
             return b''
+
+    @classmethod
+    def mvt_to_gdf(cls, mvt_bytes: bytes, layer_name: str = None, tile_extent_3857: tuple = None,
+            y_coord_down: bool = True) -> gpd.GeoDataFrame:
+        """
+        Decodes raw MVT (Mapbox Vector Tile) bytes into a GeoPandas GeoDataFrame.
+
+        :param mvt_bytes: The raw MVT binary content.
+        :param layer_name: Optional name of the layer to extract. If None, decodes the first layer found.
+        :param tile_extent_3857: Tuple of (minx, miny, maxx, maxy) in EPSG:3857.
+                                  If provided, coordinates are transformed from local tile space to EPSG:3857.
+                                  If None, geometries remain in MVT tile pixel coordinates (0 to 4096).
+        :param y_coord_down: Standard MVT layout has Y pointing downward (top-left origin).
+        :return: A GeoDataFrame with parsed geometry and feature properties.
+        """
+        if not mvt_bytes:
+            return gpd.GeoDataFrame()
+
+        # 1. Decode MVT binary data
+        tile_data = mapbox_vector_tile.decode(mvt_bytes, y_coord_down=y_coord_down)
+
+        if not tile_data:
+            return gpd.GeoDataFrame()
+
+        # 2. Extract requested layer or target the first available layer
+        if layer_name:
+            if layer_name not in tile_data:
+                da_logger.warning(
+                    f"Layer '{layer_name}' not found in MVT data. Available layers: {list(tile_data.keys())}")
+                return gpd.GeoDataFrame()
+            target_layer = tile_data[layer_name]
+        else:
+            first_key = next(iter(tile_data))
+            target_layer = tile_data[first_key]
+
+        features = target_layer.get("features", [])
+        if not features:
+            return gpd.GeoDataFrame()
+
+        # 3. Reconstruct Shapely Geometries and Properties
+        records = []
+        for feat in features:
+            geom_dict = feat.get("geometry")
+            properties = feat.get("properties", {}).copy()
+
+            if "id" in feat and feat["id"] is not None:
+                properties["mvt_id"] = feat["id"]
+
+            try:
+                # Convert GeoJSON-like dict to Shapely geometry
+                geom = shape(geom_dict)
+                properties["geometry"] = geom
+                records.append(properties)
+            except Exception as e:
+                da_logger.exception(f"Failed to parse feature geometry in MVT decoding: {e}")
+
+        if not records:
+            return gpd.GeoDataFrame()
+
+        gdf = gpd.GeoDataFrame(records)
+
+        # 4. (Optional) Invert the Tile Space Transformation back to EPSG:3857
+        if tile_extent_3857:
+            minx, miny, maxx, maxy = tile_extent_3857
+            extent_x = maxx - minx
+            extent_y = maxy - miny
+
+            def to_3857_coords(coords):
+                x = coords[:, 0]
+                y = coords[:, 1]
+
+                # Reverse scaling and translation matching transform_geometry_to_tile_space
+                wx = minx + (x / cls.MVT_EXTENT) * extent_x
+                wy = maxy - (y / cls.MVT_EXTENT) * extent_y if y_coord_down else miny + (y / cls.MVT_EXTENT) * extent_y
+                return np.column_stack([wx, wy])
+
+            gdf.geometry = gdf.geometry.apply(lambda g: transform(g, to_3857_coords) if g else None)
+            gdf.crs = f"EPSG:{cls.SRID_SPHERICAL_MERCATOR}"
+
+        return gdf
 
 
 class MVTCache:
@@ -316,15 +391,12 @@ class MVTCache:
         return cls.ensure_cache_table(session, layer_uuid)
 
     @staticmethod
-    def build_variant(
-        cols: list[str] | None = None,
-        resolution: float = 0,
-        extra: dict | None = None
-    ) -> str:
-        normalized = {
-            "cols": sorted(set(cols or [])),
-            "resolution": resolution,
-        }
+    def build_variant(cols: list[str] | None = None, resolution: float = 0, feature_count: int | None = None,
+            extra: dict | None = None) -> str:
+        normalized = {"cols": sorted(set(cols or [])), "resolution": resolution, }
+
+        if feature_count is not None:
+            normalized["feature_count"] = feature_count
 
         if extra:
             normalized.update(extra)
@@ -339,29 +411,12 @@ class MVTCache:
         with Session(engine) as session:
             table = cls.get_cache_table(session, layer_uuid)
 
-            return session.execute(
-                text(
-                    f"SELECT mvt FROM {table} "
-                    f"WHERE x=:x AND y=:y AND z=:z AND variant=:variant"
-                ),
-                {
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "variant": variant,
-                },
-            ).scalar_one_or_none()
+            return session.execute(text(f"SELECT mvt FROM {table} "
+                                        f"WHERE x=:x AND y=:y AND z=:z AND variant=:variant"),
+                {"x": x, "y": y, "z": z, "variant": variant, }, ).scalar_one_or_none()
 
     @classmethod
-    def set_cached_tile(
-        cls,
-        layer_uuid: str,
-        x: int,
-        y: int,
-        z: int,
-        variant: str,
-        mvt_bytes: bytes
-    ):
+    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes):
         if not mvt_bytes:
             return
 
@@ -370,21 +425,11 @@ class MVTCache:
         with Session(engine) as session:
             table = cls.get_cache_table(session, layer_uuid)
 
-            session.execute(
-                text(
-                    f"INSERT INTO {table} (x, y, z, variant, mvt) "
-                    f"VALUES (:x, :y, :z, :variant, :mvt) "
-                    f"ON CONFLICT (x, y, z, variant) "
-                    f"DO UPDATE SET mvt = EXCLUDED.mvt"
-                ),
-                {
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "variant": variant,
-                    "mvt": mvt_bytes,
-                },
-            )
+            session.execute(text(f"INSERT INTO {table} (x, y, z, variant, mvt) "
+                                 f"VALUES (:x, :y, :z, :variant, :mvt) "
+                                 f"ON CONFLICT (x, y, z, variant) "
+                                 f"DO UPDATE SET mvt = EXCLUDED.mvt"),
+                {"x": x, "y": y, "z": z, "variant": variant, "mvt": mvt_bytes, }, )
             session.commit()
 
     @classmethod
@@ -407,13 +452,8 @@ class MVTCache:
         with Session(engine) as session:
             table = cls.get_cache_table(session, layer_uuid)
 
-            result = session.execute(
-                text(f"DELETE FROM {table} WHERE variant = :variant"),
-                {"variant": variant},
-            )
+            result = session.execute(text(f"DELETE FROM {table} WHERE variant = :variant"), {"variant": variant}, )
             session.commit()
 
-            da_logger.info(
-                f"Cleared {result.rowcount} cached tiles for layer {layer_uuid}, variant={variant}"
-            )
+            da_logger.info(f"Cleared {result.rowcount} cached tiles for layer {layer_uuid}, variant={variant}")
             return result.rowcount or 0
