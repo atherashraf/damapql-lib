@@ -41,7 +41,8 @@ class RasterTileService:
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="Raster file not found")
 
-        return COGRaster.open_from_local(file_path)
+        # return COGRaster.open_from_local(file_path)
+        return COGRaster.open_cog(file_path)
 
     @classmethod
     def render_tile(

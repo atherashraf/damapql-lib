@@ -1,7 +1,7 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import  text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.damapql.auth.dtypes import UserInfo
@@ -17,7 +17,7 @@ from app.damapql.utils.adapters.model_utils import ModelUtils
 dch_tiles_router = APIRouter(tags=["dch"])
 
 
-_UUID_TOKEN_RE = re.compile(r"^[0-9a-fA-F-]{32,36}$")
+_UUID_TOKEN_RE = re.compile(r"^[0-9a-fA-F\-]{32,36}$")
 
 
 def require_tile_manager(current_user: UserInfo):
@@ -45,7 +45,6 @@ def cache_table_name(uuid: str) -> str:
     return f'main."{token}_xyz"'
 
 
-
 @dch_tiles_router.get(
     "/raster_tile/{uuid}/{z}/{x}/{y}/",
     responses={200: {"content": {"image/png": {}}}},
@@ -57,11 +56,18 @@ def cache_table_name(uuid: str) -> str:
     response_class=Response,
 )
 async def get_raster_tile(uuid: str, z: int, x: int, y: int):
-    result = RasterTileService.render_tile(uuid=uuid, z=z, x=x, y=y)
-    return Response(content=result.content, media_type=result.media_type)
-
-
-
+    tile_result = RasterTileService.render_tile(uuid=uuid, z=z, x=x, y=y)
+    # Return raw binary bytes with the proper headers
+    return Response(
+        content=tile_result.content,
+        media_type="image/png",
+        headers={
+            "Content-Type": "image/png",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        }
+    )
 
 
 @dch_tiles_router.get("/layer_mvt/{identifier}/{tile_size}/{z}/{x}/{y}")
@@ -87,10 +93,11 @@ async def get_layer_mvt(
     external_engine = None
     target_table = None
     target_geom = None
-    pk_sql_fragment = "id as pk"
+    pk_sql_fragment = '"id" as pk'
     allowed_cols = set()
     layer_name = identifier
     zoom_range = [0, 30]
+    feature_count: int | None = None
 
     # -------------------------------------------------------------
     # RESOLUTION PATH 1: Standard LayerInfo UUID
@@ -103,9 +110,11 @@ async def get_layer_mvt(
         if not access:
             return Response(status_code=204)
 
-        if info.count_layer_rows() == 0:
+        layer_total_rows = info.count_layer_rows()
+        if layer_total_rows == 0:
             return Response(content=b"", media_type="application/vnd.mapbox-vector-tile")
 
+        feature_count = layer_total_rows
         external_engine = access.get_external_engine()
         target_table = access.table_name
         target_geom = access.geometry_col
@@ -176,9 +185,11 @@ async def get_layer_mvt(
         requested_cols = [c for c in requested_cols if c in allowed_cols]
     requested_cols = sorted(set(requested_cols))
 
+    # Incorporate feature_count into variant hash
     variant = MVTCache.build_variant(
         cols=requested_cols,
         resolution=resolution,
+        feature_count=feature_count,
         extra={"table": target_table, "model": model_name or ""}
     )
 
@@ -190,7 +201,7 @@ async def get_layer_mvt(
     except Exception as cache_err:
         da_logger.exception(f"[MVTCacheReadError] identifier={identifier} - {cache_err}")
 
-    # Generate MVT SQL
+    # Generate MVT SQL (Double-quoting all dynamic column names)
     safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
     all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols) if safe_cols else pk_sql_fragment
 
@@ -225,8 +236,6 @@ async def get_layer_mvt(
     )
 
 
-
-
 @dch_tiles_router.delete("/clear_cache/{uuid}/")
 async def clear_cache(
     uuid: str,
@@ -237,7 +246,7 @@ async def clear_cache(
     """
     require_tile_manager(current_user)
 
-    if not re.fullmatch(r"[A-Fa-f0-9]+", uuid):
+    if not re.fullmatch(r"[A-Fa-f0-9\-]+", uuid):
         raise HTTPException(status_code=400, detail="Invalid uuid")
 
     try:
@@ -245,7 +254,8 @@ async def clear_cache(
     except KeyError:
         raise HTTPException(status_code=500, detail="Cache database configuration missing")
 
-    table_name = f'"{uuid}_xyz_v2"'
+    clean_uuid = uuid.replace("-", "")
+    table_name = f'"{clean_uuid}_xyz"'
 
     with Session(cache_engine) as session:
         try:

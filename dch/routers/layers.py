@@ -4,7 +4,6 @@ import jenkspy
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
@@ -13,10 +12,9 @@ from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.dtypes import AttributeTableResponse
 from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
 from app.damapql.dch.schemas.geojson import GeoJSON
+from app.damapql.dch.services.raster_stats_service import RasterStatsService
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-
-from app.damapql.dch.services.raster_stats_service import RasterStatsService
 
 dch_layers_router = APIRouter(tags=["dch"])
 
@@ -26,36 +24,23 @@ def handle_timestamp(obj):
         return obj.strftime("%Y-%m-%d %H:%M:%S")
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
+
 @dch_layers_router.get("/layer_categories/")
-async def layer_categories():
-    """
-    Returns layer categories.
-    Public endpoint.
-    """
+def get_layer_categories(current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     with LayerCategory.managed_session() as session:
-        stmt = select(LayerCategory)
-        categories = session.execute(stmt).scalars().all()
+        categories = session.execute(
+            select(LayerCategory.id, LayerCategory.main, LayerCategory.sub, ).order_by(LayerCategory.main,
+                                                                                       LayerCategory.sub, )).all()
 
-        payload = [
-            {
-                "pk": obj.id,
-                "name": f"{obj.main}-{obj.sub}" if obj.sub else obj.main
-            }
-            for obj in categories
-        ]
-
-    return {"payload": payload}
+        return {"payload": [{"pk": category.id, "main": category.main, "sub": category.sub,
+                             "name": (f"{category.main} — {category.sub}" if category.sub else category.main), } for
+                            category in categories]}
 
 
 @dch_layers_router.get("/wfs/{uuid}/{format}/")
-async def get_wfs(
-    uuid: str,
-    format: str,
-    limit: int = Query(20000, ge=1, le=200000),
-    offset: int = Query(0, ge=0),
-    cols: Optional[List[str]] = Query(None),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_wfs(uuid: str, format: str, limit: int = Query(20000, ge=1, le=200000), offset: int = Query(0, ge=0),
+                  cols: Optional[List[str]] = Query(None),
+                  current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns vector layer features as GeoJSON.
     """
@@ -100,13 +85,8 @@ async def get_wfs(
     sql = f"SELECT {select_list} FROM {table}{order_by} LIMIT :limit OFFSET :offset"
 
     with Session(engine) as session:
-        gdf = DBQuery.execute_query_as_gdf(
-            session,
-            sql,
-            params={"limit": limit, "offset": offset},
-            geom_col=access.geometry_col,
-            crs=f"EPSG:{info.srid}",
-        )
+        gdf = DBQuery.execute_query_as_gdf(session, sql, params={"limit": limit, "offset": offset},
+                                           geom_col=access.geometry_col, crs=f"EPSG:{info.srid}", )
 
     if gdf.empty:
         return Response(status_code=204)
@@ -114,29 +94,17 @@ async def get_wfs(
     gdf_4326 = gdf.to_crs(epsg=4326)
     geojson_obj = GeoJSON.from_gdf(gdf_4326)
 
-    return {
-        "payload": DCHUtils.gzip_data(geojson_obj.model_dump_json(by_alias=True)),
-        "meta": {
-            "format": "geojson",
-            "limit": limit,
-            "offset": offset,
-            "count": len(gdf_4326),
-        },
-    }
+    return {"payload": DCHUtils.gzip_data(geojson_obj.model_dump_json(by_alias=True)),
+            "meta": {"format": "geojson", "limit": limit, "offset": offset, "count": len(gdf_4326), }, }
 
 
 @dch_layers_router.get("/layer_fields/{uuid}/")
-async def get_layer_fields(
-    uuid: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_layer_fields(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns available column names for a layer.
     """
     with LayerInfo.managed_session() as session:
-        obj = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        obj = session.execute(select(LayerInfo).where(LayerInfo.uuid == uuid)).scalar_one_or_none()
 
         if obj is not None and obj.layer_accessibility:
             params = obj.layer_accessibility.params or {}
@@ -147,26 +115,19 @@ async def get_layer_fields(
 
 
 @dch_layers_router.get("/layer_field_distinct_values/{uuid}/{field_name}/{field_type}/")
-async def get_field_distinct_values(
-    uuid: str,
-    field_name: str,
-    field_type: str,
-    classification: str = "Stats",
-    no_of_classes: int = 0,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_field_distinct_values(uuid: str, field_name: str, field_type: str, classification: str = "Stats",
+                                    no_of_classes: int = 0,
+                                    current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns distinct field values or classification breaks.
     """
     with LayerInfo.managed_session() as session:
-        obj = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        obj = session.execute(select(LayerInfo).where(LayerInfo.uuid == uuid)).scalar_one_or_none()
 
         if obj is None:
             return Response(status_code=204)
 
-        df = obj.to_layer_df(cols=[field_name]  )
+        df = obj.to_layer_df(cols=[field_name])
 
     if df.empty or field_name not in df.columns:
         return {"payload": []}
@@ -213,79 +174,54 @@ def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
 
     return values
 
-@dch_layers_router.get(
-    "/layer_attributes/{uuid}/",
-    response_model=Union[AttributeTableResponse, dict],
-    summary="Get Layer Attributes",
-)
-def get_layer_attributes(
-    uuid: str,
-    extent_3857: Optional[str] = Query(None),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+
+@dch_layers_router.get("/layer_attributes/{uuid}/", response_model=Union[AttributeTableResponse, dict],
+                       summary="Get Layer Attributes", )
+def get_layer_attributes(uuid: str, extent_3857: Optional[str] = Query(None),
+                         current_user: UserInfo = Depends(AuthUtils.get_current_user),
+                         ):
     """
     Returns attribute table for vector layers or summary data for raster layers.
     """
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo)
-            .options(
-                selectinload(LayerInfo.layer_accessibility),
-                selectinload(LayerInfo.layer_category),
-                selectinload(LayerInfo.quality_level),
-            )
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility),
+                                                         selectinload(LayerInfo.layer_category),
+                                                         selectinload(LayerInfo.quality_level), ).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if info is None:
         return Response(status_code=204)
 
+    # Vector Layers
     if info.data_model and info.data_model.code == DataModel.V.name:
         extent_filter = parse_extent_3857(extent_3857)
 
-        # if extent_filter:
-        #     gdf = info.to_layer_gdf(extent_3857=extent_filter)
-        #
-        #     # remove shapely geometry column before serialization
-        #     geom_col = info.layer_accessibility.geometry_col or "geom"
-        #
-        #     df = gdf.drop(columns=[geom_col], errors="ignore")
-        # else:
-        #     df = info.to_layer_df()
         if extent_filter:
             gdf = info.to_layer_gdf(extent_3857=extent_filter)
             geom_col = info.layer_accessibility.geometry_col or "geom"
-            # Explicitly cast to vanilla pandas DataFrame
+            # Drop geometry and explicitly cast to vanilla Pandas DataFrame
             df = pd.DataFrame(gdf.drop(columns=[geom_col], errors="ignore"))
         else:
             df = info.to_layer_df()
 
         if not df.empty:
-            return ManageDataFrameUtils.grid_response(
-                df,
-                pkCols=info.layer_accessibility.pk_cols
-            )
+            return {"payload": ManageDataFrameUtils.grid_response(df, pkCols=info.layer_accessibility.pk_cols)}
 
+    # Raster Layers
     elif info.data_model and info.data_model.code == DataModel.R.name:
-        return RasterStatsService.get_attribute_summary_grid(uuid)
+        return {"payload": RasterStatsService.get_attribute_summary_grid(uuid)}
 
     return Response(status_code=204)
 
 
 @dch_layers_router.get("/get_feature_detail/{uuid}/{col_name}/{col_val}/")
-async def get_feature_detail(
-    uuid: str,
-    col_name: str,
-    col_val: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_feature_detail(uuid: str, col_name: str, col_val: str,
+                             current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns non-geometry details for a single feature.
     """
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).where(LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if info is None:
         return Response(status_code=204)
@@ -301,25 +237,15 @@ async def get_feature_detail(
     return Response(status_code=204)
 
 
-
-
 @dch_layers_router.get("/get_feature_geometry/{uuid}/{pk_values}/")
-async def get_feature_geometry(
-    uuid: str,
-    pk_values: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_feature_geometry(uuid: str, pk_values: str,
+                               current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns feature geometry as WKT in EPSG:3857 for a given primary key set.
     """
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo)
-            .options(
-                selectinload(LayerInfo.layer_accessibility)
-            )
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         return Response(status_code=204)
@@ -348,10 +274,8 @@ async def get_feature_geometry(
     geom_col = DBQuery.safe_ident(access.geometry_col)
     table = DBQuery.safe_ident(access.table_name)
 
-    q = text(
-        f"SELECT ST_AsText(ST_Transform({geom_col}, 3857)) AS geom "
-        f"FROM {table} WHERE {where_sql} LIMIT 1"
-    )
+    q = text(f"SELECT ST_AsText(ST_Transform({geom_col}, 3857)) AS geom "
+             f"FROM {table} WHERE {where_sql} LIMIT 1")
 
     with Session(engine) as session:
         geom = session.execute(q, params).scalar_one_or_none()
@@ -360,19 +284,13 @@ async def get_feature_geometry(
 
 
 @dch_layers_router.get("/column_value/{uuid}/{pk_val}/{col_name}/")
-async def get_column_value(
-    uuid: str,
-    pk_val: str,
-    col_name: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_column_value(uuid: str, pk_val: str, col_name: str,
+                           current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns a single column value for a feature identified by its PK value(s).
     """
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).where(LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         return {"payload": {col_name: ""}}
@@ -414,17 +332,15 @@ async def get_column_value(
 
     return {"payload": {col_name: val if val is not None else ""}}
 
+
 class SpatialSelectRequest(BaseModel):
-    geometry: str # This matches your frontend key
+    geometry: str  # This matches your frontend key
     srid: int = 3857
 
 
 @dch_layers_router.post("/spatial_select/{uuid}/")
-async def spatial_selection(
-        uuid: str,
-        data: SpatialSelectRequest,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def spatial_selection(uuid: str, data: SpatialSelectRequest,
+                            current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     info = LayerInfo.get_layer_info_by_uuid(uuid)
     if not info:
         return Response(status_code=204)
@@ -449,31 +365,19 @@ async def spatial_selection(
         return Response(status_code=204)
 
     # Return as GeoJSON directly from the database result
-    return {
-        "payload": gdf.to_crs(epsg=4326).__geo_interface__,
-        "meta": {
-            "count": len(gdf),
-            "layer_uuid": uuid
-        }
-    }
+    return {"payload": gdf.to_crs(epsg=4326).__geo_interface__, "meta": {"count": len(gdf), "layer_uuid": uuid}}
 
 
 @dch_layers_router.get("/layer_pk_cols/{uuid}/")
-async def get_layer_pk_cols(
-    uuid: str,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_layer_pk_cols(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns the primary key column names for a specific layer.
     Used for identifying unique features in the frontend or constructing PK-based queries.
     """
     with LayerInfo.managed_session() as session:
         # We use selectinload to ensure layer_accessibility is loaded efficiently
-        info = session.execute(
-            select(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         return Response(status_code=204)
@@ -481,10 +385,4 @@ async def get_layer_pk_cols(
     # Access the pk_cols list from the accessibility model
     pk_cols = info.layer_accessibility.pk_cols or []
 
-    return {
-        "pkCols": pk_cols,
-        "meta": {
-            "uuid": uuid,
-            "count": len(pk_cols)
-        }
-    }
+    return {"pkCols": pk_cols, "meta": {"uuid": uuid, "count": len(pk_cols)}}

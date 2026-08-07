@@ -7,6 +7,7 @@ from typing import Any, Dict, Generator, List, Literal, Optional, Tuple, Union
 
 import geopandas as gpd
 import pandas as pd
+from digitalarzengine.utils.singletons import da_logger
 from pydantic import BaseModel
 from shapely import wkb
 from shapely.geometry import mapping, shape
@@ -287,6 +288,11 @@ class ModelHelpersMixin:
                             if hasattr(rel_val, "to_object")
                             else rel_val
                         )
+
+            # da_logger.info(
+            #     f"Pydantic class: {pydantic_cls.__name__}, "
+            #     f"first layer: {(data.get('layers') or [None])[0]}"
+            # )
 
             return pydantic_cls.model_validate(data)
 

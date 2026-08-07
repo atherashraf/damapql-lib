@@ -1,8 +1,11 @@
 import importlib
+from typing import Any
+
+from sqlalchemy.exc import IntegrityError
 
 from digitalarzengine.io.managers.db_manager import GeoDBManager
 from digitalarzengine.utils.singletons import da_logger
-from sqlalchemy import insert
+from sqlalchemy import insert, inspect
 
 import settings
 from app.damapql.utils.adapters.db import DBBase
@@ -14,9 +17,11 @@ class ModelUtils:
     @staticmethod
     def get_model(model_name):
         for key in DA_APPS:
-
+            da_logger.info(f"working on DA_APP {key}")
             try:
+                da_logger.info(f"working on DA_APP {key}",DA_APPS[key]["path"])
                 module = importlib.import_module(f'{DA_APPS[key]["path"]}.models')
+                da_logger.info(f"working on {key} module", module)
                 for a in dir(module):
                     if a.lower() == model_name.lower():
                         cls = getattr(module, a)
@@ -35,18 +40,23 @@ class ModelUtils:
             all_subclasses.extend(ModelUtils.get_all_subclasses(subclass))
         return all_subclasses
 
-
     @classmethod
-    def add_model_obj(cls,model_name, row):
-        model = cls.get_model(model_name)
-        manager: GeoDBManager = model.manager()
+    def add_model_obj(
+            cls,
+            model_name: str,
+            row: dict[str, Any],
+    ):
+        model_class = cls.get_model(model_name)
 
-        if model is not None:
-            stmt = insert(model).values(**row)
-            # res = manager.execute_ddl(stmt)
-            result = manager.execute_stmt(stmt)
+        if model_class is None:
+            return None
+
+        with model_class.managed_session() as session:
+            stmt = insert(model_class).values(**row)
+            result = session.execute(stmt)
+            session.commit()
+
             return result
-        return None
 
     @staticmethod
     def get_model_class_by_name(model_name: str):
@@ -119,3 +129,78 @@ class ModelUtils:
         raise ValueError(
             f"Model '{model_name}' not found."
         )
+
+    @classmethod
+    def delete_model_obj(
+            cls,
+            model_name: str,
+            pk: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Delete one model object using its actual primary key.
+
+        Example:
+            delete_model_obj(
+                model_name="LayerCategory",
+                pk={"id": 4},
+            )
+        """
+        model_class = cls.get_model(model_name)
+
+        if model_class is None:
+            raise ValueError(
+                f"Model '{model_name}' was not found."
+            )
+
+        mapper = inspect(model_class)
+        pk_columns = list(mapper.primary_key)
+        pk_names = [column.key for column in pk_columns]
+
+        if set(pk.keys()) != set(pk_names):
+            raise ValueError(
+                f"Invalid primary key for '{model_name}'. "
+                f"Expected: {pk_names}"
+            )
+
+        # Convert incoming values to the PK column's Python type.
+        identity_values: list[Any] = []
+
+        for column in pk_columns:
+            value = pk[column.key]
+
+            try:
+                python_type = column.type.python_type
+                value = python_type(value)
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+            identity_values.append(value)
+
+        identity: Any = (
+            identity_values[0]
+            if len(identity_values) == 1
+            else tuple(identity_values)
+        )
+
+        with model_class.managed_session() as session:
+            obj = session.get(model_class, identity)
+
+            if obj is None:
+                raise LookupError(
+                    f"{model_name} with primary key {pk} was not found."
+                )
+
+            session.delete(obj)
+
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                raise
+
+        return {
+            "status": "success",
+            "msg": "row deleted",
+            "model_name": model_class.__name__,
+            "pk": pk,
+        }

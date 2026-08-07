@@ -150,6 +150,7 @@ def swagger_token_login(
 
 
 @auth_router.post("/jwt/login/json", response_model=AuthResponse)
+@auth_router.post("/jwt/login/json/", response_model=AuthResponse)
 async def login_json(
     data: LoginRequest,
     background_tasks: BackgroundTasks,

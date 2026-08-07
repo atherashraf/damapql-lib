@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from .admin_models import dch_admin_model_router
 from .layer_query import layer_query_router
 from .layers import dch_layers_router
 from .maps import dch_maps_router
@@ -18,6 +19,7 @@ dch_router.include_router(dch_maps_router)
 dch_router.include_router(dch_styles_router)
 dch_router.include_router(dch_raster_router)
 dch_router.include_router(dch_admin_router)
+dch_router.include_router(dch_admin_model_router)
 dch_router.include_router(dch_navigation_router)
 dch_router.include_router(dch_tiles_router)
 dch_router.include_router(dch_export_router)

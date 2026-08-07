@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
@@ -5,11 +7,15 @@ from starlette.responses import JSONResponse
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.api_enum import ModelType
-from app.damapql.dch.dtypes import UploadRasterResponse
+from app.damapql.dch.models import LayerInfo
 from app.damapql.dch.services.layer_info_services import LayerInfoService
-from app.damapql.dch.services.raster_ingest_service import RasterIngestService
 from app.damapql.dch.services.raster_stats_service import RasterStatsService
+from app.damapql.settings import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION_NAME
 from app.damapql.utils.adapters.deps import get_sync_session
+from digitalarzengine.io.cog_raster import COGRaster
+from digitalarzengine.io.managers.s3_manager import S3Manager
+from digitalarzengine.utils.singletons import da_logger
+from settings import MEDIA_DIR
 
 dch_raster_router = APIRouter(tags=["dch"])
 
@@ -124,3 +130,132 @@ async def get_pixel_value(uuid: str, long: float, lat: float):
 def get_raster_info(uuid: str):
     result = RasterStatsService.get_raster_info(uuid)
     return JSONResponse(content={"payload": result.payload})
+
+def get_raster_style_label(value, layer_styling):
+    if value is None or layer_styling is None:
+        return None
+
+    try:
+        value = int(float(value))
+
+        if value < 0:
+            return None
+
+        labels = layer_styling.get("labels", [])
+
+        if value < len(labels):
+            label = labels[value]
+
+            if label is not None and str(label).strip() != "":
+                return label
+
+        return None
+
+    except Exception as e:
+        da_logger.warning(f"Failed to get raster style label: {e}")
+        return None
+
+@dch_raster_router.get("/raster_pixel/{uuid}")
+async def get_raster_pixel_value(uuid: str, lon: float, lat: float):
+
+    with LayerInfo.managed_session() as session:
+        try:
+            info = session.query(LayerInfo).filter_by(uuid=uuid).one_or_none()
+
+            if info is None or info.data_model not in ["R", "Raster"]:
+                return {
+                    "success": False,
+                    "message": "Raster layer not found",
+                    "uuid": uuid,
+                    "lon": lon,
+                    "lat": lat,
+                    "value": None,
+                }
+
+            file_path = info.layer_accessibility.file_path
+            cog_raster = COGRaster.open_cog(file_path)
+
+            pixel = cog_raster.get_pixel_value_at_long_lat(lon, lat)
+
+            if pixel is None:
+                return {
+                    "success": False,
+                    "message": "No pixel value found at this location",
+                    "uuid": uuid,
+                    "lon": lon,
+                    "lat": lat,
+                    "value": None,
+                }
+
+            # rio-tiler point() may return object/dict-like result depending version
+            value = pixel
+
+            try:
+                if hasattr(pixel, "data"):
+                    value = pixel.data.tolist()
+                elif isinstance(pixel, dict):
+                    value = pixel
+                elif hasattr(pixel, "tolist"):
+                    value = pixel.tolist()
+            except Exception:
+                value = str(pixel)
+
+            # return {
+            #     "success": True,
+            #     "uuid": uuid,
+            #     "lon": lon,
+            #     "lat": lat,
+            #     "value": value,
+            # }
+            raw_value = value
+
+            if isinstance(value, list) and len(value):
+                raw_value = value[0]
+
+            try:
+                raw_value = float(raw_value)
+            except Exception:
+                pass
+
+            if isinstance(raw_value, float) and raw_value < -1.0e30:
+                return {
+                    "success": False,
+                    "message": "NoData pixel",
+                    "uuid": uuid,
+                    "lon": lon,
+                    "lat": lat,
+                    "value": None,
+                    "label": None,
+                }
+
+
+            label = get_raster_style_label(raw_value, info.layer_styling)
+
+            return {
+                "success": True,
+                "uuid": uuid,
+                "lon": lon,
+                "lat": lat,
+                "value": raw_value,
+                "raw_value": value,
+                "label": label,
+                "styled_value": {
+                    "value": raw_value,
+                    "label": label,
+                },
+            }
+
+        except Exception as e:
+            da_logger.exception(
+                f"[RasterPixelError] uuid={uuid}, lon={lon}, lat={lat} — {e}"
+            )
+
+            return {
+                "success": False,
+                "message": str(e),
+                "uuid": uuid,
+                "lon": lon,
+                "lat": lat,
+                "value": None,
+            }
+

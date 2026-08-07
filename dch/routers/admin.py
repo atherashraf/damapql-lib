@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, Response
 
 
 from app.damapql.dch.api_enum import ModelType, ApplicationURLType
+from app.damapql.dch.routers.admin_dependencies import require_dch_admin
 from app.damapql.dch.schemas.geojson import GeoJSON
 from app.damapql.dch.services.layer_query_services import LayerQueryService
 
@@ -64,23 +65,7 @@ append_service = DCHVectorAppendService(
 )
 
 
-# ---------------------------------------------------------------------
-# Auth helper
-# We allow:
-#   - superuser
-#   - app_manager
-# ---------------------------------------------------------------------
-def require_dch_admin(current_user: UserInfo):
-    if getattr(current_user, "is_superuser", False):
-        return
 
-    if AuthUtils.has_role(current_user, "app_manager"):
-        return
-
-    raise HTTPException(
-        status_code=403,
-        detail="Superuser or app_manager privileges required",
-    )
 
 
 # ---------------------------------------------------------------------

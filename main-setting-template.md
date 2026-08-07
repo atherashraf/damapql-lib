@@ -325,7 +325,7 @@ APP_GIS_PASSWORD=change-me
 After configuring your settings, verify syntax and overall composition:
 
 ```bash
-python -m py_compile settings.py
+python -m py_compile digitalarzengine_settings.py
 python -m compileall -q app/damapql
 python -c "from main import app; print(app.title, len(app.routes))"
 

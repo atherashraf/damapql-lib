@@ -2,7 +2,7 @@ from typing import Dict, Any
 
 import pandas as pd
 
-from app.damapql.dch.dtypes import GridPayload
+from app.damapql.dch.dtypes import AttributeTablePayload
 
 
 class ManageDataFrameUtils:
@@ -83,8 +83,7 @@ class ManageDataFrameUtils:
         return "string"
 
     @classmethod
-    def grid_response(cls, df: pd.DataFrame, pkCols=()) -> dict[
-        str, dict[str, tuple[()] | list[dict[str, str | bool | Any]] | list[dict] | Any]]:
+    def grid_response(cls, df: pd.DataFrame, pkCols=())->AttributeTablePayload :
         columns = [
             {
                 "id": col,
@@ -99,11 +98,9 @@ class ManageDataFrameUtils:
 
         # replace NaN with None, preserving object/list/dict semantics
         df = df.where(pd.notnull(df), None)
-
-        return {
-            "payload": {
+        return AttributeTablePayload(**{
                 "pkCols": pkCols,
                 "columns": columns,
                 "rows": df.to_dict(orient="records"),
-            }
-        }
+            })
+

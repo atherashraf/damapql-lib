@@ -6,9 +6,6 @@ from digitalarzengine.io.managers.db_manager import DBString
 from pydantic import BaseModel, RootModel, ConfigDict, field_validator, Field
 
 
-
-
-
 class DBConnectionCreate(BaseModel):
     connection_name: str  # instead of name
     engine: str
@@ -51,6 +48,7 @@ class LayerCategoryType(BaseModel):
     sub: Optional[str]
     model_config = ConfigDict(from_attributes=True)
 
+
 class LayerColumnParam(BaseModel):
     name: str
     d_type: Optional[str] = None
@@ -69,59 +67,81 @@ class URLAccessibilityParams(BaseModel):
     url: Optional[str] = None
 
 
+import os
+from typing import Literal, Optional
+from pydantic import BaseModel, model_validator
+
+# 🌟 Added "ftp" to PathBaseType
+PathBaseType = Literal["media_rel", "s3", "absolute", "url", "ftp"]
+
+
 class FileAccessibilityParams(BaseModel):
     file_path: str
-    is_path_media_rel: bool = False
+    path_base: PathBaseType = "media_rel"
 
-    @field_validator("is_path_media_rel", mode="before")
+    # Kept for backward compatibility when reading existing DB JSONB params
+    is_path_media_rel: Optional[bool] = None
+
+    @model_validator(mode="before")
     @classmethod
-    def parse_bool(cls, v):
-        if isinstance(v, bool):
-            return v
-        if v is None:
-            return False
-        if isinstance(v, str):
-            return v.strip().lower() in {"true", "1", "yes", "y"}
-        return bool(v)
+    def migrate_and_infer_path_base(cls, data: dict) -> dict:
+        if not isinstance(data, dict):
+            return data
+
+        # If path_base is explicitly provided, respect it
+        if "path_base" in data and data["path_base"]:
+            return data
+
+        fp = str(data.get("file_path", "")).strip().lower()
+
+        # 1. Backwards-compatibility check for legacy 'is_path_media_rel' flag
+        legacy_media_flag = data.get("is_path_media_rel")
+        if legacy_media_flag is not None:
+            if isinstance(legacy_media_flag, str):
+                legacy_media_flag = legacy_media_flag.strip().lower() in {"true", "1", "yes", "y"}
+
+            if legacy_media_flag:
+                data["path_base"] = "media_rel"
+                return data
+
+        # 2. Infer path_base from file_path structure if omitted
+        if fp.startswith("s3://"):
+            data["path_base"] = "s3"
+        elif fp.startswith(("ftp://", "ftps://")):
+            data["path_base"] = "ftp"
+        elif fp.startswith(("http://", "https://")):
+            data["path_base"] = "url"
+        elif os.path.isabs(data.get("file_path", "")):
+            data["path_base"] = "absolute"
+        else:
+            data["path_base"] = "media_rel"
+
+        return data
 
     @property
-    def is_s3(self) -> bool:
-        return self.file_path.startswith("s3://")
-
-    @property
-    def is_absolute_local(self) -> bool:
-        if self.is_s3:
-            return False
-        return os.path.isabs(self.file_path)
-
-    @property
-    def is_media_relative(self) -> bool:
-        return (not self.is_s3) and (not self.is_absolute_local) and self.is_path_media_rel
+    def clean_relative_path(self) -> str:
+        """Strips protocol prefixes (like s3://bucket/) if present."""
+        fp = self.file_path.strip()
+        if fp.startswith("s3://"):
+            parts = fp.replace("s3://", "").split("/", 1)
+            return parts[1] if len(parts) > 1 else parts[0]
+        return fp.lstrip("/\\")
 
     def resolve_file_path(self, media_dir: str) -> str:
-        """
-        Returns a usable path string.
-
-        Rules:
-        - s3://... stays unchanged
-        - absolute local path stays unchanged
-        - relative path + is_path_media_rel=True => join with media_dir
-        - other relative path stays unchanged
-        """
-        fp = self.file_path
+        """Deterministically resolves the physical path based on path_base."""
+        fp = self.file_path.strip()
         if not fp:
             return fp
 
-        if self.is_s3:
-            return fp
+        if self.path_base == "media_rel":
+            return os.path.join(media_dir, self.clean_relative_path)
 
-        if os.path.isabs(fp):
+        # "url", "s3", "ftp", and "absolute" return the raw protocol string
+        if self.path_base in ("url", "s3", "ftp", "absolute"):
             return fp
-
-        if self.is_path_media_rel:
-            return os.path.join(media_dir, fp)
 
         return fp
+
 
 class LayerAccessibilityType(BaseModel):
     id: int
@@ -179,6 +199,7 @@ class LayerAccessibilityType(BaseModel):
 
         return v
 
+
 # class LayerAccessibilityType(BaseModel):
 #     id: int
 #     accessibility_type: Optional[str]
@@ -226,7 +247,6 @@ class LayerInfoType(BaseModel):
     # layer_accessibility: Optional[Union[LayerAccessibilityType,int]]
     layer_accessibility: Union[int, LayerAccessibilityType]
     quality_level: Optional[Union[LayerQualityLevelType, int]]
-
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -286,7 +306,19 @@ class LayerItem(BaseModel):
     isGroupMeta: bool = False
     groups: Optional[List[Dict[str, Any]]] = None
 
+    @field_validator("zoomRange", mode="before")
+    @classmethod
+    def normalize_zoom_range(
+            cls,
+            value: Any,
+    ) -> List[int]:
+        if value is None:
+            return [0, 30]
+
+        return value
+
     model_config = ConfigDict(extra='allow', from_attributes=True)
+
 
 class LayerGroupItem(BaseModel):
     key: str
@@ -311,9 +343,9 @@ class MapInfoType(BaseModel):
 
 
 class GridPayload(BaseModel):
-    pkCols: List[str]
-    columns: List[Dict[str, Any]]
-    rows: List[Dict[str, Any]]
+    pkCols: List[str] = Field(default_factory=list)
+    columns: List[Dict[str, Any]] = Field(default_factory=list)
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class LayerInfoListResponse(BaseModel):
@@ -331,14 +363,13 @@ class TableColumn(BaseModel):
     disablePadding: bool = False
 
 
-class AttributeTablePayload(BaseModel):
-    pkCols: List[str]
-    columns: List[TableColumn]
-    rows: List[Dict[str, Any]]
+class AttributeTablePayload(GridPayload):
+    object_name: Optional[str] = None
+    object_type: Optional[Literal["model_name", "table_name"]] = None
+    layer_uuid: Optional[str] = None
 
 
 class AttributeTableResponse(BaseModel):
-    # kind: Literal["vector"] = "vector"
     payload: AttributeTablePayload
 
 

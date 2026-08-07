@@ -1,6 +1,7 @@
 import os
 from typing import Union, Optional
-
+from settings import MEDIA_DIR
+from pathlib import Path
 import pandas as pd
 import sqlalchemy as db
 from digitalarzengine.io.cog_raster import COGRaster
@@ -28,7 +29,7 @@ from app.damapql.utils.adapters.deps import ExternalEngineRegistry
 from app.damapql.utils.adapters.services.db_query import DBQuery
 from app.damapql.utils.crypto import CryptoUtils
 
-from app.damapql.settings import IS_LOCAL, DCH_MEDIA_DIR
+from app.damapql.settings import IS_LOCAL, MEDIA_BASE
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION_NAME
 
 
@@ -36,14 +37,28 @@ from app.damapql.settings import IS_LOCAL, DCH_MEDIA_DIR
 class LayerCategory(DBBase):
     __tablename__ = "dch_layer_category"
 
-    id = db.Column(db.INTEGER, primary_key=True, nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint(
+            "main",
+            "sub",
+            name="uq_dch_layer_category_main_sub",
+        ),
+    )
+
+    id = db.Column(
+        db.INTEGER,
+        primary_key=True,
+        nullable=False,
+    )
     main = db.Column(db.VARCHAR, nullable=False)
-    sub = db.Column(db.VARCHAR)
+    sub = db.Column(db.VARCHAR, nullable=True)
+
     __pydantic__ = LayerCategoryType
-    
+
     def __repr__(self):
         if self.sub:
             return f"{self.main} - {self.sub}"
+
         return self.main
 
 class DBConnection(DBBase):
@@ -166,9 +181,8 @@ class LayerAccessibility(DBBase):
 
     __pydantic__ = LayerAccessibilityType
 
-
     @property
-    def file_path(self) -> str | None:
+    def file_path(self) -> Path |str | None:
         params = self.params or {}
         fp = params.get("file_path")
         if not fp:
@@ -178,23 +192,14 @@ class LayerAccessibility(DBBase):
         if not fp:
             return None
 
-        # keep S3/object-store paths unchanged
-        if fp.startswith("s3://"):
-            return fp
+        path_base = params.get("path_base")
 
-        # keep absolute local paths unchanged
-        if os.path.isabs(fp):
-            return fp
+        # Resolution based on strategy
+        if path_base == "media_rel":
 
-        is_media_rel = params.get("is_path_media_rel", False)
-        if isinstance(is_media_rel, str):
-            is_media_rel = is_media_rel.strip().lower() in {"true", "1", "yes", "y"}
+            return MEDIA_BASE / fp.lstrip("/") if fp.startswith("/") else fp
 
-        # join only when path is relative and explicitly marked media-relative
-        if is_media_rel:
-            return os.path.join(DCH_MEDIA_DIR, fp)
-
-        # plain relative path, leave unchanged
+        # Returns untouched for "s3", "ftp", "url", or "absolute"
         return fp
 
     @classmethod
