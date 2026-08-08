@@ -82,6 +82,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely import wkb
 from sqlalchemy import Engine, Table, func, select, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import ResourceClosedError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -611,3 +612,12 @@ class DBQuery:
             return gpd.GeoDataFrame(df, geometry=geom_col, crs=crs)
 
         raise ValueError(f"Geometry column '{geom_col}' not found in query results.")
+
+    @staticmethod
+    def get_postgres_query_text(stmt: Select) -> str:
+        compiled = stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+
+        return str(compiled)
