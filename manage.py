@@ -90,13 +90,16 @@ import traceback
 import importlib
 import numpy as np
 import pandas as pd
+import time
+from datetime import datetime, timezone
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter
 from pydantic import ValidationError
-from sqlalchemy import Integer, Float, String, Boolean, JSON, text, inspect, create_engine, select
+from sqlalchemy import Integer, Float, String, Boolean, JSON, text,  create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 from sqlalchemy_utils import ChoiceType
@@ -1066,12 +1069,6 @@ def create_layerinfo_from_raster(
     )
     return obj
 
-import time
-from datetime import datetime, timezone
-from sqlalchemy import text
-from sqlalchemy.orm import selectinload
-from sqlalchemy.orm.attributes import flag_modified
-
 
 def reconcile_layerinfo(
     layer_uuid: str = None,
@@ -1121,6 +1118,7 @@ def reconcile_layerinfo(
             "multipolyline": "MultiLineString",
             "polygon": "Polygon",
             "multipolygon": "MultiPolygon",
+            "geometry": "Geometry",
             "geometrycollection": "GeometryCollection",
             "circularstring": "CircularString",
             "compoundcurve": "CompoundCurve",
@@ -1386,6 +1384,7 @@ def reconcile_layerinfo(
                     if geometry_column:
                         safe_geometry = quote_ident(geometry_column)
 
+                        # Step A: Query PostGIS catalog view geometry_columns
                         catalog_metadata = (
                             conn.execute(
                                 text("""
@@ -1415,14 +1414,13 @@ def reconcile_layerinfo(
                             if catalog_srid not in (None, 0):
                                 srid = int(catalog_srid)
 
-                            if (
-                                catalog_type
-                                and str(catalog_type).upper() != "GEOMETRY"
-                            ):
+                            # Normalize catalog_type even if it is GEOMETRY
+                            if catalog_type:
                                 geometry_types = normalize_geometry_types(
                                     [catalog_type]
                                 )
 
+                        # Step B: Inspect stored rows for actual geometry types and SRIDs
                         actual_metadata = (
                             conn.execute(
                                 text(f"""
@@ -1456,6 +1454,7 @@ def reconcile_layerinfo(
                                 actual_metadata.get("geometry_types")
                             )
 
+                            # If actual rows exist, override with the real row types
                             if actual_types:
                                 geometry_types = actual_types
 

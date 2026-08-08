@@ -782,8 +782,8 @@ async def upload_shp_file(
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/preview_append_shp/")
 async def preview_append_shp(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+    request: Request,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     require_dch_admin(current_user)
 
@@ -803,7 +803,7 @@ async def preview_append_shp(
 
     try:
         # -------------------------------------------------------------
-        # Resolve target layer
+        # 1. Resolve target layer metadata
         # -------------------------------------------------------------
         layer_info = LayerInfo.get_layer_info_by_uuid(layer_uuid)
         if not layer_info:
@@ -816,14 +816,17 @@ async def preview_append_shp(
         if not layer_access:
             raise HTTPException(status_code=400, detail="Target layer accessibility missing")
 
-        if not layer_access.accessibility_type or layer_access.accessibility_type.code != AccessibilityType.DB.name:
+        if (
+            not layer_access.accessibility_type
+            or layer_access.accessibility_type.code != AccessibilityType.DB.name
+        ):
             raise HTTPException(status_code=400, detail="Target layer is not a DB vector layer")
 
         target_table = layer_access.table_name
         target_schema_name = (layer_access.params or {}).get("schema", "public")
 
         # -------------------------------------------------------------
-        # Save uploaded files into generic upload session
+        # 2. Save uploaded files into generic upload session
         # -------------------------------------------------------------
         upload_id, session_dir, saved_files = await upload_service.save_files_from_form(
             form=form,
@@ -835,13 +838,13 @@ async def preview_append_shp(
         )
 
         # -------------------------------------------------------------
-        # Resolve and validate shapefile package
+        # 3. Resolve and validate shapefile package
         # -------------------------------------------------------------
         shape_info = package_service.resolve_shapefile(upload_id)
         shp_fp = shape_info["main_file"]
 
         # -------------------------------------------------------------
-        # Load shapefile
+        # 4. Load shapefile into GeoDataFrame
         # -------------------------------------------------------------
         gdf = append_service.load_shapefile_to_gdf(shp_fp)
 
@@ -849,7 +852,7 @@ async def preview_append_shp(
             raise HTTPException(status_code=400, detail="Uploaded shapefile contains no features")
 
         # -------------------------------------------------------------
-        # Get target schema
+        # 5. Fetch target database table schema
         # -------------------------------------------------------------
         engine = layer_access.get_external_engine()
 
@@ -860,13 +863,19 @@ async def preview_append_shp(
         )
 
         # -------------------------------------------------------------
-        # Analyze append compatibility
+        # 6. Analyze append compatibility (with GEOMETRY support)
         # -------------------------------------------------------------
         analysis = append_service.analyze_append_candidate(gdf, target_schema)
 
+        # Block if critical validation errors exist (e.g. strict incompatibilities)
+        if analysis.get("is_compatible") is False and analysis.get("fatal_errors"):
+            raise HTTPException(
+                status_code=400,
+                detail="; ".join(analysis["fatal_errors"]),
+            )
+
         # -------------------------------------------------------------
-        # Prepare GeoJSON preview
-        # Reproject to EPSG:4326 for safe web preview
+        # 7. Prepare GeoJSON preview (Reproject to EPSG:4326)
         # -------------------------------------------------------------
         preview_gdf = gdf.copy()
 
@@ -875,15 +884,17 @@ async def preview_append_shp(
                 if preview_gdf.crs.to_epsg() != 4326:
                     preview_gdf = preview_gdf.to_crs(epsg=4326)
             except Exception as e:
-                # da_logger.exception(str(e))
-                preview_gdf = preview_gdf.to_crs(epsg=4326)
+                da_logger.warning(f"Standard CRS transform failed, forcing EPSG:4326: {e}")
+                preview_gdf.set_crs(epsg=4326, allow_override=True)
+        else:
+            # Fallback if shapefile missing .prj file
+            preview_gdf.set_crs(epsg=4326, allow_override=True)
 
         geojson_str = preview_gdf.to_json()
         preview_geojson = json.loads(geojson_str)
 
         # -------------------------------------------------------------
-        # Create zipped GeoJSON preview
-        # Useful if frontend wants compressed transfer/storage
+        # 8. Create zipped GeoJSON preview
         # -------------------------------------------------------------
         zip_buffer = io.BytesIO()
 
@@ -894,7 +905,7 @@ async def preview_append_shp(
         preview_geojson_zip = base64.b64encode(zip_buffer.read()).decode()
 
         # -------------------------------------------------------------
-        # Attach extra response fields
+        # 9. Attach payload metadata
         # -------------------------------------------------------------
         analysis["upload_id"] = upload_id
         analysis["layer_uuid"] = layer_uuid
@@ -910,12 +921,18 @@ async def preview_append_shp(
         raise
 
     except Exception as e:
-        # Cleanup failed temp upload session
+        # Cleanup temp files on unhandled exceptions
         if upload_id:
-            upload_service.cleanup_session(upload_id)
+            try:
+                upload_service.cleanup_session(upload_id)
+            except Exception:
+                pass
 
         da_logger.exception(f"Append preview failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to analyze shapefile for append preview")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to analyze shapefile for append preview: {str(e)}",
+        )
 
 
 # ---------------------------------------------------------------------

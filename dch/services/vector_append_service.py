@@ -489,10 +489,13 @@ class DCHVectorAppendService:
     # Geometry / CRS helpers
     # ------------------------------------------------------------------
 
+    from typing import Dict, Any, Optional
+    import geopandas as gpd
+
     def geometry_compatibility(
-        self,
-        source_geom_type: Optional[str],
-        target_geom_type: Optional[str],
+            self,
+            source_geom_type: Optional[str],
+            target_geom_type: Optional[str],
     ) -> Dict[str, Any]:
         if not source_geom_type or not target_geom_type:
             return {
@@ -501,71 +504,88 @@ class DCHVectorAppendService:
                 "promotion_needed": False,
             }
 
-        source_geom_type = source_geom_type.upper()
-        target_geom_type = target_geom_type.upper()
+        # Clean and normalize strings (remove ST_ prefix if present)
+        src = str(source_geom_type).strip().upper().replace("ST_", "")
+        tgt = str(target_geom_type).strip().upper().replace("ST_", "")
 
-        if source_geom_type == target_geom_type:
-            return {"compatible": True, "warning": None, "promotion_needed": False}
-
-        if source_geom_type == "POLYGON" and target_geom_type == "MULTIPOLYGON":
+        # 1. Target is a generic PostGIS column type (accepts everything)
+        if tgt in {"GEOMETRY", "GEOMETRYCOLLECTION", "UNKNOWN"}:
             return {
                 "compatible": True,
-                "warning": "Polygon geometries will be promoted to MultiPolygon",
+                "warning": None,
+                "promotion_needed": False,
+            }
+
+        # 2. Exact match
+        if src == tgt:
+            return {
+                "compatible": True,
+                "warning": None,
+                "promotion_needed": False,
+            }
+
+        # 3. Single -> Multi promotion rules
+        PROMOTION_MAP = {
+            "POLYGON": "MULTIPOLYGON",
+            "LINESTRING": "MULTILINESTRING",
+            "POINT": "MULTIPOINT",
+        }
+
+        if PROMOTION_MAP.get(src) == tgt:
+            return {
+                "compatible": True,
+                "warning": f"{src.title()} geometries will be promoted to {tgt.title()}",
                 "promotion_needed": True,
             }
 
-        if source_geom_type == "LINESTRING" and target_geom_type == "MULTILINESTRING":
-            return {
-                "compatible": True,
-                "warning": "LineString geometries will be promoted to MultiLineString",
-                "promotion_needed": True,
-            }
-
-        if source_geom_type == "POINT" and target_geom_type == "MULTIPOINT":
-            return {
-                "compatible": True,
-                "warning": "Point geometries will be promoted to MultiPoint",
-                "promotion_needed": True,
-            }
-
+        # 4. Incompatible
         return {
             "compatible": False,
-            "warning": f"Incompatible geometry type: source={source_geom_type}, target={target_geom_type}",
+            "warning": f"Incompatible geometry type: source={src}, target={tgt}",
             "promotion_needed": False,
         }
 
     def promote_geometry_if_needed(
-        self,
-        gdf: gpd.GeoDataFrame,
-        target_geom_type: Optional[str],
+            self,
+            gdf: gpd.GeoDataFrame,
+            target_geom_type: Optional[str],
     ) -> gpd.GeoDataFrame:
-        if not target_geom_type:
+        if not target_geom_type or gdf.empty:
             return gdf
 
-        target_geom_type = target_geom_type.upper()
+        tgt = str(target_geom_type).strip().upper().replace("ST_", "")
+
+        # GEOMETRY column doesn't need shape promotion
+        if tgt in {"GEOMETRY", "GEOMETRYCOLLECTION", "UNKNOWN"}:
+            return gdf
 
         try:
             from shapely.geometry import MultiPolygon, MultiLineString, MultiPoint
-        except Exception:
+        except ImportError:
             return gdf
+
+        # Dynamically detect active geometry column name (gdf.geometry.name usually 'geometry' or 'geom')
+        geom_col = gdf.geometry.name if hasattr(gdf, "geometry") else "geometry"
 
         def _to_multi(geom):
             if geom is None:
                 return geom
 
-            if target_geom_type == "MULTIPOLYGON" and geom.geom_type == "Polygon":
+            gtype = getattr(geom, "geom_type", None) or getattr(geom, "type", None)
+
+            if tgt == "MULTIPOLYGON" and gtype == "Polygon":
                 return MultiPolygon([geom])
 
-            if target_geom_type == "MULTILINESTRING" and geom.geom_type == "LineString":
+            if tgt == "MULTILINESTRING" and gtype == "LineString":
                 return MultiLineString([geom])
 
-            if target_geom_type == "MULTIPOINT" and geom.geom_type == "Point":
+            if tgt == "MULTIPOINT" and gtype == "Point":
                 return MultiPoint([geom])
 
             return geom
 
         gdf = gdf.copy()
-        gdf["geom"] = gdf["geom"].apply(_to_multi)
+        gdf[geom_col] = gdf[geom_col].apply(_to_multi)
         return gdf
 
     # ------------------------------------------------------------------
