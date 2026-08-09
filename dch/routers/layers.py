@@ -178,8 +178,7 @@ def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
 @dch_layers_router.get("/layer_attributes/{uuid}/", response_model=Union[AttributeTableResponse, dict],
                        summary="Get Layer Attributes", )
 def get_layer_attributes(uuid: str, extent_3857: Optional[str] = Query(None),
-                         current_user: UserInfo = Depends(AuthUtils.get_current_user),
-                         ):
+                         current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Returns attribute table for vector layers or summary data for raster layers.
     """
@@ -386,3 +385,168 @@ async def get_layer_pk_cols(uuid: str, current_user: UserInfo = Depends(AuthUtil
     pk_cols = info.layer_accessibility.pk_cols or []
 
     return {"pkCols": pk_cols, "meta": {"uuid": uuid, "count": len(pk_cols)}}
+
+
+class LayerAttributesMetaResponse(BaseModel):
+    columns: List[dict]
+    total_count: int
+    pkCols: List[str]
+
+
+@dch_layers_router.get(
+    "/layer_attributes_meta/{uuid}/",
+    response_model=Union[LayerAttributesMetaResponse, dict],
+    summary="Get Layer Attribute Schema and Count",
+)
+def get_layer_attributes_meta(
+    uuid: str,
+    extent_3857: Optional[str] = Query(None),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Returns field definitions, primary keys, and total matching record count.
+    Saves RAM by executing a fast COUNT(*) query rather than loading full GeoDataFrames.
+    """
+    with LayerInfo.managed_session() as session:
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
+
+    if not info or not info.layer_accessibility:
+        return Response(status_code=204)
+
+    access = info.layer_accessibility
+    engine = access.get_external_engine()
+    if not engine:
+        return Response(status_code=204)
+
+    table = DBQuery.safe_ident(access.table_name)
+    geom_col = DBQuery.safe_ident(access.geometry_col or "geom")
+    extent_filter = parse_extent_3857(extent_3857)
+
+    where_clause = ""
+    params = {}
+
+    if extent_filter:
+        minx, miny, maxx, maxy = extent_filter
+        where_clause = (
+            f" WHERE ST_Intersects({geom_col}, "
+            f"ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {info.srid or 4326}))"
+        )
+        params = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
+
+    # 1. Calculate Total Count efficiently
+    count_sql = text(f"SELECT COUNT(*) FROM {table}{where_clause}")
+    with Session(engine) as session:
+        total_count = session.execute(count_sql, params).scalar_one()
+
+    # 2. Extract column metadata dynamically using a 0-row sample
+    sample_sql = f"SELECT * FROM {table} LIMIT 0"
+    with Session(engine) as session:
+        sample_df = pd.read_sql(text(sample_sql), session.connection())
+
+    # Exclude geometry column from attribute table metadata
+    if access.geometry_col and access.geometry_col in sample_df.columns:
+        sample_df = sample_df.drop(columns=[access.geometry_col])
+
+    # Build standard grid column schema definitions using ManageDataFrameUtils
+    grid_meta = ManageDataFrameUtils.grid_response(
+        sample_df, pkCols=access.pk_cols or []
+    )
+
+    # FIX: Access .columns attribute directly on the AttributeTablePayload Pydantic model
+    return {
+        "columns": grid_meta.columns,
+        "total_count": total_count,
+        "pkCols": access.pk_cols or [],
+    }
+
+
+@dch_layers_router.get(
+    "/layer_attributes_page/{uuid}/",
+    summary="Get Paginated Layer Attribute Records",
+)
+def get_layer_attributes_page(
+        uuid: str,
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+        extent_3857: Optional[str] = Query(None),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Returns a chunked slice of attribute rows (LIMIT/OFFSET).
+    """
+    with LayerInfo.managed_session() as session:
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
+
+    if not info or not info.layer_accessibility:
+        return Response(status_code=204)
+
+    access = info.layer_accessibility
+    engine = access.get_external_engine()
+    if not engine:
+        return Response(status_code=204)
+
+    table = DBQuery.safe_ident(access.table_name)
+    geom_col = DBQuery.safe_ident(access.geometry_col or "geom")
+    extent_filter = parse_extent_3857(extent_3857)
+
+    # 1. Allowed column attributes (Guaranteed geometry exclusion)
+    allowed_cols = set(access.cols_name or [])
+
+    # Exclude geometry column explicitly
+    if access.geometry_col and access.geometry_col in allowed_cols:
+        allowed_cols.remove(access.geometry_col)
+
+    if allowed_cols:
+        cols_sql = ", ".join(DBQuery.safe_ident(c) for c in allowed_cols)
+    else:
+        # Fallback: query table columns dynamically if cols_name is omitted, minus geom
+        sample_sql = f"SELECT * FROM {table} LIMIT 0"
+        with Session(engine) as session:
+            sample_df = pd.read_sql(text(sample_sql), session.connection())
+        non_geom_cols = [c for c in sample_df.columns if c != access.geometry_col]
+        cols_sql = ", ".join(DBQuery.safe_ident(c) for c in non_geom_cols)
+
+    # Primary key deterministic sorting
+    pk_cols = access.pk_cols or []
+    order_by = ""
+    if pk_cols:
+        safe_pks = ", ".join(DBQuery.safe_ident(c) for c in pk_cols)
+        order_by = f" ORDER BY {safe_pks}"
+
+    where_clause = ""
+    params = {"limit": limit, "offset": offset}
+
+    if extent_filter:
+        minx, miny, maxx, maxy = extent_filter
+        where_clause = (
+            f" WHERE ST_Intersects({geom_col}, "
+            f"ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {info.srid or 4326}))"
+        )
+        params.update({"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy})
+
+    sql = text(f"SELECT {cols_sql} FROM {table}{where_clause}{order_by} LIMIT :limit OFFSET :offset")
+
+    with Session(engine) as session:
+        df = pd.read_sql(sql, session.connection(), params=params)
+
+    if df.empty:
+        return {"payload": []}
+
+    # 2. Convert all datetime/timestamp columns safely to ISO strings
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 3. Clean numeric rounding & replace NaN/NaT with None
+    df = df.round(2)
+    cleaned_df = df.astype(object).where(pd.notnull(df), None)
+
+    return {"payload": cleaned_df.to_dict(orient="records")}
