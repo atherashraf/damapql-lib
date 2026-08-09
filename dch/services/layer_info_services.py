@@ -352,13 +352,47 @@ class LayerInfoService:
             *,
             db,
             app_label: str,
-            layer_category_id,
-            quality_level_id=None,
-            user=None,
+            layer_category_id: int,
+            quality_level_id: Optional[int] = None,
+            user: Any = None,
             overwrite: bool = True,
             include_non_spatial: bool = False,
+            target_model: Optional[Any] = None,  # Accept direct model class
+            model_name: Optional[str] = None,  # Accept string model name
+            table_name: Optional[str] = None,  # Accept string table name
     ) -> dict:
         model_classes = self.model_inspector.get_model_classes_from_app(app_label)
+
+        # 1. Filter by direct model class
+        if target_model is not None:
+            model_classes = [m for m in model_classes if m == target_model]
+
+        # 2. Filter by string model name
+        elif model_name:
+            target_name = model_name.strip().lower()
+            model_classes = [
+                m for m in model_classes if m.__name__.lower() == target_name
+            ]
+
+        # 3. Filter by string table name
+        elif table_name:
+            target_table = table_name.strip().lower()
+            model_classes = [
+                m for m in model_classes
+                if self.model_inspector.get_table_name(m).lower() == target_table
+            ]
+
+        if not model_classes:
+            return {
+                "created_or_updated": 0,
+                "skipped": 0,
+                "failed": 0,
+                "messages": [
+                    f"No matching models found in app '{app_label}' "
+                    f"(target_model='{target_model}', model_name='{model_name}', table_name='{table_name}')"
+                ],
+            }
+
         engine = self.model_inspector.get_model_engine(app_label)
         db_conn_name = self.model_inspector.get_db_connection_name_for_app(
             app_label=app_label,
@@ -375,17 +409,17 @@ class LayerInfoService:
         for model_class in model_classes:
             try:
                 _, changed = self.save_model_layer_info(
-                        db=db,
-                        app_label=app_label,
-                        model_class=model_class,
-                        layer_category_id=layer_category_id,
-                        quality_level_id=quality_level_id,
-                        user=user,
-                        engine=engine,
-                        db_conn_name=db_conn_name,
-                        overwrite=overwrite,
-                        include_non_spatial=include_non_spatial,
-                    )
+                    db=db,
+                    app_label=app_label,
+                    model_class=model_class,
+                    layer_category_id=layer_category_id,
+                    quality_level_id=quality_level_id,
+                    user=user,
+                    engine=engine,
+                    db_conn_name=db_conn_name,
+                    overwrite=overwrite,
+                    include_non_spatial=include_non_spatial,
+                )
 
                 if changed:
                     result["created_or_updated"] += 1
