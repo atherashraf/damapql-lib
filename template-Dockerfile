@@ -1,0 +1,46 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_PROGRESS_BAR=off \
+    PIP_DEFAULT_TIMEOUT=300 \
+    CPLUS_INCLUDE_PATH=/usr/include/gdal \
+    C_INCLUDE_PATH=/usr/include/gdal \
+    PROJ_DATA=/usr/share/proj \
+    GDAL_DATA=/usr/share/gdal
+
+WORKDIR /app
+
+# 1. Install system dependencies & C libraries for GIS/PostgreSQL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    gdal-bin \
+    libgdal-dev \
+    proj-bin \
+    proj-data \
+    libproj-dev \
+    libpq-dev \
+    libffi-dev \
+    curl \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Upgrade core Python build tooling
+RUN python -m pip install --upgrade pip setuptools wheel
+
+COPY requirements.txt /app/
+
+# 3. Dynamically resolve system GDAL version and install matching Python bindings + PyProj/Rasterio/Fiona
+RUN GDAL_VERSION=$(gdal-config --version) && \
+    pip install --no-cache-dir "GDAL==${GDAL_VERSION}.*" && \
+    pip install --no-cache-dir pyproj rasterio fiona
+
+# 4. Install remaining requirements
+RUN pip install --no-cache-dir -r requirements.txt --no-deps
+
+COPY . /app
+
+CMD ["python", "main.py"]
