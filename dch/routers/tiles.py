@@ -8,7 +8,7 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.models import LayerInfo, DBQuery
 from app.damapql.dch.services.raster_tile_service import RasterTileService
-from app.damapql.dch.utils.mvt_utils import MVTCache
+from app.damapql.dch.utils.mvt_utils import MVTCache, MVTUtils
 from app.damapql.utils.adapters.db import DBBase
 from digitalarzengine.utils.singletons import da_logger
 
@@ -72,17 +72,17 @@ async def get_raster_tile(uuid: str, z: int, x: int, y: int):
 
 @dch_tiles_router.get("/layer_mvt/{identifier}/{tile_size}/{z}/{x}/{y}")
 async def get_layer_mvt(
-        identifier: str,
-        tile_size: int,
-        z: int,
-        x: int,
-        y: int,
-        model_name: str | None = Query(None),
-        table_name: str | None = Query(None),
-        geom_col: str | None = Query(None),
-        db_key: str | None = Query(None),
-        resolution: float = 0,
-        cols: list[str] | None = Query(None),
+    identifier: str,
+    tile_size: int,
+    z: int,
+    x: int,
+    y: int,
+    model_name: str | None = Query(None),
+    table_name: str | None = Query(None),
+    geom_col: str | None = Query(None),
+    db_key: str | None = Query(None),
+    resolution: float = 0,
+    cols: list[str] | None = Query(None),
 ):
     """
     Unified MVT tile endpoint supporting:
@@ -90,6 +90,7 @@ async def get_layer_mvt(
     2) Model Name resolution via ModelUtils (`model_name=WASAPipeModel`)
     3) Direct PostGIS table name lookup (`table_name=public.canals`)
     """
+    model_cls = None
     external_engine = None
     target_table = None
     target_geom = None
@@ -131,7 +132,6 @@ async def get_layer_mvt(
             info_dict = ModelUtils.get_model_info(target_model_name)
             model_cls = info_dict["model"]
 
-            # ModelHelpersMixin utilities
             external_engine = model_cls.get_engine()
             target_table = model_cls.__tablename__
 
@@ -142,13 +142,11 @@ async def get_layer_mvt(
             if pk_fields:
                 pk_sql_fragment = " || '-' || ".join([f'"{f}"' for f in pk_fields]) + " as pk"
 
-            # Auto-detect accessible columns from SQLAlchemy table keys
             all_fields = model_cls.get_fields()
             allowed_cols = set([f for f in all_fields if f != target_geom])
             layer_name = model_cls.__name__
 
         except ValueError:
-            # Fallback if model_name was not found and table_name was not provided
             if not table_name:
                 raise HTTPException(status_code=404, detail=f"Model or Layer '{identifier}' not found")
 
@@ -178,22 +176,29 @@ async def get_layer_mvt(
             return Response(content=b"", media_type="application/vnd.mapbox-vector-tile")
 
     # -------------------------------------------------------------
-    # COLUMN & VARIANT CACHING PIPELINE
+    # COLUMN & VARIANT HASHING PIPELINE
     # -------------------------------------------------------------
     requested_cols = cols or list(allowed_cols)
     if allowed_cols:
         requested_cols = [c for c in requested_cols if c in allowed_cols]
     requested_cols = sorted(set(requested_cols))
-
-    # Incorporate feature_count into variant hash
+    if resolution <= 0:
+        # Standard Web Mercator pixel resolution approximation at zoom z
+        # Higher zoom (e.g. z=18) -> tiny tolerance (~0.3m) -> high detail
+        # Lower zoom (e.g. z=4)  -> large tolerance (~4891m) -> small payload
+        resolution = 78271.52 / (2 ** z)
+    # Construct variant hash (Includes tile_size & resolution)
     variant = MVTCache.build_variant(
         cols=requested_cols,
         resolution=resolution,
+        tile_size=tile_size,
         feature_count=feature_count,
-        extra={"table": target_table, "model": model_name or ""}
+        extra={"table": target_table, "model": model_name or ""},
     )
 
-    # Cache Read
+    # -------------------------------------------------------------
+    # CACHE READ
+    # -------------------------------------------------------------
     try:
         cached = MVTCache.get_cached_tile(identifier, x, y, z, variant)
         if cached:
@@ -201,40 +206,72 @@ async def get_layer_mvt(
     except Exception as cache_err:
         da_logger.exception(f"[MVTCacheReadError] identifier={identifier} - {cache_err}")
 
-    # Generate MVT SQL (Double-quoting all dynamic column names)
-    safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
-    all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols) if safe_cols else pk_sql_fragment
+    # -------------------------------------------------------------
+    # CONCURRENCY LOCK (Prevent Thundering Herd / PostGIS Overload)
+    # -------------------------------------------------------------
+    got_lock = MVTCache.acquire_tile_lock(identifier, x, y, z, variant)
+    if not got_lock:
+        # Wait briefly for parallel request generating this tile to finish
+        for _ in range(10):
+            import asyncio
+            await asyncio.sleep(0.1)
+            cached = MVTCache.get_cached_tile(identifier, x, y, z, variant)
+            if cached:
+                return Response(content=bytes(cached), media_type="application/vnd.mapbox-vector-tile")
 
-    safe_geom = DBQuery.safe_ident(target_geom)
-    safe_table = DBQuery.safe_ident(target_table)
+    # -------------------------------------------------------------
+    # TILE GENERATION PIPELINE
+    # -------------------------------------------------------------
+    mvt_bytes = None
+    try:
+        if model_cls:
+            # High-performance engine-aware helper (PostGIS or Fallback)
+            mvt_bytes = MVTUtils.get_tile_bytes(
+                model_cls=model_cls,
+                x=x, y=y, z=z,
+                layer_name=layer_name,
+                requested_cols=requested_cols,
+                geom_col=target_geom,
+                extent=tile_size,
+                resolution=resolution,
+            )
+        else:
+            # SQL Query Path for LayerInfo UUID or Direct Table Name
+            safe_cols = [DBQuery.safe_ident(c) for c in requested_cols]
+            all_cols_sql = ", ".join([pk_sql_fragment] + safe_cols) if safe_cols else pk_sql_fragment
 
-    stmt = f"SELECT {all_cols_sql}, {safe_geom} FROM {safe_table}"
+            safe_geom = DBQuery.safe_ident(target_geom)
+            safe_table = DBQuery.safe_ident(target_table)
 
-    with Session(external_engine) as ext_session:
-        mvt_bytes = DBQuery.execute_query_as_mvt(
-            session=ext_session,
-            stmt=stmt,
-            z=z,
-            x=x,
-            y=y,
-            geom_col=target_geom,
-            layer_name=layer_name,
-            extent=tile_size,
-            resolution=resolution,
-        )
+            stmt = f"SELECT {all_cols_sql}, {safe_geom} FROM {safe_table}"
 
-    # Cache Write
-    if mvt_bytes:
-        try:
-            MVTCache.set_cached_tile(identifier, x, y, z, variant, mvt_bytes)
-        except Exception as cache_err:
-            da_logger.exception(f"[MVTCacheWriteError] identifier={identifier} - {cache_err}")
+            with Session(external_engine) as ext_session:
+                mvt_bytes = DBQuery.execute_query_as_mvt(
+                    session=ext_session,
+                    stmt=stmt,
+                    z=z, x=x, y=y,
+                    geom_col=target_geom,
+                    layer_name=layer_name,
+                    extent=tile_size,
+                    resolution=resolution,
+                )
+
+        # -------------------------------------------------------------
+        # CACHE WRITE
+        # -------------------------------------------------------------
+        if mvt_bytes:
+            try:
+                MVTCache.set_cached_tile(identifier, x, y, z, variant, mvt_bytes)
+            except Exception as cache_err:
+                da_logger.exception(f"[MVTCacheWriteError] identifier={identifier} - {cache_err}")
+
+    finally:
+        MVTCache.release_tile_lock(identifier, x, y, z, variant)
 
     return Response(
         content=mvt_bytes or b"",
-        media_type="application/vnd.mapbox-vector-tile"
+        media_type="application/vnd.mapbox-vector-tile",
     )
-
 
 @dch_tiles_router.delete("/clear_cache/{uuid}/")
 async def clear_cache(

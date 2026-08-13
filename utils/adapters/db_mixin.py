@@ -41,6 +41,28 @@ def _normalize_choice(value):
 class AmbiguousGeometryError(Exception):
     pass
 
+from enum import Enum
+
+class EngineType(str, Enum):
+    POSTGRESQL = "postgresql"
+    SQLITE = "sqlite"
+    MYSQL = "mysql"
+    ORACLE = "oracle"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_dialect(cls, dialect_name: str) -> "EngineType":
+        name = (dialect_name or "").lower()
+        if "postgres" in name:
+            return cls.POSTGRESQL
+        if "sqlite" in name:
+            return cls.SQLITE
+        if "mysql" in name or "mariadb" in name:
+            return cls.MYSQL
+        if "oracle" in name:
+            return cls.ORACLE
+        return cls.UNKNOWN
+
 
 class ModelHelpersMixin:
     class _Meta:
@@ -866,3 +888,28 @@ class ModelHelpersMixin:
                 )
             )
             return cls.to_dataframe(qs=query, is_spatial=True, geom_col=geom_col_name, srid=srid)
+
+    # -------------------------------------------------------
+    # ENGINE & DIALECT UTILITIES
+    # -------------------------------------------------------
+    @classmethod
+    def get_engine_type(cls, app_label: str = None, db_key: str = None) -> EngineType:
+        """
+        Returns the normalized EngineType enum for the model's active engine.
+        Useful for branching logic (e.g. PostGIS ST_AsMVT vs. Python Mercantile).
+        """
+        engine = cls.get_engine(app_label=app_label, db_key=db_key)
+        return EngineType.from_dialect(engine.dialect.name)
+
+    @classmethod
+    def is_postgres(cls, app_label: str = None, db_key: str = None) -> bool:
+        """Convenience check to verify if the underlying engine is PostgreSQL/PostGIS."""
+        return cls.get_engine_type(app_label=app_label, db_key=db_key) == EngineType.POSTGRESQL
+
+    @classmethod
+    def supports_native_mvt(cls, app_label: str = None, db_key: str = None) -> bool:
+        """
+        Flag indicating if native database MVT generation (ST_AsMVT / ST_TileEnvelope)
+        can be used directly on this connection.
+        """
+        return cls.is_postgres(app_label=app_label, db_key=db_key)

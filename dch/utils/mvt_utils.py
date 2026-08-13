@@ -1,13 +1,16 @@
 import hashlib
 import json
 import math
-import re
+import os
 
 import geopandas as gpd
 import mapbox_vector_tile
 import mercantile
 import numpy as np
+import redis
 import shapely
+from digitalarzengine.io.managers.db_manager import GeoDBManager
+from digitalarzengine.utils.singletons import da_logger
 from shapely import transform
 from shapely.geometry import box, LineString, Point, MultiLineString, MultiPoint, mapping, shape
 from shapely.geometry.base import BaseGeometry
@@ -16,8 +19,22 @@ from sqlalchemy.orm import Session
 
 from app.damapql.dch.models import LayerInfo
 from app.damapql.utils.adapters.db import DBBase
-from digitalarzengine.io.managers.db_manager import GeoDBManager
-from digitalarzengine.utils.singletons import da_logger
+from app.damapql.utils.adapters.db_mixin import EngineType
+
+# -------------------------------------------------------------------
+# REDIS CLIENT INITIALIZATION
+# -------------------------------------------------------------------
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+try:
+    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=False,
+        # CRITICAL: Preserves raw binary MVT byte stream
+        socket_timeout=1.0,  # Keeps tile serving fast if Redis goes offline
+        socket_connect_timeout=1.0, )
+except Exception as e:
+    redis_client = None
+    da_logger.warning(f"⚠️ Redis client failed to initialize: {e}")
 
 
 class MVTUtils:
@@ -126,7 +143,7 @@ class MVTUtils:
 
         geom_col = layer_access.geometry_col
         safe_cols_list = [f'"{c}"' for c in layer_access.cols_name if
-            c != geom_col and c.lower() != 'geom' and c.lower() != 'pk']
+                          c != geom_col and c.lower() != 'geom' and c.lower() != 'pk']
         cols = ", ".join(safe_cols_list) if safe_cols_list else ""
 
         geom_transform = (
@@ -220,7 +237,6 @@ class MVTUtils:
         gdf = gdf[gdf[g_col].notnull()]
         return gdf
 
-
     @classmethod
     def gdf_to_mvt(cls, gdf: gpd.GeoDataFrame, tile_extent_3857: tuple, name: str) -> bytes:
         if gdf.empty:
@@ -262,7 +278,7 @@ class MVTUtils:
                         return str(v) if not isinstance(v, (str, int, float, bool)) else v
 
                     features.append({"geometry": geom,
-                        "properties": {k: clean_val(v) for k, v in row.items() if k != geometry_column}})
+                                     "properties": {k: clean_val(v) for k, v in row.items() if k != geometry_column}})
 
                 except Exception as e:
                     da_logger.exception(f"Failed to process geometry: {e}")
@@ -274,28 +290,18 @@ class MVTUtils:
 
     @classmethod
     def mvt_to_gdf(cls, mvt_bytes: bytes, layer_name: str = None, tile_extent_3857: tuple = None,
-            y_coord_down: bool = True) -> gpd.GeoDataFrame:
+                   y_coord_down: bool = True) -> gpd.GeoDataFrame:
         """
         Decodes raw MVT (Mapbox Vector Tile) bytes into a GeoPandas GeoDataFrame.
-
-        :param mvt_bytes: The raw MVT binary content.
-        :param layer_name: Optional name of the layer to extract. If None, decodes the first layer found.
-        :param tile_extent_3857: Tuple of (minx, miny, maxx, maxy) in EPSG:3857.
-                                  If provided, coordinates are transformed from local tile space to EPSG:3857.
-                                  If None, geometries remain in MVT tile pixel coordinates (0 to 4096).
-        :param y_coord_down: Standard MVT layout has Y pointing downward (top-left origin).
-        :return: A GeoDataFrame with parsed geometry and feature properties.
         """
         if not mvt_bytes:
             return gpd.GeoDataFrame()
 
-        # 1. Decode MVT binary data
         tile_data = mapbox_vector_tile.decode(mvt_bytes, y_coord_down=y_coord_down)
 
         if not tile_data:
             return gpd.GeoDataFrame()
 
-        # 2. Extract requested layer or target the first available layer
         if layer_name:
             if layer_name not in tile_data:
                 da_logger.warning(
@@ -310,7 +316,6 @@ class MVTUtils:
         if not features:
             return gpd.GeoDataFrame()
 
-        # 3. Reconstruct Shapely Geometries and Properties
         records = []
         for feat in features:
             geom_dict = feat.get("geometry")
@@ -320,7 +325,6 @@ class MVTUtils:
                 properties["mvt_id"] = feat["id"]
 
             try:
-                # Convert GeoJSON-like dict to Shapely geometry
                 geom = shape(geom_dict)
                 properties["geometry"] = geom
                 records.append(properties)
@@ -332,7 +336,6 @@ class MVTUtils:
 
         gdf = gpd.GeoDataFrame(records)
 
-        # 4. (Optional) Invert the Tile Space Transformation back to EPSG:3857
         if tile_extent_3857:
             minx, miny, maxx, maxy = tile_extent_3857
             extent_x = maxx - minx
@@ -341,8 +344,6 @@ class MVTUtils:
             def to_3857_coords(coords):
                 x = coords[:, 0]
                 y = coords[:, 1]
-
-                # Reverse scaling and translation matching transform_geometry_to_tile_space
                 wx = minx + (x / cls.MVT_EXTENT) * extent_x
                 wy = maxy - (y / cls.MVT_EXTENT) * extent_y if y_coord_down else miny + (y / cls.MVT_EXTENT) * extent_y
                 return np.column_stack([wx, wy])
@@ -352,19 +353,271 @@ class MVTUtils:
 
         return gdf
 
+    @classmethod
+    def get_tile_bytes(cls, model_cls: type, x: int, y: int, z: int, layer_name: str | None = None,
+                       requested_cols: list[str] | None = None, geom_col: str | None = None, extent: int = 4096,
+                       buffer: int = 64, resolution: float = 0, session: Session | None = None) -> bytes:
+        """
+        Engine-aware MVT tile generator.
+
+        - If Engine is PostgreSQL: Executes native ST_AsMVT pipeline in database kernel.
+        - If Engine is SQLite/SpatiaLite/Other: Falls back to Python (mercantile + GeoPandas + mapbox_vector_tile).
+        """
+        engine = model_cls.get_engine()
+        engine_type = EngineType.from_dialect(engine.dialect.name)
+
+        layer_name = layer_name or model_cls.__name__
+        target_table = model_cls.__tablename__
+
+        detected_geom, srid = model_cls.get_geom_col_name_srid()
+        target_geom = geom_col or detected_geom or "geom"
+        srid = srid or 4326
+
+        pk_fields = model_cls.get_primary_key_fields()
+        all_cols = model_cls.get_fields(skip_fields=[target_geom])
+
+        if requested_cols:
+            safe_cols = [c for c in requested_cols if c in all_cols and c not in pk_fields]
+        else:
+            safe_cols = [c for c in all_cols if c not in pk_fields]
+
+        if engine_type == EngineType.POSTGRESQL:
+            return cls._get_postgis_mvt_bytes(engine=engine, session=session, target_table=target_table,
+                                              target_geom=target_geom, srid=srid, pk_fields=pk_fields,
+                                              safe_cols=safe_cols, layer_name=layer_name, x=x, y=y, z=z, extent=extent,
+                                              buffer=buffer, resolution=resolution)
+        else:
+            return cls._get_fallback_mvt_bytes(model_cls=model_cls, session=session, target_geom=target_geom,
+                                               requested_cols=safe_cols + pk_fields, layer_name=layer_name, x=x, y=y,
+                                               z=z)
+
+    @classmethod
+    def _get_postgis_mvt_bytes(cls, engine, session: Session | None, target_table: str, target_geom: str, srid: int,
+            pk_fields: list[str], safe_cols: list[str], layer_name: str, x: int, y: int, z: int, extent: int = 4096,
+            buffer: int = 64, resolution: float = 0, ) -> bytes:
+        """Executes native PostGIS ST_AsMVT pipeline directly inside PostgreSQL using spatial index filtering."""
+
+        quoted_geom = f'"{target_geom}"'
+        quoted_table = f'"{target_table}"'
+
+        if pk_fields:
+            pk_expr = " || '-' || ".join([f'"{f}"' for f in pk_fields]) + " AS pk"
+        else:
+            pk_expr = '"id" AS pk'
+
+        cols_sql = ", " + ", ".join([f'"{c}"' for c in safe_cols]) if safe_cols else ""
+
+        # Geometry transformation for rendering (3857)
+        geom_transform = (f'ST_Transform({quoted_geom}, 3857)' if srid != 3857 else quoted_geom)
+
+        if resolution > 0:
+            geom_transform = f'ST_SimplifyPreserveTopology({geom_transform}, {resolution})'
+
+        # Target bounding box filter expression (Uses native GIST index!)
+        if srid != 3857:
+            native_bbox_filter = f'{quoted_geom} && ST_Transform(tile_bounds.bbox, {srid})'
+        else:
+            native_bbox_filter = f'{quoted_geom} && tile_bounds.bbox'
+
+        query = text(f"""
+                WITH tile_bounds AS (
+                    SELECT ST_TileEnvelope(:z, :x, :y) AS bbox
+                ),
+                geom_prep AS (
+                    SELECT
+                        {pk_expr},
+                        {geom_transform} AS geom_3857
+                        {cols_sql}
+                    FROM {quoted_table}, tile_bounds
+                    WHERE {quoted_geom} IS NOT NULL 
+                      AND {native_bbox_filter}
+                ),
+                mvt_features AS (
+                    SELECT
+                        pk,
+                        ST_AsMVTGeom(
+                            geom_3857,
+                            tile_bounds.bbox,
+                            extent => :extent,
+                            buffer => :buffer,
+                            clip_geom => true
+                        ) AS geom
+                        {cols_sql}
+                    FROM geom_prep, tile_bounds
+                )
+                SELECT ST_AsMVT(mvt_features.*, :layer_name, :extent, 'geom')
+                FROM mvt_features
+                WHERE geom IS NOT NULL;
+            """)
+
+        params = {"z": z, "x": x, "y": y, "extent": extent, "buffer": buffer, "layer_name": layer_name}
+
+        if session:
+            mvt_res = session.execute(query, params).scalar()
+        else:
+            with Session(engine) as s:
+                mvt_res = s.execute(query, params).scalar()
+
+        return bytes(mvt_res) if mvt_res else b""
+
+    @classmethod
+    def _get_fallback_mvt_bytes(cls, model_cls: type, session: Session | None, target_geom: str,
+                                requested_cols: list[str], layer_name: str, x: int, y: int, z: int) -> bytes:
+        """Fallback Python pipeline (SQLite/SpatiaLite) using ModelHelpersMixin.to_gdf()."""
+
+        env_3857 = cls.xyz_to_extent_3857(x, y, z)
+        minx, miny, maxx, maxy = env_3857['minx'].iloc[0], env_3857['miny'].iloc[0], env_3857['maxx'].iloc[0], \
+            env_3857['maxy'].iloc[0]
+
+        gdf = model_cls.to_gdf(geom_col_name=target_geom, target_crs=3857)
+
+        if gdf.empty:
+            return b""
+
+        bbox_geom = box(minx, miny, maxx, maxy)
+        gdf = gdf[gdf.geometry.intersects(bbox_geom)].copy()
+
+        if gdf.empty:
+            return b""
+
+        keep_cols = [c for c in requested_cols if c in gdf.columns] + [gdf.geometry.name]
+        gdf = gdf[keep_cols]
+
+        return cls.gdf_to_mvt(gdf, (minx, miny, maxx, maxy), name=layer_name)
+
 
 class MVTCache:
+    DEFAULT_TTL = 60 * 60 * 24 * 7  # 7 Days
+
+    # ---------------------------------------------------------------
+    # 1. VARIANT BUILDER (Includes tile_size & resolution)
+    # ---------------------------------------------------------------
     @staticmethod
-    def ensure_cache_table(session, uuid: str):
-        if not re.fullmatch(r"[A-Fa-f0-9\-]+", uuid):
-            raise ValueError("Invalid uuid")
+    def build_variant(cols: list[str] | None = None, resolution: float = 0, tile_size: int = 4096,
+            feature_count: int | None = None, extra: dict | None = None, ) -> str:
+        """
+        Builds a deterministic SHA-1 hash for tile variants.
+        Includes tile_size to prevent extent mismatches between map renders.
+        """
+        normalized = {"cols": sorted(set(cols or [])), "resolution": resolution, "tile_size": tile_size, }
 
-        clean_uuid = uuid.replace("-", "")
-        table_name = f"{clean_uuid}_xyz"
-        index_name = f"{table_name}_idx"
+        if feature_count is not None:
+            normalized["feature_count"] = feature_count
 
-        session.execute(text(f'''
-            CREATE TABLE IF NOT EXISTS "{table_name}" (
+        if extra:
+            clean_extra = {k: str(v) for k, v in extra.items()}
+            normalized.update(clean_extra)
+
+        raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+    # ---------------------------------------------------------------
+    # 2. CACHE READ (Redis with SQLite Failover)
+    # ---------------------------------------------------------------
+    @classmethod
+    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
+        key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+
+        # Try Redis First
+        if redis_client:
+            try:
+                cached = redis_client.get(key)
+                if cached:
+                    return cached
+            except (redis.ConnectionError, redis.TimeoutError) as err:
+                da_logger.warning(f"[RedisUnavailable] Falling back to SQLite cache read: {err}")
+            except Exception as err:
+                da_logger.exception(f"[RedisReadError] {err}")
+
+        # Fallback to SQLite
+        return cls._get_sqlite_tile(layer_uuid, x, y, z, variant)
+
+    # ---------------------------------------------------------------
+    # 3. CACHE WRITE (Redis with SQLite Failover)
+    # ---------------------------------------------------------------
+    @classmethod
+    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes,
+            ttl: int = DEFAULT_TTL, ) -> None:
+        if not mvt_bytes:
+            return
+
+        key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+
+        redis_success = False
+        if redis_client:
+            try:
+                redis_client.set(key, mvt_bytes, ex=ttl)
+                redis_success = True
+            except (redis.ConnectionError, redis.TimeoutError) as err:
+                da_logger.warning(f"[RedisUnavailable] Write falling back to SQLite: {err}")
+            except Exception as err:
+                da_logger.exception(f"[RedisWriteError] {err}")
+
+        if not redis_success:
+            cls._set_sqlite_tile(layer_uuid, x, y, z, variant, mvt_bytes)
+
+    # ---------------------------------------------------------------
+    # 4. CONCURRENCY CONTROL (Distributed Tile Locking)
+    # ---------------------------------------------------------------
+    @classmethod
+    def acquire_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, timeout: int = 5) -> bool:
+        if not redis_client:
+            return True
+
+        lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+        try:
+            return bool(redis_client.set(lock_key, b"1", nx=True, ex=timeout))
+        except Exception:
+            return True
+
+    @classmethod
+    def release_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> None:
+        if redis_client:
+            lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+            try:
+                redis_client.delete(lock_key)
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------------
+    # 5. SQLITE FALLBACK IMPLEMENTATION
+    # ---------------------------------------------------------------
+    @classmethod
+    def _get_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
+        try:
+            engine = DBBase.get_engine(db_key="cache_db")
+            with Session(engine) as session:
+                table = cls._ensure_sqlite_table(session, layer_uuid)
+                return session.execute(
+                    text(f"SELECT mvt FROM {table} WHERE x=:x AND y=:y AND z=:z AND variant=:variant"),
+                    {"x": x, "y": y, "z": z, "variant": variant}, ).scalar_one_or_none()
+        except Exception as err:
+            da_logger.exception(f"[SQLiteCacheReadError] {err}")
+            return None
+
+    @classmethod
+    def _set_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes) -> None:
+        try:
+            engine = DBBase.get_engine(db_key="cache_db")
+            with Session(engine) as session:
+                table = cls._ensure_sqlite_table(session, layer_uuid)
+                session.execute(text(f"""
+                        INSERT INTO {table} (x, y, z, variant, mvt) 
+                        VALUES (:x, :y, :z, :variant, :mvt)
+                        ON CONFLICT (x, y, z, variant) 
+                        DO UPDATE SET mvt = EXCLUDED.mvt
+                    """), {"x": x, "y": y, "z": z, "variant": variant, "mvt": mvt_bytes}, )
+                session.commit()
+        except Exception as err:
+            da_logger.exception(f"[SQLiteCacheWriteError] {err}")
+
+    @staticmethod
+    def _ensure_sqlite_table(session: Session, uuid: str) -> str:
+        clean_uuid = "".join(c for c in uuid if c.isalnum() or c == "_")
+        table_name = f'"{clean_uuid}_xyz"'
+
+        session.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
                 x INTEGER NOT NULL,
                 y INTEGER NOT NULL,
                 z INTEGER NOT NULL,
@@ -372,88 +625,31 @@ class MVTCache:
                 mvt BLOB NOT NULL,
                 PRIMARY KEY (x, y, z, variant)
             )
-        '''))
-
-        session.execute(text(f'''
-            CREATE INDEX IF NOT EXISTS "{index_name}"
-            ON "{table_name}" (z, x, y, variant)
-        '''))
-
+        """))
         session.commit()
-        return f'"{table_name}"'
-
-    @classmethod
-    def get_cache_engine(cls):
-        return DBBase.get_engine(db_key="cache_db")
-
-    @classmethod
-    def get_cache_table(cls, session, layer_uuid: str):
-        return cls.ensure_cache_table(session, layer_uuid)
-
-    @staticmethod
-    def build_variant(cols: list[str] | None = None, resolution: float = 0, feature_count: int | None = None,
-            extra: dict | None = None) -> str:
-        normalized = {"cols": sorted(set(cols or [])), "resolution": resolution, }
-
-        if feature_count is not None:
-            normalized["feature_count"] = feature_count
-
-        if extra:
-            normalized.update(extra)
-
-        raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
-
-    @classmethod
-    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str):
-        engine = cls.get_cache_engine()
-
-        with Session(engine) as session:
-            table = cls.get_cache_table(session, layer_uuid)
-
-            return session.execute(text(f"SELECT mvt FROM {table} "
-                                        f"WHERE x=:x AND y=:y AND z=:z AND variant=:variant"),
-                {"x": x, "y": y, "z": z, "variant": variant, }, ).scalar_one_or_none()
-
-    @classmethod
-    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes):
-        if not mvt_bytes:
-            return
-
-        engine = cls.get_cache_engine()
-
-        with Session(engine) as session:
-            table = cls.get_cache_table(session, layer_uuid)
-
-            session.execute(text(f"INSERT INTO {table} (x, y, z, variant, mvt) "
-                                 f"VALUES (:x, :y, :z, :variant, :mvt) "
-                                 f"ON CONFLICT (x, y, z, variant) "
-                                 f"DO UPDATE SET mvt = EXCLUDED.mvt"),
-                {"x": x, "y": y, "z": z, "variant": variant, "mvt": mvt_bytes, }, )
-            session.commit()
+        return table_name
 
     @classmethod
     def clear_layer_cache(cls, layer_uuid: str) -> int:
-        engine = cls.get_cache_engine()
+        cleared_count = 0
+        if redis_client:
+            try:
+                keys = redis_client.keys(f"mvt:{layer_uuid}:*")
+                if keys:
+                    cleared_count = redis_client.delete(*keys)
+            except Exception as err:
+                da_logger.exception(f"[RedisCacheClearError] {err}")
 
-        with Session(engine) as session:
-            table = cls.get_cache_table(session, layer_uuid)
+        # Clear SQLite as well
+        try:
+            engine = DBBase.get_engine(db_key="cache_db")
+            with Session(engine) as session:
+                table = cls._ensure_sqlite_table(session, layer_uuid)
+                res = session.execute(text(f"DELETE FROM {table}"))
+                session.commit()
+                cleared_count += res.rowcount or 0
+        except Exception as err:
+            da_logger.exception(f"[SQLiteCacheClearError] {err}")
 
-            result = session.execute(text(f"DELETE FROM {table}"))
-            session.commit()
-
-            da_logger.info(f"Cleared {result.rowcount} tiles for layer {layer_uuid}")
-            return result.rowcount or 0
-
-    @classmethod
-    def clear_variant_cache(cls, layer_uuid: str, variant: str) -> int:
-        engine = cls.get_cache_engine()
-
-        with Session(engine) as session:
-            table = cls.get_cache_table(session, layer_uuid)
-
-            result = session.execute(text(f"DELETE FROM {table} WHERE variant = :variant"), {"variant": variant}, )
-            session.commit()
-
-            da_logger.info(f"Cleared {result.rowcount} cached tiles for layer {layer_uuid}, variant={variant}")
-            return result.rowcount or 0
+        da_logger.info(f"Cleared {cleared_count} tiles for layer {layer_uuid}")
+        return cleared_count
