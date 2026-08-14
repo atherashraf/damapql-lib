@@ -22,3 +22,4 @@ itsdangerous
 jenkspy
 lxml
 asyncpg
+redis~=8.1.0

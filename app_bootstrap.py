@@ -17,8 +17,30 @@ from app.damapql.settings import (
 )
 from app.lbdc.routers import lbdc_router
 
-
 AppExtension = Callable[[FastAPI], None]
+
+
+def check_redis_connection() -> bool:
+    """
+    Verifies Redis connectivity at startup.
+    Logs success or a warning indicating fallback mode if Redis is offline.
+    """
+    try:
+        from app.damapql.dch.utils.mvt_utils import redis_client  # Adjust import path as needed
+
+        if redis_client is None:
+            da_logger.warning("⚠️ Redis client is not initialized. MVT cache will fall back to SQLite.")
+            return False
+
+        if redis_client.ping():
+            da_logger.success("🚀 Redis connected successfully! MVT vector tile cache active.")
+            return True
+
+    except Exception as exc:
+        da_logger.warning(
+            f"⚠️ Redis connection failed ({exc}). MVT cache will fall back to SQLite/direct PostGIS rendering."
+        )
+    return False
 
 
 def import_object(import_path: str) -> Any:
@@ -51,8 +73,8 @@ def import_object(import_path: str) -> Any:
 
 
 def configure_extensions(
-    app: FastAPI,
-    extension_paths: list[str],
+        app: FastAPI,
+        extension_paths: list[str],
 ) -> None:
     """
     Load and execute application-specific extension functions.
@@ -74,9 +96,6 @@ def configure_extensions(
         extension(app)
 
 
-# app/core/model_loader.py or directly in create_app file
-
-
 def load_all_app_models() -> None:
     """
     Dynamically imports the 'models' module for every registered app in DA_APPS.
@@ -95,13 +114,13 @@ def load_all_app_models() -> None:
             importlib.import_module(models_module_path)
             da_logger.info(f"Loaded models for app: '{app_label}' ({models_module_path})")
         except ModuleNotFoundError as e:
-            # Handle case where an app simply doesn't have a models package/file
             if f"No module named '{models_module_path}'" in str(e):
                 da_logger.debug(f"App '{app_label}' has no models module to load.")
             else:
                 da_logger.error(f"Failed to load models for app '{app_label}': {e}")
         except Exception as e:
             da_logger.exception(f"Error initializing models for app '{app_label}': {e}")
+
 
 def configure_core_routers(app: FastAPI) -> None:
     app.include_router(
@@ -143,7 +162,10 @@ def create_app(port, title, description) -> FastAPI:
     # 🌟 1. Load all application ORM models upfront to populate SQLAlchemy's registry
     load_all_app_models()
 
-    # 2. First create the SQLAdmin instance.
+    # 🌟 2. Verify Redis Connectivity for Vector Tile Caching
+    check_redis_connection()
+
+    # 3. Create the SQLAdmin instance
     dch_admin = create_dch_admin(
         app,
         secret_key=DCH_SECRET_KEY,
@@ -152,14 +174,14 @@ def create_app(port, title, description) -> FastAPI:
         base_url="/dch_admin",
     )
 
-    # 3. Then explicitly register the core admin views.
+    # 4. Explicitly register core admin views
     from app.damapql.auth.admin_views import (
         register_auth_admin_views,
     )
 
     register_auth_admin_views(dch_admin)
 
-    # 4. Configure core routers & app extensions
+    # 5. Configure core routers & app extensions
     configure_core_routers(app)
 
     configure_extensions(
