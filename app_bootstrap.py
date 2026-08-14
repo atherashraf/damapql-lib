@@ -15,7 +15,7 @@ from app.damapql.settings import (
     DCH_DB_KEY,
     DCH_SECRET_KEY,
 )
-from app.lbdc.routers import lbdc_router
+
 
 AppExtension = Callable[[FastAPI], None]
 
@@ -133,10 +133,6 @@ def configure_core_routers(app: FastAPI) -> None:
         prefix="/dch",
     )
 
-    app.include_router(
-        lbdc_router,
-        prefix="/lbdc",
-    )
 
 
 def create_app(port, title, description) -> FastAPI:
