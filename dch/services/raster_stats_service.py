@@ -2,16 +2,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
-
-from app.damapql.dch.dtypes import AttributeTablePayload
-from digitalarzengine.utils.singletons import da_logger
 from fastapi import HTTPException
 
+from app.damapql.dch.dtypes import AttributeTablePayload
 from app.damapql.dch.models import LayerInfo, DataModel
+from app.damapql.dch.services.raster_access_service import RasterAccessService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-from digitalarzengine.io.cog_raster import COGRaster
-from digitalarzengine.io.rio_raster import RioRaster
+from digitalarzengine.io.managers.minio_manager import MinioManager
 from digitalarzengine.processing.raster.band_process import BandProcess
+from digitalarzengine.utils.singletons import da_logger
 
 
 @dataclass
@@ -20,114 +19,283 @@ class RasterInfoResult:
 
 
 class RasterStatsService:
+
+    # ============================================================
+    # LAYER
+    # ============================================================
+
     @staticmethod
-    def get_layer(uuid: str) -> LayerInfo:
+    def get_layer(uuid: str, ) -> LayerInfo:
+
         info = LayerInfo.get_layer_info_by_uuid(uuid)
+
         if not info:
-            raise HTTPException(status_code=404, detail="Layer metadata not found")
-        if not info.data_model or info.data_model.code != DataModel.R.name:
-            raise HTTPException(status_code=400, detail="Requested layer is not a raster model")
+            raise HTTPException(status_code=404, detail="Layer metadata not found", )
+
+        if (not info.data_model or info.data_model.code != DataModel.R.name):
+            raise HTTPException(status_code=400, detail="Requested layer is not a raster model", )
+
         return info
 
-    @staticmethod
-    def open_raster(info: LayerInfo) -> RioRaster:
-        raster = info.to_raster()
-        if raster is None:
-            raise HTTPException(status_code=404, detail="Raster file not found")
-        return raster
+    # ============================================================
+    # STYLE VALUE HELPER
+    # ============================================================
 
     @staticmethod
-    def open_cog(info: LayerInfo) -> COGRaster:
-        cog = info.to_cog()
-        if cog is None:
-            raise HTTPException(status_code=404, detail="COG file not found")
-        return cog
+    def _get_style_values(style: dict[str, Any], ) -> list[Any]:
+        """
+        Returns raster class values from layer styling.
+
+        Priority:
+        1. style["values"]
+        2. palette keys
+
+        Palette keys are converted to int/float when possible.
+        """
+
+        if "values" in style:
+            return style["values"]
+
+        values = []
+
+        for key in style.get("palette", {}, ).keys():
+
+            try:
+                number = float(key)
+
+                if number.is_integer():
+                    values.append(int(number))
+                else:
+                    values.append(number)
+
+            except (TypeError, ValueError,):
+                values.append(key)
+
+        return values
+
+    # ============================================================
+    # PIXEL VALUE
+    # ============================================================
 
     @classmethod
-    def get_pixel_value(cls, uuid: str, long: float, lat: float) -> dict[str, Any]:
+    def get_pixel_value(cls, uuid: str, long: float, lat: float, minio_manager: MinioManager | None = None, ) -> dict[
+        str, Any]:
+
         info = cls.get_layer(uuid)
+
+        raster = None
+
         try:
-            cog = cls.open_cog(info)
-            data = cog.get_pixel_value_at_long_lat(long, lat)
+            raster = RasterAccessService.open_cog(info, minio_manager, )
+
+            data = (raster.get_pixel_value_at_long_lat(long, lat, ))
+
             return {"payload": data}
+
         except HTTPException:
             raise
+
         except Exception as e:
-            da_logger.exception(f"Error extracting pixel value for uuid={uuid}: {e}")
-            raise HTTPException(status_code=500, detail="Internal processing error")
+
+            da_logger.exception(f"Error extracting pixel value "
+                                f"for uuid={uuid}: {e}")
+
+            raise HTTPException(status_code=500, detail="Internal processing error", )
+
+        finally:
+            if raster is not None:
+                try:
+                    raster.close()
+                except Exception:
+                    pass
+
+    # ============================================================
+    # RASTER INFO
+    # ============================================================
 
     @classmethod
-    def get_raster_info(cls, uuid: str) -> RasterInfoResult:
+    def get_raster_info(cls, uuid: str, minio_manager: MinioManager | None = None, ) -> RasterInfoResult:
+
         info = cls.get_layer(uuid)
 
+        raster = None
+
         try:
-            raster = cls.open_raster(info)
-            band_count = raster.get_spectral_resolution()
-            bands_info = {}
+            raster = RasterAccessService.open_cog(info, minio_manager, )
 
-            for band_index in range(1, band_count + 1):
-                data_array = raster.get_data_array(band_index)
-                nodata = raster.get_nodata_value()
-                bands_info[band_index] = BandProcess.get_summary_data(data_array, nodata)
+            band_count = (raster.get_spectral_resolution())
 
-            payload = {
-                "bandCount": band_count,
+            nodata = (raster.get_nodata_value())
+
+            bands_info: dict[int, Any] = {}
+
+            for band_index in range(1, band_count + 1, ):
+                data_array = (raster.get_data_array(band_index))
+
+                bands_info[band_index] = (BandProcess.get_summary_data(data_array, nodata, ))
+
+            payload = {"bandCount": band_count,
+
                 "bandsInfo": bands_info,
-                "driver": raster.get_driver_name(),
+
+                "driver": (raster.get_driver_name()),
+
                 "crs": str(raster.get_crs()),
-                "nodata": raster.get_nodata_value(),
-                "spatialResolution": raster.get_spatial_resolution(),
-                "spectralResolution": raster.get_spectral_resolution(),
-                "radiometricResolution": raster.get_radiometric_resolution(),
-            }
+
+                "nodata": nodata,
+
+                "spatialResolution": (raster.get_spatial_resolution()),
+
+                "spectralResolution": (band_count),
+
+                "radiometricResolution": (raster.get_radiometric_resolution()), }
+
             return RasterInfoResult(payload=payload)
 
         except HTTPException:
             raise
+
         except Exception as e:
-            da_logger.exception(f"Error extracting raster info for uuid={uuid}: {e}")
-            raise HTTPException(status_code=500, detail="Internal processing error")
+
+            da_logger.exception(f"Error extracting raster info "
+                                f"for uuid={uuid}: {e}")
+
+            raise HTTPException(status_code=500, detail="Internal processing error", )
+
+        finally:
+            if raster is not None:
+                try:
+                    raster.close()
+                except Exception:
+                    pass
+
+    # ============================================================
+    # ATTRIBUTE META
+    # ============================================================
 
     @classmethod
-    def get_attribute_summary_df(cls, uuid: str) -> pd.DataFrame:
-        """
-        Mirrors the raster branch currently used by /layer_attributes/.
-        """
+    def get_attribute_meta(cls, uuid: str, minio_manager: MinioManager | None = None, ) -> dict[str, Any]:
+
         info = cls.get_layer(uuid)
-        raster = cls.open_raster(info)
 
-        spec_res = raster.get_spectral_resolution()
+        raster = None
 
-        if spec_res == 1 and info.layer_styling:
-            style = info.layer_styling
-            if "values" in style:
-                values = style["values"]
+        try:
+            raster = RasterAccessService.open_cog(info, minio_manager, )
+
+            spec_res = (raster.get_spectral_resolution())
+
+            # ----------------------------------------------------
+            # Classified single-band raster
+            # ----------------------------------------------------
+
+            if (spec_res == 1 and info.layer_styling):
+
+                style = (info.layer_styling)
+
+                values = (cls._get_style_values(style))
+
+                labels = style.get("labels", [], )
+
+                total_count = (len(labels) if labels else len(values))
+
+            # ----------------------------------------------------
+            # Multi-band / continuous raster
+            # ----------------------------------------------------
+
             else:
-                palette = style.get("palette", {})
-                values = [int(key) for key in palette.keys()]
 
-            data = raster.get_data_array(1)
-            labels = style.get("labels", [])
+                no_of_summary_stats = 8
 
-            # spatial_res = raster.get_spatial_resolution(in_meter=True)
-            # res_in_km = (spatial_res[0] , spatial_res[1] )
-            # da_logger.info("res in km", res_in_km)
-            res = BandProcess.get_value_area_data(
-                data,
-                raster.get_nodata_value(),
-                raster.get_spatial_resolution(in_meter=True),
-                values,
-                labels,
-                unit="m2",
-                to_km2=True,
-                include_percent=True,
+                total_count = (no_of_summary_stats * spec_res)
 
-            )
-            return pd.DataFrame(res).rename(columns={"area": "area_sq_km"})
+            return {"columns": [], "total_count": total_count, "pkCols": [], }
 
-        return raster.get_band_summaries()
+        except HTTPException:
+            raise
+
+        except Exception as e:
+
+            da_logger.exception(f"Error extracting attribute meta "
+                                f"for uuid={uuid}: {e}")
+
+            raise HTTPException(status_code=500, detail=("Failed to calculate raster "
+                                                         "attribute metadata"), )
+
+        finally:
+            if raster is not None:
+                try:
+                    raster.close()
+                except Exception:
+                    pass
+
+    # ============================================================
+    # ATTRIBUTE SUMMARY DATAFRAME
+    # ============================================================
 
     @classmethod
-    def get_attribute_summary_grid(cls, uuid: str) -> AttributeTablePayload:
-        df = cls.get_attribute_summary_df(uuid)
-        return ManageDataFrameUtils.grid_response(df, pkCols=[])
+    def get_attribute_summary_df(cls, uuid: str, minio_manager: MinioManager | None = None, ) -> pd.DataFrame:
+
+        info = cls.get_layer(uuid)
+
+        raster = None
+
+        try:
+            cog_raster = RasterAccessService.open_cog(info, minio_manager, )
+            raster = cog_raster.get_rio_raster()
+            spec_res = (raster.get_spectral_resolution())
+
+            # ----------------------------------------------------
+            # Classified single-band raster
+            # ----------------------------------------------------
+
+            if (spec_res == 1 and info.layer_styling):
+                style = (info.layer_styling)
+
+                values = (cls._get_style_values(style))
+
+                labels = style.get("labels", [], )
+
+                data = (raster.get_data_array(1))
+
+                result = (BandProcess.get_value_area_data(data, raster.get_nodata_value(),
+                    raster.get_spatial_resolution(in_meter=True), values, labels, unit="m2", to_km2=True,
+                    include_percent=True, ))
+
+                return pd.DataFrame(result)
+
+            # ----------------------------------------------------
+            # Multi-band / continuous raster
+            # ----------------------------------------------------
+
+            return (raster.get_band_summaries())
+
+        except HTTPException:
+            raise
+
+        except Exception as e:
+
+            da_logger.exception(f"Error extracting raster attribute "
+                                f"summary for uuid={uuid}: {e}")
+
+            raise HTTPException(status_code=500, detail=("Failed to calculate raster "
+                                                         "attribute summary"), )
+
+        finally:
+            if raster is not None:
+                try:
+                    raster.close()
+                except Exception:
+                    pass
+
+    # ============================================================
+    # ATTRIBUTE SUMMARY GRID
+    # ============================================================
+
+    @classmethod
+    def get_attribute_summary_grid(cls, uuid: str,
+            minio_manager: MinioManager | None = None, ) -> AttributeTablePayload:
+
+        df = cls.get_attribute_summary_df(uuid=uuid, minio_manager=minio_manager, )
+
+        return ManageDataFrameUtils.grid_response(df, pkCols=[], )

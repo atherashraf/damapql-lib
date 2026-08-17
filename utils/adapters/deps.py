@@ -1,62 +1,58 @@
 """
-Database Dependency Module (deps.py)
------------------------------------
-Handles dynamic routing to multiple databases based on URL path.
+Database & Storage Dependency Module (deps.py)
+-----------------------------------------------
+Handles dynamic routing to multiple databases and MinIO object storage.
 Supports both Async (FastAPI) and Sync (SQLAdmin/Scripts) operations.
 
 USAGE EXAMPLES:
 
-1. Inside a FastAPI Router (Async):
+1. Inside a FastAPI Router (MinIO Dependency):
+    @router.get("/tile/{uuid}/{z}/{x}/{y}")
+    async def get_tile(
+        uuid: str, z: int, x: int, y: int,
+        minio: MinioManager = Depends(get_minio_manager)
+    ):
+        ...
+
+2. Inside a FastAPI Router (Database Async):
     @router.get("/users")
     async def read_users(db: AsyncSession = Depends(get_async_db)):
         result = await db.execute(select(User))
         return result.scalars().all()
 
-2. Inside a FastAPI Router (Sync):
-    @router.get("/items")
-    def read_items(db: Session = Depends(get_db)):
-        return db.query(Item).all()
+3. Standalone Script / Background Task (MinIO):
+    from deps import get_minio_manager_instance
 
-3. Standalone Script / Background Task (Sync):
-    from deps import sync_session_scope
-
-    with sync_session_scope(key=DEFAULT_DB_KEY) as db:
-        user = db.query(User).first()
-        # session is automatically closed/rolled back after block
-
-4. Standalone Script (Async):
-    from deps import get_async_session
-
-    async def my_task():
-        async for db in get_async_session(key="secondary"):
-            result = await db.execute(select(User))
-            # ...
+    minio = get_minio_manager_instance()
+    minio.upload_file("my-bucket", "test.tif", "/path/to/test.tif")
 """
 
 from __future__ import annotations
 
-from digitalarzengine.utils.singletons import da_logger
-from fastapi import Request
-from typing import Generator, AsyncGenerator
-from contextlib import contextmanager
-
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy import text
-from typing import Any
-
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
-from urllib.parse import quote_plus
-from typing import Dict
 import os
+from contextlib import contextmanager
+from typing import Any, AsyncGenerator, Dict, Generator
+from urllib.parse import quote_plus
 
+from fastapi import Request
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from digitalarzengine.io.managers.minio_manager import MinioManager
+from digitalarzengine.utils.singletons import da_logger
+
+from app.damapql.settings import (
+    DCH_APPS,
+    DCH_DB_KEY,
+    IS_LOCAL,
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MINIO_SECURE,
+)
 from app.damapql.utils.crypto import CryptoUtils
-from app.damapql.settings import IS_LOCAL
-
-# Expected structure from your digitalarzengine_settings.py
-from app.damapql.settings import DCH_APPS, DCH_DB_KEY
 from settings import DATABASES
 
 # --- Internal Registry for Connection Pooling ---
@@ -65,6 +61,30 @@ _async_session_factories: dict[str, sessionmaker] = {}
 
 _sync_engines: dict[str, Any] = {}
 _sync_session_factories: dict[str, sessionmaker] = {}
+
+_minio_instance: MinioManager | None = None
+
+
+# --- MinIO Storage Providers ---
+def get_minio_manager_instance() -> MinioManager:
+    """
+    Returns a cached singleton instance of MinioManager.
+    Useful for background jobs, scripts, and internal services.
+    """
+    global _minio_instance
+    if _minio_instance is None:
+        _minio_instance = MinioManager(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            secure=MINIO_SECURE,
+        )
+    return _minio_instance
+
+
+def get_minio_manager() -> MinioManager:
+    """FastAPI Dependency for injecting MinioManager into endpoints."""
+    return get_minio_manager_instance()
 
 
 # --- URL Builder ---
@@ -105,7 +125,7 @@ def get_async_engine_instance(key: str = DCH_DB_KEY):
             db_url,
             pool_pre_ping=True,
             pool_recycle=1800,
-            future=True
+            future=True,
         )
         _async_engines[key] = engine
         _async_session_factories[key] = sessionmaker(
@@ -122,7 +142,7 @@ def get_sync_engine_instance(key: str = DCH_DB_KEY):
             db_url,
             pool_pre_ping=True,
             pool_recycle=1800,
-            future=True
+            future=True,
         )
         _sync_engines[key] = engine
         _sync_session_factories[key] = sessionmaker(
@@ -143,6 +163,7 @@ async def get_async_session(key: str = DCH_DB_KEY) -> AsyncGenerator[AsyncSessio
             await session.rollback()
             raise
 
+
 def get_sync_session(key: str = DCH_DB_KEY) -> Generator[Session, None, None]:
     get_sync_engine_instance(key)
     factory = _sync_session_factories[key]
@@ -154,6 +175,7 @@ def get_sync_session(key: str = DCH_DB_KEY) -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
+
 
 # --- External Utilities ---
 @contextmanager
@@ -201,14 +223,7 @@ def get_db_url(db_key: str = DCH_DB_KEY) -> str:
         case _:
             db_engine = engine
 
-    sqlalchemy_url = f"{db_engine}://{user}:{password}@{host}:{port}/{name}"
-    # da_logger.debug(f"SQLAlchemy URL={sqlalchemy_url!r}")
-    return sqlalchemy_url
-
-
-# deps.py
-
-
+    return f"{db_engine}://{user}:{password}@{host}:{port}/{name}"
 
 
 class ExternalEngineRegistry:
@@ -220,13 +235,12 @@ class ExternalEngineRegistry:
     _engines: Dict[str, Engine] = {}
 
     @classmethod
-    def build_url(cls, conn: dict, is_pass_enc = True) -> str:
+    def build_url(cls, conn: dict, is_pass_enc: bool = True) -> str:
         """
         Build SQLAlchemy DB URL from connection params.
         Expected conn keys:
         engine, host, port, user, password, name
         """
-
         engine_type = conn["engine"]
 
         if engine_type == "postgresql":
@@ -252,13 +266,9 @@ class ExternalEngineRegistry:
 
     @classmethod
     def get(cls, key: str, conn: dict) -> Engine:
-        """
-        Returns a cached Engine for a given connection key.
-        """
+        """Returns a cached Engine for a given connection key."""
         if key not in cls._engines:
             if conn == {} and key in DATABASES:
-                if key not in DATABASES:
-                    raise ValueError(f"Unsupported DB key: {key} , params of DB key {key} doesnt exist")
                 conn = DATABASES[key]
                 conn["password"] = CryptoUtils().encrypt_txt(conn["password"])
 
@@ -286,8 +296,6 @@ class ExternalEngineRegistry:
         for engine in cls._engines.values():
             engine.dispose()
         cls._engines.clear()
-
-
 
 
 def terminate_idle_connections_for_engine(engine, idle_cutoff_minutes: int = 10) -> int:

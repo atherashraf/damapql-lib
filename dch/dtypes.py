@@ -1,13 +1,20 @@
+from __future__ import annotations
+
 import os
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List, Union, Literal
+from datetime import date, datetime
+from typing import Any, Dict, List, Literal, Optional, Union, Annotated, Tuple
 
+from app.damapql.dch.api_enum import AccessibilityType
 from digitalarzengine.io.managers.db_manager import DBString
-from pydantic import BaseModel, RootModel, ConfigDict, field_validator, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+
+# -----------------------------------------------------------------------------
+# Database Models
+# -----------------------------------------------------------------------------
 
 class DBConnectionCreate(BaseModel):
-    connection_name: str  # instead of name
+    connection_name: str
     engine: str
     params: DBString
 
@@ -28,7 +35,7 @@ class DBCredential(BaseModel):
                 "user": "********",
                 "password": "*********",
                 "name": "*******",
-                "port": "****"
+                "port": "5432",
             }
         }
     )
@@ -37,7 +44,7 @@ class DBCredential(BaseModel):
 class DBConnectionType(BaseModel):
     id: int
     name: str
-    params: Optional[DBCredential]
+    params: Optional[DBCredential] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -45,41 +52,99 @@ class DBConnectionType(BaseModel):
 class LayerCategoryType(BaseModel):
     id: int
     main: str
-    sub: Optional[str]
+    sub: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class LayerQualityLevelType(BaseModel):
+    id: int
+    level: int
+    name: str
+    description: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# -----------------------------------------------------------------------------
+# Accessibility Parameter Schemas
+# -----------------------------------------------------------------------------
+
+
+
+class AccessibilityParams(BaseModel):
+    type: AccessibilityType
+    model_config = ConfigDict(
+        from_attributes=True,
+        extra="allow",
+    )
+
 
 
 class LayerColumnParam(BaseModel):
     name: str
     d_type: Optional[str] = None
 
+class DBAccessibilityParams(AccessibilityParams):
+    type: Literal["db"] = "db"
 
-class DBAccessibilityParams(BaseModel):
     conn_name: str
     table_name: str
-    columns: List[LayerColumnParam] = []
+
+    columns: List[LayerColumnParam] = Field(default_factory=list)
+
     g_col: Optional[str] = None
-    pk_cols: List[str] = []
+    pk_cols: List[str] = Field(default_factory=list)
 
 
-class URLAccessibilityParams(BaseModel):
+
+class URLAccessibilityParams(AccessibilityParams):
+    type: Literal["url"] = "url"
+
     url_type: Optional[str] = None
-    url: Optional[str] = None
+    url: str
 
 
-import os
-from typing import Literal, Optional
-from pydantic import BaseModel, model_validator
+class MinioAccessibilityParams(AccessibilityParams):
+    type: Literal["minio"] = "minio"
 
-# 🌟 Added "ftp" to PathBaseType
+    bucket: str
+    object_name: str
+
+    spectral_resolution: Optional[int] = None
+    spatial_resolution: Optional[
+        Union[float, Tuple[float, float]]
+    ] = None
+    radiometric_resolution: Optional[str] = None
+
+    @property
+    def s3_uri(self) -> str:
+        return f"s3://{self.bucket}/{self.object_name.lstrip('/')}"
+
+class S3AccessibilityParams(AccessibilityParams):
+    type: Literal["s3"] = "s3"
+
+    bucket: str
+    object_name: str
+
+    spectral_resolution: Optional[int] = None
+    spatial_resolution: Optional[Union[float, List[float]]] = None
+    radiometric_resolution: Optional[str] = None
+
+    @property
+    def s3_uri(self) -> str:
+        return f"s3://{self.bucket}/{self.object_name.lstrip('/')}"
+
+
+
+
 PathBaseType = Literal["media_rel", "s3", "absolute", "url", "ftp"]
 
 
-class FileAccessibilityParams(BaseModel):
+class FileAccessibilityParams(AccessibilityParams):
+    type: Literal["file"] = "file"
     file_path: str
     path_base: PathBaseType = "media_rel"
-
-    # Kept for backward compatibility when reading existing DB JSONB params
     is_path_media_rel: Optional[bool] = None
 
     @model_validator(mode="before")
@@ -132,26 +197,27 @@ class FileAccessibilityParams(BaseModel):
         fp = self.file_path.strip()
         if not fp:
             return fp
-
         if self.path_base == "media_rel":
             return os.path.join(media_dir, self.clean_relative_path)
-
-        # "url", "s3", "ftp", and "absolute" return the raw protocol string
-        if self.path_base in ("url", "s3", "ftp", "absolute"):
-            return fp
-
         return fp
+
+
+LayerAccessibilityParams = Annotated[
+    Union[
+        DBAccessibilityParams,
+        URLAccessibilityParams,
+        MinioAccessibilityParams,
+        S3AccessibilityParams,
+        FileAccessibilityParams,
+    ],
+    Field(discriminator="type"),
+]
 
 
 class LayerAccessibilityType(BaseModel):
     id: int
-    accessibility_type: Optional[str]
-    params: Union[
-        DBAccessibilityParams,
-        URLAccessibilityParams,
-        FileAccessibilityParams,
-        Dict[str, Any],
-    ]
+    accessibility_type: Optional[str] = None
+    params: LayerAccessibilityParams
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -160,15 +226,12 @@ class LayerAccessibilityType(BaseModel):
     def _coerce_choice(cls, v):
         if v is None:
             return None
-
         code = getattr(v, "code", None)
         if code is not None:
             return code
-
         name = getattr(v, "name", None)
         if name is not None:
             return name
-
         return str(v)
 
     @field_validator("params", mode="before")
@@ -187,33 +250,24 @@ class LayerAccessibilityType(BaseModel):
         elif acc_type is not None:
             acc_type = str(acc_type)
 
+        if acc_type in ("S3", "MinIO") or ("bucket" in v and "object_name" in v):
+            return S3AccessibilityParams(**v)
+
         if acc_type == "DB":
             return DBAccessibilityParams(**v)
 
         if acc_type == "URL":
             return URLAccessibilityParams(**v)
 
-        # file-like payloads
         if "file_path" in v:
             return FileAccessibilityParams(**v)
 
         return v
 
 
-# class LayerAccessibilityType(BaseModel):
-#     id: int
-#     accessibility_type: Optional[str]
-#     params: Dict[str, Any]
-#     model_config = ConfigDict(from_attributes=True)
-
-
-class LayerQualityLevelType(BaseModel):
-    id: int
-    level: int
-    name: str
-    description: Optional[str]
-    model_config = ConfigDict(from_attributes=True)
-
+# -----------------------------------------------------------------------------
+# Layer & Map Schemas
+# -----------------------------------------------------------------------------
 
 class LayerInfoType(BaseModel):
     id: int
@@ -221,43 +275,32 @@ class LayerInfoType(BaseModel):
     app_label: str
     title: str
     layer_name: str
-    srid: Optional[int]
-    proj4: Optional[str]
-    extent: Optional[List[float]]
-    extent_3857: Optional[List[float]]
-    data_model: Any  # Assuming ChoiceType was backed by str
-    geom_type: Optional[List[str]]
-    layer_styling: Optional[Dict[str, Any]]
-    zoom_range: List[int]
-    uploaded_by: Optional[int]
+    srid: Optional[int] = None
+    proj4: Optional[str] = None
+    extent: Optional[List[float]] = None
+    extent_3857: Optional[List[float]] = None
+    data_model: Any
+    geom_type: Optional[List[str]] = None
+    layer_styling: Optional[Dict[str, Any]] = None
+    zoom_range: List[int] = Field(default_factory=lambda: [0, 30])
+    uploaded_by: Optional[int] = None
     uploaded_date: datetime
-    temporal_res: Optional[date]
-    extra_metadata: Optional[Dict[str, Any]]
-    category_id: Optional[int]
+    temporal_res: Optional[date] = None
+    extra_metadata: Optional[Dict[str, Any]] = None
+    category_id: Optional[int] = None
     layer_access_id: int
-    quality_level_id: Optional[int]
-    data_url: Optional[str]
-    layer_setting: Optional[Dict[str, Any]]
-    format: str
-    date_range_url: Optional[str]
-    model_type: Optional[str]
+    quality_level_id: Optional[int] = None
+    data_url: Optional[str] = None
+    layer_setting: Optional[Dict[str, Any]] = None
+    format: str = "COG"
+    date_range_url: Optional[str] = None
+    model_type: Optional[str] = None
 
-    # Relationships (optional or nested models if you want)
-    layer_category: Optional[Union[LayerCategoryType, int]]
-    # layer_accessibility: Optional[Union[LayerAccessibilityType,int]]
+    layer_category: Optional[Union[LayerCategoryType, int]] = None
     layer_accessibility: Union[int, LayerAccessibilityType]
-    quality_level: Optional[Union[LayerQualityLevelType, int]]
+    quality_level: Optional[Union[LayerQualityLevelType, int]] = None
 
     model_config = ConfigDict(from_attributes=True)
-
-    @classmethod
-    def from_orm(cls, obj):
-        res = cls.model_validate({
-            **obj.__dict__,
-            "data_model": obj.data_model.value,
-            "model_type": obj.model_type.value if obj.model_type else None
-        })
-        return res
 
     @field_validator("layer_accessibility", mode="before")
     @classmethod
@@ -278,29 +321,18 @@ class LayerInfoType(BaseModel):
             pass
         return v
 
-    # @field_validator("layer_styling", "layer_setting", "extra_metadata", mode="before")
-    # @classmethod
-    # def empty_str_to_none_for_dict_fields(cls, v):
-    #     if v == "":
-    #         return None
-    #     return v
-
 
 class LayerItem(BaseModel):
     uuid: str
     layerName: Optional[str] = None
     title: Optional[str] = None
-
     visible: bool = True
     opacity: float = 1.0
     zIndex: int = 0
-
     style: Optional[Any] = None
     zoomRange: List[int] = Field(default_factory=lambda: [0, 30])
-
     isBase: bool = False
     key: Optional[str] = None
-
     groupKey: Optional[str] = None
     groupTitle: Optional[str] = None
     isGroupMeta: bool = False
@@ -308,16 +340,10 @@ class LayerItem(BaseModel):
 
     @field_validator("zoomRange", mode="before")
     @classmethod
-    def normalize_zoom_range(
-            cls,
-            value: Any,
-    ) -> List[int]:
-        if value is None:
-            return [0, 30]
+    def normalize_zoom_range(cls, value: Any) -> List[int]:
+        return [0, 30] if value is None else value
 
-        return value
-
-    model_config = ConfigDict(extra='allow', from_attributes=True)
+    model_config = ConfigDict(extra="allow", from_attributes=True)
 
 
 class LayerGroupItem(BaseModel):
@@ -333,7 +359,7 @@ class MapInfoType(BaseModel):
     title: str
     extent: List[float]
     groups: List[LayerGroupItem] = Field(default_factory=list)
-    layers: List[LayerItem]
+    layers: List[LayerItem] = Field(default_factory=list)
     srid: int = 3857
     units: str = "m"
     description: Optional[str] = None
@@ -341,6 +367,10 @@ class MapInfoType(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# -----------------------------------------------------------------------------
+# Response Data Transfer Objects
+# -----------------------------------------------------------------------------
 
 class GridPayload(BaseModel):
     pkCols: List[str] = Field(default_factory=list)
@@ -353,7 +383,7 @@ class LayerInfoListResponse(BaseModel):
 
 
 class MapInfoResponse(BaseModel):
-    payload: MapInfoType  # More detailed modeling is possible later
+    payload: MapInfoType
 
 
 class TableColumn(BaseModel):
@@ -377,17 +407,12 @@ class RasterBandSummary(BaseModel):
     min: float
     max: float
     mean: float
-    std: Optional[float]
-    median: Optional[float]
-    count: Optional[int]
-    area_sq_km: Optional[float]  # only in class-based raster summaries
-
-
-# class RasterAttributesResponse(BaseModel):
-#     payload: Dict[str, Union[int, Dict[str, RasterBandSummary]]]
+    std: Optional[float] = None
+    median: Optional[float] = None
+    count: Optional[int] = None
+    area_sq_km: Optional[float] = None
 
 
 class UploadRasterResponse(BaseModel):
     uuid: str
     msg: str
-    path: str

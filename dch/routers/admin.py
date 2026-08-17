@@ -1,51 +1,40 @@
+import base64
+import io
 import json
 import tempfile
-from pathlib import Path
-
-import geopandas as gpd
-
-import io
 import zipfile
-import base64
+from pathlib import Path
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends,  Request, Body, HTTPException
-from sqlalchemy import create_engine
+import geopandas as gpd
+from fastapi import APIRouter, Depends, Request, Body, HTTPException
 from fastapi.responses import FileResponse, Response
-
-
-from app.damapql.dch.api_enum import ModelType, ApplicationURLType
-from app.damapql.dch.routers.admin_dependencies import require_dch_admin
-from app.damapql.dch.schemas.geojson import GeoJSON
-from app.damapql.dch.services.layer_query_services import LayerQueryService
-
-from app.damapql.dch.utils.mvt_utils import MVTCache
-from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
+from sqlalchemy import create_engine
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
-
+from app.damapql.cache.mvt_cache import mvt_cache
+from app.damapql.dch.api_enum import ModelType, ApplicationURLType
 from app.damapql.dch.dtypes import DBConnectionCreate
-from app.damapql.dch.models import (
-    AccessibilityType,
-    DBConnection,
-    DBQuery,
-    DataModel,
-    LayerAccessibility,
-    LayerInfo, MapInfo,
-)
-from app.damapql.dch.services.vector_append_service import DCHVectorAppendService
-from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
+from app.damapql.dch.models import (AccessibilityType, DBConnection, DBQuery, DataModel, LayerAccessibility, LayerInfo,
+                                    MapInfo, )
+from app.damapql.dch.routers.admin_dependencies import require_dch_admin
+from app.damapql.dch.schemas.geojson import GeoJSON
+from app.damapql.dch.services.layer_query_services import LayerQueryService
 from app.damapql.dch.services.upload_package_service import DCHUploadPackageService
+from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
+from app.damapql.dch.services.vector_append_service import DCHVectorAppendService
 from app.damapql.dch.utils.dch_utils import DCHUtils
-
-from digitalarzengine.io.managers.db_manager import GeoDBManager
-
+from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import get_sync_session
 from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.crypto import CryptoUtils
+from digitalarzengine.io.managers.db_manager import GeoDBManager
 from digitalarzengine.utils.singletons import da_logger
+
 
 # ---------------------------------------------------------------------
 # Router
@@ -59,22 +48,14 @@ dch_admin_router = APIRouter(prefix="/admin", tags=["dch admin"])
 #   2. preview_append_shp     -> inspect append compatibility
 #   3. commit_append_shp      -> append into EXISTING table
 # ---------------------------------------------------------------------
-append_service = DCHVectorAppendService(
-    media_dir=DCH_MEDIA_DIR,
-    logger=da_logger,
-)
-
-
-
+append_service = DCHVectorAppendService(media_dir=DCH_MEDIA_DIR, logger=da_logger, )
 
 
 # ---------------------------------------------------------------------
 # DB Connection Endpoints
 # ---------------------------------------------------------------------
 @dch_admin_router.get("/get_db_connection/")
-async def get_db_connection(
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def get_db_connection(current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Return available DB connections as a small list of id + name.
 
@@ -89,10 +70,7 @@ async def get_db_connection(
 
 
 @dch_admin_router.post("/test-db-connection/")
-def test_db_connection(
-        payload: DBConnectionCreate,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+def test_db_connection(payload: DBConnectionCreate, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Test an external database connection using the submitted credentials.
 
@@ -123,10 +101,7 @@ def test_db_connection(
 
 
 @dch_admin_router.post("/add-db-connection/")
-def add_db_connection(
-        payload: DBConnectionCreate,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+def add_db_connection(payload: DBConnectionCreate, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Save an external DB connection definition in the system.
 
@@ -140,23 +115,11 @@ def add_db_connection(
         p = payload.params
         encrypted_password = CryptoUtils().encrypt_txt(p.password)
 
-        db_conn = DBConnection.get_db_connection(
-            con_name=payload.connection_name,
-            engine=payload.engine,
-            host=p.host,
-            port=p.port,
-            user=p.user,
-            password=encrypted_password,
-            db_name=p.name,
-        )
+        db_conn = DBConnection.get_db_connection(con_name=payload.connection_name, engine=payload.engine, host=p.host,
+            port=p.port, user=p.user, password=encrypted_password, db_name=p.name, )
 
-        return {
-            "payload": {
-                "success": True,
-                "msg": f"Connection '{db_conn.name}' added successfully",
-                "data": {"id": db_conn.id, "name": db_conn.name},
-            }
-        }
+        return {"payload": {"success": True, "msg": f"Connection '{db_conn.name}' added successfully",
+            "data": {"id": db_conn.id, "name": db_conn.name}, }}
 
     except Exception as e:
         da_logger.exception(f"Failed to add DB connection: {e}")
@@ -164,10 +127,8 @@ def add_db_connection(
 
 
 @dch_admin_router.get("/db_table_list/{db_id}/")
-async def db_table_list(
-        db_id: str, db=Depends(get_sync_session),
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def db_table_list(db_id: str, db=Depends(get_sync_session),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Return the list of spatial tables from a configured external DB connection.
 
@@ -196,13 +157,8 @@ async def db_table_list(
 
 
 @dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
-async def save_db_layer_info(
-        db_id: str,
-        table_name: str,
-        layer_category_id: str,
-        db=Depends(get_sync_session),
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def save_db_layer_info(db_id: str, table_name: str, layer_category_id: str, db=Depends(get_sync_session),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Register an existing external DB spatial table as a layer in local metadata.
 
@@ -220,19 +176,10 @@ async def save_db_layer_info(
     try:
         engine = obj.get_sqlalchemy_engine()
 
-        is_created = DCHUtils.create_vector_layer_info(
-            engine=engine,
-            table_name=table_name,
-            layer_category_id=layer_category_id,
-            user=current_user,
-            db_conn_name=obj.name
-        )
+        is_created = DCHUtils.create_vector_layer_info(engine=engine, table_name=table_name,
+            layer_category_id=layer_category_id, user=current_user, db_conn_name=obj.name)
 
-        return {
-            "payload": {
-                "msg": "Layer info created" if is_created else "Failed to create Layer Info"
-            }
-        }
+        return {"payload": {"msg": "Layer info created" if is_created else "Failed to create Layer Info"}}
 
     except Exception as e:
         da_logger.exception(f"Failed to save DB layer info: {e}")
@@ -287,10 +234,7 @@ async def save_db_layer_info(
 # Generic model endpoints
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/add_model_row/")
-async def add_model_row(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def add_model_row(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Add a row into a dynamic model using form data.
 
@@ -328,11 +272,8 @@ async def add_model_row(
 
 
 @dch_admin_router.post("/save_model_data/")
-async def save_model_data(
-        request: Request,
-        model_name: str,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def save_model_data(request: Request, model_name: str,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Update a model row dynamically.
 
@@ -380,11 +321,7 @@ async def save_model_data(
     session = manager.get_session()
 
     try:
-        obj = (
-            session.query(model_class)
-            .filter(getattr(model_class, pk_col_name) == pk_col_value)
-            .first()
-        )
+        obj = (session.query(model_class).filter(getattr(model_class, pk_col_name) == pk_col_value).first())
 
         if obj is None:
             raise HTTPException(status_code=404, detail="Row not found")
@@ -436,10 +373,7 @@ async def save_model_data(
 # Layer metadata endpoints
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/add_layer_url_info/")
-async def add_layer_url_info(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def add_layer_url_info(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Create a URL-based or application-based layer metadata entry.
 
@@ -478,46 +412,24 @@ async def add_layer_url_info(
     allowed_types = valid_url_types | valid_app_types
 
     if url_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid url_type. Allowed values are: {', '.join(sorted(allowed_types))}"
-        )
+        raise HTTPException(status_code=400,
+            detail=f"Invalid url_type. Allowed values are: {', '.join(sorted(allowed_types))}")
 
     try:
         with LayerInfo.managed_session() as session:
             is_application = url_type in valid_app_types
 
-            accessibility = LayerAccessibility(
-                accessibility_type=(
-                    AccessibilityType.Application.name
-                    if is_application
-                    else AccessibilityType.URL.name
-                ),
-                params={
-                    "url": layer_url,
-                    "url_type": url_type,
-                },
-            )
+            accessibility = LayerAccessibility(accessibility_type=(
+                AccessibilityType.Application.name if is_application else AccessibilityType.URL.name),
+                params={"url": layer_url, "url_type": url_type, }, )
             session.add(accessibility)
             session.flush()
 
-            layer = LayerInfo(
-                uuid=DCHUtils.get_uuid1(),
-                title=layer_title,
+            layer = LayerInfo(uuid=DCHUtils.get_uuid1(), title=layer_title,
                 layer_name=layer_title.strip().replace(" ", "_"),
-                data_model=(
-                    DataModel.Application.name
-                    if is_application
-                    else DataModel.URL.name
-                ),
-                model_type=(
-                    ModelType.Application.name
-                    if is_application
-                    else ModelType.Api.name
-                ),
-                category_id=int(layer_category_id),
-                layer_access_id=accessibility.id,
-            )
+                data_model=(DataModel.Application.name if is_application else DataModel.URL.name),
+                model_type=(ModelType.Application.name if is_application else ModelType.Api.name),
+                category_id=int(layer_category_id), layer_access_id=accessibility.id, )
 
             session.add(layer)
             session.commit()
@@ -529,12 +441,8 @@ async def add_layer_url_info(
         raise HTTPException(status_code=500, detail="Failed to add layer URL info")
 
 
-
 @dch_admin_router.post("/save_map_info/")
-async def save_map_info(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user)
-):
+async def save_map_info(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
     require_dch_admin(current_user)
 
     data = await request.json()
@@ -557,15 +465,10 @@ async def save_map_info(
                 try:
                     row_data[field] = json.loads(row_data[field])
                 except json.JSONDecodeError:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid JSON for field '{field}'"
-                    )
+                    raise HTTPException(status_code=400, detail=f"Invalid JSON for field '{field}'")
 
         with MapInfo.managed_session() as session:
-            obj = session.execute(
-                select(MapInfo).where(getattr(MapInfo, pk_col) == pk_val)
-            ).scalar_one_or_none()
+            obj = session.execute(select(MapInfo).where(getattr(MapInfo, pk_col) == pk_val)).scalar_one_or_none()
 
             if obj is None:
                 raise HTTPException(status_code=404, detail="Map Info not found")
@@ -585,11 +488,9 @@ async def save_map_info(
         da_logger.exception(f"Failed to save layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save layer info")
 
+
 @dch_admin_router.post("/save_layer_info/")
-async def save_layer_info(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def save_layer_info(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Update LayerInfo row fields dynamically.
 
@@ -616,13 +517,10 @@ async def save_layer_info(
 
     try:
         with LayerInfo.managed_session() as session:
-            obj = session.execute(
-                select(LayerInfo).where(getattr(LayerInfo, pk_col) == pk_val)
-            ).scalar_one_or_none()
+            obj = session.execute(select(LayerInfo).where(getattr(LayerInfo, pk_col) == pk_val)).scalar_one_or_none()
 
             if obj is None:
                 raise HTTPException(status_code=404, detail="LayerInfo not found")
-
 
             for key, value in row_data.items():
                 if hasattr(obj, key):
@@ -654,10 +552,7 @@ async def save_layer_info(
 # Shapefile upload -> create NEW table
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/upload_shp_file/")
-async def upload_shp_file(
-        request: Request,
-        current_user: dict = Depends(AuthUtils.require_role("app_manager"))
-):
+async def upload_shp_file(request: Request, current_user: dict = Depends(AuthUtils.require_role("app_manager"))):
     """
     Upload shapefile parts, import into DB, register the new vector layer,
     and remove temporary uploaded files after successful import.
@@ -672,10 +567,7 @@ async def upload_shp_file(
     if not layer_category_id:
         raise HTTPException(status_code=400, detail="layer_category_id is required")
 
-    upload_service = DCHUploadSessionService(
-        media_dir=DCH_MEDIA_DIR,
-        logger=da_logger,
-    )
+    upload_service = DCHUploadSessionService(media_dir=DCH_MEDIA_DIR, logger=da_logger, )
     package_service = DCHUploadPackageService(upload_service=upload_service)
 
     upload_id = None
@@ -685,11 +577,8 @@ async def upload_shp_file(
         # ------------------------------------------------------------------
         # Save uploaded files into a generic upload session
         # ------------------------------------------------------------------
-        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(
-            form=form,
-            upload_type="shapefile",
-            metadata={"purpose": "vector_import"},
-        )
+        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(form=form,
+            upload_type="shapefile", metadata={"purpose": "vector_import"}, )
 
         # ------------------------------------------------------------------
         # Resolve and validate shapefile package
@@ -741,33 +630,20 @@ async def upload_shp_file(
         # ------------------------------------------------------------------
         # Register vector layer metadata
         # ------------------------------------------------------------------
-        DCHUtils.create_vector_layer_info(
-            engine,
-            table_name,
-            uuid=uuid,
-            layer_category_id=layer_category_id
-        )
+        DCHUtils.create_vector_layer_info(engine, table_name, uuid=uuid, layer_category_id=layer_category_id)
 
         success = True
 
         return {
-            "payload": {
-                "msg": "Shapefile uploaded, imported successfully, and temporary files removed",
-                "uuid": uuid,
-                "table": table_name,
-                "upload_id": upload_id,
-            }
-        }
+            "payload": {"msg": "Shapefile uploaded, imported successfully, and temporary files removed", "uuid": uuid,
+                "table": table_name, "upload_id": upload_id, }}
 
     except HTTPException:
         raise
 
     except Exception as e:
         da_logger.exception(f"PostGIS import error during shapefile upload: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to import spatial data to database"
-        )
+        raise HTTPException(status_code=500, detail="Failed to import spatial data to database")
 
     finally:
         # --------------------------------------------------------------
@@ -781,10 +657,7 @@ async def upload_shp_file(
 # Shapefile upload -> PREVIEW append into existing table
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/preview_append_shp/")
-async def preview_append_shp(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def preview_append_shp(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     require_dch_admin(current_user)
 
     form = await request.form()
@@ -793,10 +666,7 @@ async def preview_append_shp(
     if not layer_uuid:
         raise HTTPException(status_code=400, detail="layerUUID is required")
 
-    upload_service = DCHUploadSessionService(
-        media_dir=DCH_MEDIA_DIR,
-        logger=da_logger,
-    )
+    upload_service = DCHUploadSessionService(media_dir=DCH_MEDIA_DIR, logger=da_logger, )
     package_service = DCHUploadPackageService(upload_service=upload_service)
 
     upload_id = None
@@ -816,10 +686,7 @@ async def preview_append_shp(
         if not layer_access:
             raise HTTPException(status_code=400, detail="Target layer accessibility missing")
 
-        if (
-            not layer_access.accessibility_type
-            or layer_access.accessibility_type.code != AccessibilityType.DB.name
-        ):
+        if (not layer_access.accessibility_type or layer_access.accessibility_type.code != AccessibilityType.DB.name):
             raise HTTPException(status_code=400, detail="Target layer is not a DB vector layer")
 
         target_table = layer_access.table_name
@@ -828,14 +695,8 @@ async def preview_append_shp(
         # -------------------------------------------------------------
         # 2. Save uploaded files into generic upload session
         # -------------------------------------------------------------
-        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(
-            form=form,
-            upload_type="shapefile",
-            metadata={
-                "purpose": "vector_append_preview",
-                "layer_uuid": layer_uuid,
-            },
-        )
+        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(form=form,
+            upload_type="shapefile", metadata={"purpose": "vector_append_preview", "layer_uuid": layer_uuid, }, )
 
         # -------------------------------------------------------------
         # 3. Resolve and validate shapefile package
@@ -856,11 +717,8 @@ async def preview_append_shp(
         # -------------------------------------------------------------
         engine = layer_access.get_external_engine()
 
-        target_schema = append_service.get_target_table_schema(
-            engine=engine,
-            table_name=target_table,
-            schema=target_schema_name,
-        )
+        target_schema = append_service.get_target_table_schema(engine=engine, table_name=target_table,
+            schema=target_schema_name, )
 
         # -------------------------------------------------------------
         # 6. Analyze append compatibility (with GEOMETRY support)
@@ -869,10 +727,7 @@ async def preview_append_shp(
 
         # Block if critical validation errors exist (e.g. strict incompatibilities)
         if analysis.get("is_compatible") is False and analysis.get("fatal_errors"):
-            raise HTTPException(
-                status_code=400,
-                detail="; ".join(analysis["fatal_errors"]),
-            )
+            raise HTTPException(status_code=400, detail="; ".join(analysis["fatal_errors"]), )
 
         # -------------------------------------------------------------
         # 7. Prepare GeoJSON preview (Reproject to EPSG:4326)
@@ -929,23 +784,35 @@ async def preview_append_shp(
                 pass
 
         da_logger.exception(f"Append preview failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to analyze shapefile for append preview: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to analyze shapefile for append preview: {str(e)}", )
 
 
 # ---------------------------------------------------------------------
 # Shapefile upload -> COMMIT append into existing table
 # ---------------------------------------------------------------------
 @dch_admin_router.post("/commit_append_shp/")
-async def commit_append_shp(
-        request: Request,
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def commit_append_shp(request: Request, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Commit append after frontend finalizes mapping.
-
+                        Validate upload
+                              ↓
+                        Load shapefile
+                              ↓
+                        Reproject if required
+                              ↓
+                        Validate mapping
+                              ↓
+                        Append to existing DB table
+                              ↓
+                        Update layer extent
+                              ↓
+                        appended_count > 0?
+                              │
+                              └── YES → clear MVT layer cache
+                              ↓
+                        Cleanup upload
+                              ↓
+                        Return success
     Expected multipart/form-data:
       - upload_id
       - layer_uuid
@@ -969,8 +836,15 @@ async def commit_append_shp(
 
     try:
         final_mapping = json.loads(final_mapping_raw)
+        # layer_info = LayerInfo.get_layer_info_by_uuid(layer_uuid)
+        # layer_access = layer_info.layer_accessibility
         layer_info = LayerInfo.get_layer_info_by_uuid(layer_uuid)
+        if not layer_info:
+            raise HTTPException(status_code=404, detail="Target layer not found", )
+
         layer_access = layer_info.layer_accessibility
+        if not layer_access:
+            raise HTTPException(status_code=400, detail="Layer accessibility is not configured", )
         layer_srid = layer_info.srid
         # Use the layer-specific engine instead of generic DBBase
         engine = layer_access.get_external_engine()
@@ -982,42 +856,31 @@ async def commit_append_shp(
 
         # 2. Process Data
         gdf = append_service.load_shapefile_to_gdf(shp_fp)
+        if gdf.crs is None:
+            raise HTTPException(status_code=400, detail="Uploaded shapefile has no CRS information", )
         current_epsg = gdf.crs.to_epsg()
-
         if current_epsg != layer_srid:
             try:
                 da_logger.info(f"Reprojecting GDF from EPSG:{current_epsg} to EPSG:{layer_srid}")
                 # Assignment is required here
                 gdf = gdf.to_crs(epsg=layer_srid)
             except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to reproject data to EPSG:{layer_srid}: {str(e)}"
-                )
-        target_schema = append_service.get_target_table_schema(
-            engine=engine, table_name=target_table, schema=target_schema_name
-        )
+                raise HTTPException(status_code=400, detail=f"Failed to reproject data to EPSG:{layer_srid}: {str(e)}")
+        target_schema = append_service.get_target_table_schema(engine=engine, table_name=target_table,
+            schema=target_schema_name)
 
         # 3. Validation & Preparation
         append_service.validate_final_mapping(final_mapping, append_service.get_source_schema(gdf), target_schema)
 
-        prepared_gdf = append_service.prepare_gdf_for_append(
-            gdf=gdf,
-            final_mapping=final_mapping,
-            target_schema=target_schema,
-            reproject_if_needed=reproject_if_needed
-        )
+        prepared_gdf = append_service.prepare_gdf_for_append(gdf=gdf, final_mapping=final_mapping,
+            target_schema=target_schema, reproject_if_needed=reproject_if_needed)
 
         # 4. Transactional Append
         # Check existing data count BEFORE we push new records
         existing_row_count = layer_info.count_layer_rows()
 
-        appended_count = append_service.append_gdf_to_postgis(
-            gdf=prepared_gdf,
-            engine=engine,
-            table_name=target_table,
-            schema=target_schema_name
-        )
+        appended_count = append_service.append_gdf_to_postgis(gdf=prepared_gdf, engine=engine, table_name=target_table,
+            schema=target_schema_name)
 
         # 5. Update Layer Extent
         try:
@@ -1037,32 +900,40 @@ async def commit_append_shp(
             da_logger.exception(f"Failed to update layer extent metadata: {extent_err}")
 
         # Cleanup on success
+        if appended_count > 0:
+            try:
+                cleared_tiles = mvt_cache.clear_layer_cache(layer_uuid)
+
+                da_logger.info(f"[MVTCacheClear] "
+                               f"Features appended | "
+                               f"layer={layer_uuid} | "
+                               f"rows={appended_count} | "
+                               f"tiles={cleared_tiles}")
+
+            except Exception as cache_err:
+                da_logger.warning(f"[MVTCacheClearError] "
+                                  f"Layer data appended but cache clear failed | "
+                                  f"layer={layer_uuid}: {cache_err}")
         append_service.cleanup_upload_dir(file_dir)
 
-        return {
-            "payload": {
-                "msg": "Data successfully appended",
-                "appended_rows": appended_count,
-                "target": f"{target_schema_name}.{target_table}"
-            }
-        }
+        return {"payload": {"msg": "Data successfully appended", "appended_rows": appended_count,
+            "target": f"{target_schema_name}.{target_table}"}}
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         da_logger.exception(f"Append commit failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-from fastapi import Body, Depends, HTTPException
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session, selectinload
+
 
 
 @dch_admin_router.post("/update_layer_attributes/{uuid}/")
-async def update_layer_attribute(
-        uuid: str,
-        payload: dict = Body(...),  # Expects {"pk_object": {"id": 1, ...}, "column": "col_name", "value": "new_val"}
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def update_layer_attribute(uuid: str, payload: dict = Body(...),
+        # Expects {"pk_object": {"id": 1, ...}, "column": "col_name", "value": "new_val"}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Updates a single attribute for a feature in an external vector layer table.
     Requires app_manager or superuser privileges.
@@ -1082,11 +953,8 @@ async def update_layer_attribute(
 
     # 2. Fetch Layer Metadata & Accessibility
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         raise HTTPException(status_code=404, detail="Layer not found or accessibility info missing")
@@ -1096,10 +964,8 @@ async def update_layer_attribute(
     # 3. Security Validation: updated column must be allowed
     allowed_cols = set(access.cols_name or [])
     if col_name not in allowed_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Column '{col_name}' is not in the allowed list or is not editable."
-        )
+        raise HTTPException(status_code=400,
+            detail=f"Column '{col_name}' is not in the allowed list or is not editable.")
 
     # 4. Validate PK object against configured PK columns
     pk_cols = access.pk_cols or []
@@ -1108,24 +974,15 @@ async def update_layer_attribute(
 
     missing_pk_cols = [col for col in pk_cols if col not in pk_object]
     if missing_pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing PK field(s): {', '.join(missing_pk_cols)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Missing PK field(s): {', '.join(missing_pk_cols)}")
 
     extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
     if extra_pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unexpected PK field(s): {', '.join(extra_pk_cols)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Unexpected PK field(s): {', '.join(extra_pk_cols)}")
 
     # Optional hardening: prevent PK columns from being edited
     if col_name in pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Primary key column '{col_name}' cannot be updated."
-        )
+        raise HTTPException(status_code=400, detail=f"Primary key column '{col_name}' cannot be updated.")
 
     # 5. Build dynamic SQL with bound params
     params = {"new_val": new_value}
@@ -1149,11 +1006,9 @@ async def update_layer_attribute(
     schema_name = (access.params or {}).get("schema", "public")
     full_table_path = f"{DBQuery.safe_ident(schema_name)}.{table}"
 
-    update_query = text(
-        f"UPDATE {full_table_path} "
-        f"SET {target_col} = :new_val "
-        f"WHERE {where_sql}"
-    )
+    update_query = text(f"UPDATE {full_table_path} "
+                        f"SET {target_col} = :new_val "
+                        f"WHERE {where_sql}")
 
     try:
         with Session(engine) as db_session:
@@ -1161,26 +1016,19 @@ async def update_layer_attribute(
             db_session.commit()
 
             if result.rowcount == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Update failed: No matching feature found in the database."
-                )
+                raise HTTPException(status_code=404, detail="Update failed: No matching feature found in the database.")
 
             pk_summary = ", ".join([f"{col}={pk_object[col]}" for col in pk_cols])
             # Clear Cache logic remains the same
             cleared_tiles = 0
             try:
-                cleared_tiles = MVTCache.clear_layer_cache(uuid)
+                cleared_tiles = mvt_cache.clear_layer_cache(uuid)
             except Exception:
                 pass
 
-            return {
-                "payload": {
-                    "status": "success",
-                    "message": f"Successfully updated '{col_name}' for feature ({pk_summary})",
-                    "rows_affected": result.rowcount
-                }
-            }
+            return {"payload": {"status": "success",
+                "message": f"Successfully updated '{col_name}' for feature ({pk_summary})",
+                "rows_affected": result.rowcount}}
 
 
 
@@ -1192,11 +1040,9 @@ async def update_layer_attribute(
 
 
 @dch_admin_router.post("/delete_layer_features/{uuid}/")
-async def delete_layer_features(
-        uuid: str,
-        payload: dict = Body(...),  # Expects {"pk_objects": [{"id": 1, "code": "A"}, ...]}
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def delete_layer_features(uuid: str, payload: dict = Body(...),
+        # Expects {"pk_objects": [{"id": 1, "code": "A"}, ...]}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     require_dch_admin(current_user)
 
     # 1. Get objects from payload
@@ -1205,11 +1051,8 @@ async def delete_layer_features(
         raise HTTPException(status_code=400, detail="No feature data provided for deletion")
 
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         raise HTTPException(status_code=404, detail="Layer not found")
@@ -1263,17 +1106,11 @@ async def delete_layer_features(
         # Clear Cache logic remains the same
         cleared_tiles = 0
         try:
-            cleared_tiles = MVTCache.clear_layer_cache(uuid)
+            cleared_tiles = mvt_cache.clear_layer_cache(uuid)
         except Exception:
             pass
 
-        return {
-            "payload": {
-                "status": "success",
-                "rows_affected": result.rowcount,
-                "cache_cleared": True
-            }
-        }
+        return {"payload": {"status": "success", "rows_affected": result.rowcount, "cache_cleared": True}}
 
     except Exception as e:
         da_logger.exception(f"Bulk delete failed: {e}")
@@ -1281,11 +1118,9 @@ async def delete_layer_features(
 
 
 @dch_admin_router.post("/bulk_update_layer_field_value/{uuid}/")
-async def bulk_update_layer_attribute(
-        uuid: str,
-        payload: dict = Body(...),  # {"pk_objects": [{"id": 1}, {"id": 2}], "column": "status", "value": "approved"}
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def bulk_update_layer_attribute(uuid: str, payload: dict = Body(...),
+        # {"pk_objects": [{"id": 1}, {"id": 2}], "column": "status", "value": "approved"}
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Bulk update a single attribute for multiple features in an external vector layer table.
     Requires superuser or app_manager privileges.
@@ -1303,11 +1138,8 @@ async def bulk_update_layer_attribute(
         raise HTTPException(status_code=400, detail="Missing column name")
 
     with LayerInfo.managed_session() as session:
-        info = session.execute(
-            select(LayerInfo)
-            .options(selectinload(LayerInfo.layer_accessibility))
-            .where(LayerInfo.uuid == uuid)
-        ).scalar_one_or_none()
+        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
+            LayerInfo.uuid == uuid)).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         raise HTTPException(status_code=404, detail="Layer not found or accessibility info missing")
@@ -1317,43 +1149,31 @@ async def bulk_update_layer_attribute(
     # validate editable column
     allowed_cols = set(access.cols_name or [])
     if col_name not in allowed_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Column '{col_name}' is not in the allowed list or is not editable."
-        )
+        raise HTTPException(status_code=400,
+            detail=f"Column '{col_name}' is not in the allowed list or is not editable.")
 
     pk_cols = access.pk_cols or []
     if not pk_cols:
         raise HTTPException(status_code=400, detail="No primary key columns configured for this layer")
 
     if col_name in pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Primary key column '{col_name}' cannot be updated."
-        )
+        raise HTTPException(status_code=400, detail=f"Primary key column '{col_name}' cannot be updated.")
 
     # validate each pk object
     normalized_pk_objects = []
     for idx, pk_object in enumerate(pk_objects):
         if not isinstance(pk_object, dict) or not pk_object:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid pk_object at index {idx}"
-            )
+            raise HTTPException(status_code=400, detail=f"Invalid pk_object at index {idx}")
 
         missing_pk_cols = [col for col in pk_cols if col not in pk_object]
         if missing_pk_cols:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing PK field(s) at index {idx}: {', '.join(missing_pk_cols)}"
-            )
+            raise HTTPException(status_code=400,
+                detail=f"Missing PK field(s) at index {idx}: {', '.join(missing_pk_cols)}")
 
         extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
         if extra_pk_cols:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unexpected PK field(s) at index {idx}: {', '.join(extra_pk_cols)}"
-            )
+            raise HTTPException(status_code=400,
+                detail=f"Unexpected PK field(s) at index {idx}: {', '.join(extra_pk_cols)}")
 
         normalized_pk_objects.append({col: pk_object[col] for col in pk_cols})
 
@@ -1381,11 +1201,9 @@ async def bulk_update_layer_attribute(
 
                 where_sql = " AND ".join(clauses)
 
-                update_query = text(
-                    f"UPDATE {full_table_path} "
-                    f"SET {target_col} = :new_val "
-                    f"WHERE {where_sql}"
-                )
+                update_query = text(f"UPDATE {full_table_path} "
+                                    f"SET {target_col} = :new_val "
+                                    f"WHERE {where_sql}")
 
                 result = db_session.execute(update_query, params)
                 rows_affected += result.rowcount or 0
@@ -1394,20 +1212,14 @@ async def bulk_update_layer_attribute(
 
         cleared_tiles = 0
         try:
-            cleared_tiles = MVTCache.clear_layer_cache(uuid)
+            cleared_tiles = mvt_cache.clear_layer_cache(uuid)
         except Exception:
             pass
 
-        return {
-            "payload": {
-                "status": "success",
-                "message": f"Successfully updated '{col_name}' for {rows_affected} feature(s)",
-                "rows_affected": rows_affected,
-                "pk_count": len(normalized_pk_objects),
-                "cache_cleared": True,
-                "cleared_tiles": cleared_tiles,
-            }
-        }
+        return {"payload": {"status": "success",
+            "message": f"Successfully updated '{col_name}' for {rows_affected} feature(s)",
+            "rows_affected": rows_affected, "pk_count": len(normalized_pk_objects), "cache_cleared": True,
+            "cleared_tiles": cleared_tiles, }}
 
     except HTTPException:
         raise
@@ -1416,29 +1228,19 @@ async def bulk_update_layer_attribute(
         raise HTTPException(status_code=500, detail=f"Database Update Error: {str(e)}")
 
 
-
 @dch_admin_router.post("/download_geometry/{uuid}/")
-async def download_rows_geometry(
-    uuid: str,
-    payload: dict = Body(...),
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def download_rows_geometry(uuid: str, payload: dict = Body(...),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     require_dch_admin(current_user)
 
     pk_objects = payload.get("pk_objects")
 
     if not isinstance(pk_objects, list) or not pk_objects:
-        raise HTTPException(
-            status_code=400,
-            detail="pk_objects must be a non-empty list",
-        )
+        raise HTTPException(status_code=400, detail="pk_objects must be a non-empty list", )
 
     try:
-        result = LayerQueryService.get_features_geojson_by_pk_objects(
-            identifier=uuid,
-            pk_objects=pk_objects,
-            by="uuid",
-        )
+        result = LayerQueryService.get_features_geojson_by_pk_objects(identifier=uuid, pk_objects=pk_objects,
+            by="uuid", )
 
         if isinstance(result, Response):
             return result
@@ -1446,23 +1248,14 @@ async def download_rows_geometry(
         geojson: GeoJSON = result
 
         if not geojson.features:
-            raise HTTPException(
-                status_code=404,
-                detail="No geometry found for selected row(s)",
-            )
+            raise HTTPException(status_code=404, detail="No geometry found for selected row(s)", )
 
         gdf = geojson.to_gdf()
 
         if gdf.empty:
-            raise HTTPException(
-                status_code=404,
-                detail="No valid geometry found for selected row(s)",
-            )
+            raise HTTPException(status_code=404, detail="No valid geometry found for selected row(s)", )
 
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".gpkg",
-            delete=True,
-        )
+        tmp = tempfile.NamedTemporaryFile(suffix=".gpkg", delete=True, )
         tmp_path = Path(tmp.name)
         tmp.close()
 
@@ -1470,11 +1263,7 @@ async def download_rows_geometry(
         # safe_layer_name = layer_name[:60]
         safe_layer_name = tmp_path.stem.replace(" ", "_")
 
-        gdf.to_file(
-            tmp_path,
-            layer=safe_layer_name,
-            driver="GPKG",
-        )
+        gdf.to_file(tmp_path, layer=safe_layer_name, driver="GPKG", )
         filename = f"{safe_layer_name}.gpkg"
 
         # filename = (
@@ -1483,21 +1272,14 @@ async def download_rows_geometry(
         #     else f"{safe_layer_name}.gpkg"
         # )
 
-        return FileResponse(
-            path=str(tmp_path),
-            media_type="application/geopackage+sqlite3",
-            filename=filename,
-        )
+        return FileResponse(path=str(tmp_path), media_type="application/geopackage+sqlite3", filename=filename, )
 
     except HTTPException:
         raise
 
     except Exception as e:
         da_logger.exception(f"Failed to download geometry for layer {uuid}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to download selected geometry",
-        )
+        raise HTTPException(status_code=500, detail="Failed to download selected geometry", )
 
 
 def validate_geometry_bounds(gdf, source_srid: int):
@@ -1508,55 +1290,33 @@ def validate_geometry_bounds(gdf, source_srid: int):
 
     if source_srid == 4326:
         if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid coordinates for WGS84 / EPSG:4326. "
-                    "Longitude must be between -180 and 180, "
-                    "latitude must be between -90 and 90."
-                ),
-            )
+            raise HTTPException(status_code=400, detail=("Invalid coordinates for WGS84 / EPSG:4326. "
+                                                         "Longitude must be between -180 and 180, "
+                                                         "latitude must be between -90 and 90."), )
 
     elif source_srid == 3857:
         limit = 20037508.342789244
 
         if minx < -limit or maxx > limit or miny < -limit or maxy > limit:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid coordinates for Web Mercator / EPSG:3857. "
-                    "Coordinates must be within ±20037508.34 meters."
-                ),
-            )
+            raise HTTPException(status_code=400, detail=("Invalid coordinates for Web Mercator / EPSG:3857. "
+                                                         "Coordinates must be within ±20037508.34 meters."), )
 
     elif source_srid == 32642:
         # UTM Zone 42N: easting normally 166021–833978, northing 0–9329005
         if minx < 100000 or maxx > 900000 or miny < 0 or maxy > 10000000:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid coordinates for UTM Zone 42N / EPSG:32642. "
-                    "Expected easting roughly 100000–900000 and northing 0–10000000."
-                ),
-            )
+            raise HTTPException(status_code=400, detail=("Invalid coordinates for UTM Zone 42N / EPSG:32642. "
+                                                         "Expected easting roughly 100000–900000 and northing 0–10000000."), )
 
     elif source_srid == 32643:
         # UTM Zone 43N: easting normally 166021–833978, northing 0–9329005
         if minx < 100000 or maxx > 900000 or miny < 0 or maxy > 10000000:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid coordinates for UTM Zone 43N / EPSG:32643. "
-                    "Expected easting roughly 100000–900000 and northing 0–10000000."
-                ),
-            )
+            raise HTTPException(status_code=400, detail=("Invalid coordinates for UTM Zone 43N / EPSG:32643. "
+                                                         "Expected easting roughly 100000–900000 and northing 0–10000000."), )
+
 
 @dch_admin_router.post("/upload_geometry/{uuid}/")
-async def upload_row_geometry(
-    uuid: str,
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
-):
+async def upload_row_geometry(uuid: str, request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     require_dch_admin(current_user)
 
     form = await request.form()
@@ -1574,10 +1334,7 @@ async def upload_row_geometry(
     file_name = upload_file.filename or ""
 
     if not file_name.lower().endswith((".geojson", ".json")):
-        raise HTTPException(
-            status_code=400,
-            detail="Only GeoJSON file is supported"
-        )
+        raise HTTPException(status_code=400, detail="Only GeoJSON file is supported")
 
     try:
         pk_object = json.loads(str(pk_object_raw))
@@ -1585,10 +1342,7 @@ async def upload_row_geometry(
         raise HTTPException(status_code=400, detail="pk_object must be valid JSON")
 
     if not isinstance(pk_object, dict) or not pk_object:
-        raise HTTPException(
-            status_code=400,
-            detail="pk_object must be a non-empty object"
-        )
+        raise HTTPException(status_code=400, detail="pk_object must be a non-empty object")
 
     try:
         source_srid = int(source_srid_raw)
@@ -1616,34 +1370,22 @@ async def upload_row_geometry(
     pk_cols = access.pk_cols or []
 
     if not pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail="Layer primary key is not configured"
-        )
+        raise HTTPException(status_code=400, detail="Layer primary key is not configured")
 
     missing_pk_cols = [col for col in pk_cols if col not in pk_object]
 
     if missing_pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing PK field(s): {', '.join(missing_pk_cols)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Missing PK field(s): {', '.join(missing_pk_cols)}")
 
     extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
 
     if extra_pk_cols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unexpected PK field(s): {', '.join(extra_pk_cols)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Unexpected PK field(s): {', '.join(extra_pk_cols)}")
 
     engine = access.get_external_engine()
 
     if engine is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Layer database engine could not be initialized"
-        )
+        raise HTTPException(status_code=500, detail="Layer database engine could not be initialized")
 
     schema_name = (access.params or {}).get("schema", "public")
     table_name = access.table_name
@@ -1660,10 +1402,7 @@ async def upload_row_geometry(
         raw_crs = geojson_dict.get("crs")
 
         if isinstance(raw_crs, dict):
-            crs_name = (
-                    raw_crs.get("properties", {}).get("name")
-                    or raw_crs.get("name")
-            )
+            crs_name = (raw_crs.get("properties", {}).get("name") or raw_crs.get("name"))
 
             if isinstance(crs_name, str):
                 # Handles:
@@ -1686,16 +1425,10 @@ async def upload_row_geometry(
         geojson = GeoJSON(**geojson_dict)
 
         if not geojson.features:
-            raise HTTPException(
-                status_code=400,
-                detail="GeoJSON has no feature"
-            )
+            raise HTTPException(status_code=400, detail="GeoJSON has no feature")
 
         if len(geojson.features) != 1:
-            raise HTTPException(
-                status_code=400,
-                detail="GeoJSON must contain exactly one feature"
-            )
+            raise HTTPException(status_code=400, detail="GeoJSON must contain exactly one feature")
 
         if not geojson.crs:
             geojson.crs = f"EPSG:{source_srid}"
@@ -1703,16 +1436,10 @@ async def upload_row_geometry(
         gdf = geojson.to_gdf(assume_epsg=source_srid)
 
         if gdf.empty:
-            raise HTTPException(
-                status_code=400,
-                detail="GeoJSON has no valid geometry"
-            )
+            raise HTTPException(status_code=400, detail="GeoJSON has no valid geometry")
 
         if len(gdf) != 1:
-            raise HTTPException(
-                status_code=400,
-                detail="GeoJSON must contain exactly one valid geometry"
-            )
+            raise HTTPException(status_code=400, detail="GeoJSON must contain exactly one valid geometry")
 
         validate_geometry_bounds(gdf, source_srid)
 
@@ -1722,32 +1449,21 @@ async def upload_row_geometry(
         geom = gdf.geometry.iloc[0]
 
         if geom is None or geom.is_empty:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded geometry is empty"
-            )
+            raise HTTPException(status_code=400, detail="Uploaded geometry is empty")
 
         if not geom.is_valid:
             geom = geom.buffer(0)
 
         if geom is None or geom.is_empty or not geom.is_valid:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded geometry is invalid"
-            )
+            raise HTTPException(status_code=400, detail="Uploaded geometry is invalid")
 
-        params = {
-            "geom_wkt": geom.wkt,
-            "srid": target_srid,
-        }
+        params = {"geom_wkt": geom.wkt, "srid": target_srid, }
 
         where_parts = []
 
         for idx, pk_col in enumerate(pk_cols):
             param_name = f"pk_{idx}"
-            where_parts.append(
-                f"{DBQuery.safe_ident(pk_col)} = :{param_name}"
-            )
+            where_parts.append(f"{DBQuery.safe_ident(pk_col)} = :{param_name}")
             params[param_name] = pk_object[pk_col]
 
         safe_schema = DBQuery.safe_ident(schema_name)
@@ -1768,40 +1484,25 @@ async def upload_row_geometry(
             db_session.commit()
 
         if result.rowcount == 0:
-            raise HTTPException(
-                status_code=404,
-                detail="No matching row found for geometry update"
-            )
+            raise HTTPException(status_code=404, detail="No matching row found for geometry update")
 
         try:
             layer_info.update_extent(gdf.total_bounds.tolist(), overwrite=False)
         except Exception as e:
-            da_logger.exception(
-                f"Failed to update layer extent after geometry upload: {e}"
-            )
+            da_logger.exception(f"Failed to update layer extent after geometry upload: {e}")
 
         try:
-            MVTCache.clear_layer_cache(uuid)
+            mvt_cache.clear_layer_cache(uuid)
         except Exception:
             pass
 
-        return {
-            "payload": {
-                "status": "success",
-                "message": "Geometry uploaded successfully",
-                "rows_affected": result.rowcount,
-                "pk_object": pk_object,
-                "source_srid": source_srid,
-                "target_srid": target_srid,
-            }
-        }
+        return {"payload": {"status": "success", "message": "Geometry uploaded successfully",
+            "rows_affected": result.rowcount, "pk_object": pk_object, "source_srid": source_srid,
+            "target_srid": target_srid, }}
 
     except HTTPException:
         raise
 
     except Exception as e:
         da_logger.exception(f"Failed to upload geometry for layer {uuid}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to upload geometry"
-        )
+        raise HTTPException(status_code=500, detail="Failed to upload geometry")

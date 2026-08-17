@@ -21,20 +21,6 @@ from app.damapql.dch.models import LayerInfo
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.db_mixin import EngineType
 
-# -------------------------------------------------------------------
-# REDIS CLIENT INITIALIZATION
-# -------------------------------------------------------------------
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-
-try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=False,
-        # CRITICAL: Preserves raw binary MVT byte stream
-        socket_timeout=1.0,  # Keeps tile serving fast if Redis goes offline
-        socket_connect_timeout=1.0, )
-except Exception as e:
-    redis_client = None
-    da_logger.warning(f"⚠️ Redis client failed to initialize: {e}")
 
 
 class MVTUtils:
@@ -486,170 +472,295 @@ class MVTUtils:
         return cls.gdf_to_mvt(gdf, (minx, miny, maxx, maxy), name=layer_name)
 
 
-class MVTCache:
-    DEFAULT_TTL = 60 * 60 * 24 * 7  # 7 Days
-
-    # ---------------------------------------------------------------
-    # 1. VARIANT BUILDER (Includes tile_size & resolution)
-    # ---------------------------------------------------------------
-    @staticmethod
-    def build_variant(cols: list[str] | None = None, resolution: float = 0, tile_size: int = 4096,
-            feature_count: int | None = None, extra: dict | None = None, ) -> str:
-        """
-        Builds a deterministic SHA-1 hash for tile variants.
-        Includes tile_size to prevent extent mismatches between map renders.
-        """
-        normalized = {"cols": sorted(set(cols or [])), "resolution": resolution, "tile_size": tile_size, }
-
-        if feature_count is not None:
-            normalized["feature_count"] = feature_count
-
-        if extra:
-            clean_extra = {k: str(v) for k, v in extra.items()}
-            normalized.update(clean_extra)
-
-        raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
-
-    # ---------------------------------------------------------------
-    # 2. CACHE READ (Redis with SQLite Failover)
-    # ---------------------------------------------------------------
-    @classmethod
-    def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
-        key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
-
-        # Try Redis First
-        if redis_client:
-            try:
-                cached = redis_client.get(key)
-                if cached:
-                    return cached
-            except (redis.ConnectionError, redis.TimeoutError) as err:
-                da_logger.warning(f"[RedisUnavailable] Falling back to SQLite cache read: {err}")
-            except Exception as err:
-                da_logger.exception(f"[RedisReadError] {err}")
-
-        # Fallback to SQLite
-        return cls._get_sqlite_tile(layer_uuid, x, y, z, variant)
-
-    # ---------------------------------------------------------------
-    # 3. CACHE WRITE (Redis with SQLite Failover)
-    # ---------------------------------------------------------------
-    @classmethod
-    def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes,
-            ttl: int = DEFAULT_TTL, ) -> None:
-        if not mvt_bytes:
-            return
-
-        key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
-
-        redis_success = False
-        if redis_client:
-            try:
-                redis_client.set(key, mvt_bytes, ex=ttl)
-                redis_success = True
-            except (redis.ConnectionError, redis.TimeoutError) as err:
-                da_logger.warning(f"[RedisUnavailable] Write falling back to SQLite: {err}")
-            except Exception as err:
-                da_logger.exception(f"[RedisWriteError] {err}")
-
-        if not redis_success:
-            cls._set_sqlite_tile(layer_uuid, x, y, z, variant, mvt_bytes)
-
-    # ---------------------------------------------------------------
-    # 4. CONCURRENCY CONTROL (Distributed Tile Locking)
-    # ---------------------------------------------------------------
-    @classmethod
-    def acquire_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, timeout: int = 5) -> bool:
-        if not redis_client:
-            return True
-
-        lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
-        try:
-            return bool(redis_client.set(lock_key, b"1", nx=True, ex=timeout))
-        except Exception:
-            return True
-
-    @classmethod
-    def release_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> None:
-        if redis_client:
-            lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
-            try:
-                redis_client.delete(lock_key)
-            except Exception:
-                pass
-
-    # ---------------------------------------------------------------
-    # 5. SQLITE FALLBACK IMPLEMENTATION
-    # ---------------------------------------------------------------
-    @classmethod
-    def _get_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
-        try:
-            engine = DBBase.get_engine(db_key="cache_db")
-            with Session(engine) as session:
-                table = cls._ensure_sqlite_table(session, layer_uuid)
-                return session.execute(
-                    text(f"SELECT mvt FROM {table} WHERE x=:x AND y=:y AND z=:z AND variant=:variant"),
-                    {"x": x, "y": y, "z": z, "variant": variant}, ).scalar_one_or_none()
-        except Exception as err:
-            da_logger.exception(f"[SQLiteCacheReadError] {err}")
-            return None
-
-    @classmethod
-    def _set_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes) -> None:
-        try:
-            engine = DBBase.get_engine(db_key="cache_db")
-            with Session(engine) as session:
-                table = cls._ensure_sqlite_table(session, layer_uuid)
-                session.execute(text(f"""
-                        INSERT INTO {table} (x, y, z, variant, mvt) 
-                        VALUES (:x, :y, :z, :variant, :mvt)
-                        ON CONFLICT (x, y, z, variant) 
-                        DO UPDATE SET mvt = EXCLUDED.mvt
-                    """), {"x": x, "y": y, "z": z, "variant": variant, "mvt": mvt_bytes}, )
-                session.commit()
-        except Exception as err:
-            da_logger.exception(f"[SQLiteCacheWriteError] {err}")
-
-    @staticmethod
-    def _ensure_sqlite_table(session: Session, uuid: str) -> str:
-        clean_uuid = "".join(c for c in uuid if c.isalnum() or c == "_")
-        table_name = f'"{clean_uuid}_xyz"'
-
-        session.execute(text(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                x INTEGER NOT NULL,
-                y INTEGER NOT NULL,
-                z INTEGER NOT NULL,
-                variant TEXT NOT NULL,
-                mvt BLOB NOT NULL,
-                PRIMARY KEY (x, y, z, variant)
-            )
-        """))
-        session.commit()
-        return table_name
-
-    @classmethod
-    def clear_layer_cache(cls, layer_uuid: str) -> int:
-        cleared_count = 0
-        if redis_client:
-            try:
-                keys = redis_client.keys(f"mvt:{layer_uuid}:*")
-                if keys:
-                    cleared_count = redis_client.delete(*keys)
-            except Exception as err:
-                da_logger.exception(f"[RedisCacheClearError] {err}")
-
-        # Clear SQLite as well
-        try:
-            engine = DBBase.get_engine(db_key="cache_db")
-            with Session(engine) as session:
-                table = cls._ensure_sqlite_table(session, layer_uuid)
-                res = session.execute(text(f"DELETE FROM {table}"))
-                session.commit()
-                cleared_count += res.rowcount or 0
-        except Exception as err:
-            da_logger.exception(f"[SQLiteCacheClearError] {err}")
-
-        da_logger.info(f"Cleared {cleared_count} tiles for layer {layer_uuid}")
-        return cleared_count
+# class MVTCache:
+#     DEFAULT_TTL = 60 * 60 * 24 * 7
+#
+#     @staticmethod
+#     def _tile_key(
+#         layer_uuid: str,
+#         x: int,
+#         y: int,
+#         z: int,
+#         variant: str,
+#     ) -> str:
+#         return (
+#             f"{REDIS_NAMESPACE}:mvt:"
+#             f"{layer_uuid}:{variant}:{z}:{x}:{y}"
+#         )
+#
+#     @staticmethod
+#     def _lock_key(
+#         layer_uuid: str,
+#         x: int,
+#         y: int,
+#         z: int,
+#         variant: str,
+#     ) -> str:
+#         return (
+#             f"{REDIS_NAMESPACE}:lock:mvt:"
+#                 f"{layer_uuid}:{variant}:{z}:{x}:{y}")
+#
+#     # ---------------------------------------------------------------
+#     # 1. VARIANT BUILDER (Includes tile_size & resolution)
+#     # ---------------------------------------------------------------
+#     @staticmethod
+#     def build_variant(cols: list[str] | None = None, resolution: float = 0, tile_size: int = 4096,
+#             feature_count: int | None = None, extra: dict | None = None, ) -> str:
+#         """
+#         Builds a deterministic SHA-1 hash for tile variants.
+#         Includes tile_size to prevent extent mismatches between map renders.
+#         """
+#         normalized = {"cols": sorted(set(cols or [])), "resolution": resolution, "tile_size": tile_size, }
+#
+#         if feature_count is not None:
+#             normalized["feature_count"] = feature_count
+#
+#         if extra:
+#             clean_extra = {k: str(v) for k, v in extra.items()}
+#             normalized.update(clean_extra)
+#
+#         raw = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+#         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+#
+#     # ---------------------------------------------------------------
+#     # 2. CACHE READ (Redis with SQLite Failover)
+#     # ---------------------------------------------------------------
+#     @classmethod
+#     def get_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
+#         # key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+#         key = cls._tile_key(
+#             layer_uuid=layer_uuid,
+#             x=x,
+#             y=y,
+#             z=z,
+#             variant=variant,
+#         )
+#         # Try Redis First
+#         if redis_client:
+#             try:
+#                 cached = redis_client.get(key)
+#                 if cached:
+#                     return cached
+#             except (redis.ConnectionError, redis.TimeoutError) as err:
+#                 da_logger.warning(f"[RedisUnavailable] Falling back to SQLite cache read: {err}")
+#             except Exception as err:
+#                 da_logger.exception(f"[RedisReadError] {err}")
+#
+#         # Fallback to SQLite
+#         return cls._get_sqlite_tile(layer_uuid, x, y, z, variant)
+#
+#     # ---------------------------------------------------------------
+#     # 3. CACHE WRITE (Redis with SQLite Failover)
+#     # ---------------------------------------------------------------
+#     @classmethod
+#     def set_cached_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes,
+#             ttl: int = DEFAULT_TTL, ) -> None:
+#         if not mvt_bytes:
+#             return
+#
+#         # key = f"mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+#         key = cls._tile_key(
+#             layer_uuid=layer_uuid,
+#             x=x,
+#             y=y,
+#             z=z,
+#             variant=variant,
+#         )
+#
+#         redis_success = False
+#         if redis_client:
+#             try:
+#                 redis_client.set(key, mvt_bytes, ex=ttl)
+#                 redis_success = True
+#             except (redis.ConnectionError, redis.TimeoutError) as err:
+#                 da_logger.warning(f"[RedisUnavailable] Write falling back to SQLite: {err}")
+#             except Exception as err:
+#                 da_logger.exception(f"[RedisWriteError] {err}")
+#
+#         if not redis_success:
+#             cls._set_sqlite_tile(layer_uuid, x, y, z, variant, mvt_bytes)
+#
+#     # ---------------------------------------------------------------
+#     # 4. CONCURRENCY CONTROL (Distributed Tile Locking)
+#     # ---------------------------------------------------------------
+#     @classmethod
+#     def acquire_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, timeout: int = 5) -> bool:
+#         if not redis_client:
+#             return True
+#
+#         # lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+#         lock_key = cls._lock_key(
+#             layer_uuid=layer_uuid,
+#             x=x,
+#             y=y,
+#             z=z,
+#             variant=variant,
+#         )
+#         try:
+#             return bool(redis_client.set(lock_key, b"1", nx=True, ex=timeout))
+#         except Exception:
+#             return True
+#
+#     @classmethod
+#     def release_tile_lock(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> None:
+#         if redis_client:
+#             # lock_key = f"lock:mvt:{layer_uuid}:{variant}:{z}:{x}:{y}"
+#             lock_key = cls._lock_key(
+#                 layer_uuid=layer_uuid,
+#                 x=x,
+#                 y=y,
+#                 z=z,
+#                 variant=variant,
+#             )
+#             try:
+#                 redis_client.delete(lock_key)
+#             except Exception:
+#                 pass
+#
+#     # ---------------------------------------------------------------
+#     # 5. SQLITE FALLBACK IMPLEMENTATION
+#     # ---------------------------------------------------------------
+#     @classmethod
+#     def _get_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str) -> bytes | None:
+#         try:
+#             engine = DBBase.get_engine(db_key="cache_db")
+#             with Session(engine) as session:
+#                 table = cls._ensure_sqlite_table(session, layer_uuid)
+#                 return session.execute(
+#                     text(f"SELECT mvt FROM {table} WHERE x=:x AND y=:y AND z=:z AND variant=:variant"),
+#                     {"x": x, "y": y, "z": z, "variant": variant}, ).scalar_one_or_none()
+#         except Exception as err:
+#             da_logger.exception(f"[SQLiteCacheReadError] {err}")
+#             return None
+#
+#     @classmethod
+#     def _set_sqlite_tile(cls, layer_uuid: str, x: int, y: int, z: int, variant: str, mvt_bytes: bytes) -> None:
+#         try:
+#             engine = DBBase.get_engine(db_key="cache_db")
+#             with Session(engine) as session:
+#                 table = cls._ensure_sqlite_table(session, layer_uuid)
+#                 session.execute(text(f"""
+#                         INSERT INTO {table} (x, y, z, variant, mvt)
+#                         VALUES (:x, :y, :z, :variant, :mvt)
+#                         ON CONFLICT (x, y, z, variant)
+#                         DO UPDATE SET mvt = EXCLUDED.mvt
+#                     """), {"x": x, "y": y, "z": z, "variant": variant, "mvt": mvt_bytes}, )
+#                 session.commit()
+#         except Exception as err:
+#             da_logger.exception(f"[SQLiteCacheWriteError] {err}")
+#
+#     @staticmethod
+#     def _ensure_sqlite_table(session: Session, uuid: str) -> str:
+#         clean_uuid = "".join(c for c in uuid if c.isalnum() or c == "_")
+#         table_name = f'"{clean_uuid}_xyz"'
+#
+#         session.execute(text(f"""
+#             CREATE TABLE IF NOT EXISTS {table_name} (
+#                 x INTEGER NOT NULL,
+#                 y INTEGER NOT NULL,
+#                 z INTEGER NOT NULL,
+#                 variant TEXT NOT NULL,
+#                 mvt BLOB NOT NULL,
+#                 PRIMARY KEY (x, y, z, variant)
+#             )
+#         """))
+#         session.commit()
+#         return table_name
+#
+#     @classmethod
+#     def clear_cache(cls, layer_uuid: str | None = None) -> int:
+#         cleared_count = 0
+#         # ---------------------------------------------------------------
+#         # Redis
+#         # ---------------------------------------------------------------
+#         if redis_client:
+#             try:
+#                 if layer_uuid:
+#                     pattern = f"{REDIS_NAMESPACE}:mvt:{layer_uuid}:*"
+#                 else:
+#                     pattern = f"{REDIS_NAMESPACE}:mvt:*"
+#
+#                 batch = []
+#
+#                 for key in redis_client.scan_iter(
+#                         match=pattern,
+#                         count=1000,
+#                 ):
+#                     batch.append(key)
+#
+#                     if len(batch) >= 1000:
+#                         cleared_count += redis_client.delete(*batch)
+#                         batch.clear()
+#
+#                 if batch:
+#                     cleared_count += redis_client.delete(*batch)
+#
+#             except Exception as err:
+#                 da_logger.exception(
+#                     f"[RedisCacheClearError] "
+#                     f"namespace={REDIS_NAMESPACE}, "
+#                     f"layer={layer_uuid or 'ALL'}: {err}"
+#                 )
+#
+#         # ---------------------------------------------------------------
+#         # SQLite fallback
+#         # ---------------------------------------------------------------
+#         try:
+#             engine = DBBase.get_engine(db_key="cache_db")
+#
+#             with Session(engine) as session:
+#
+#                 if layer_uuid:
+#                     # Clear one layer
+#                     clean_uuid = "".join(
+#                         c for c in layer_uuid
+#                         if c.isalnum() or c == "_"
+#                     )
+#
+#                     table_name = f'"{clean_uuid}_xyz"'
+#
+#                     session.execute(
+#                         text(f"DROP TABLE IF EXISTS {table_name}")
+#                     )
+#
+#                 else:
+#                     # Clear all MVT cache tables
+#                     tables = session.execute(
+#                         text("""
+#                              SELECT name
+#                              FROM sqlite_master
+#                              WHERE type = 'table'
+#                                AND name LIKE '%_xyz'
+#                              """)
+#                     ).scalars().all()
+#
+#                     for table_name in tables:
+#                         safe_table_name = table_name.replace('"', '""')
+#
+#                         session.execute(
+#                             text(
+#                                 f'DROP TABLE IF EXISTS '
+#                                 f'"{safe_table_name}"'
+#                             )
+#                         )
+#
+#                 session.commit()
+#
+#         except KeyError:
+#             da_logger.warning(
+#                 "[SQLiteCacheClear] cache_db is not configured"
+#             )
+#
+#         except Exception as err:
+#             da_logger.exception(
+#                 f"[SQLiteCacheClearError] "
+#                 f"layer={layer_uuid or 'ALL'}: {err}"
+#             )
+#
+#         da_logger.info(
+#             f"Cleared {cleared_count} Redis tiles | "
+#             f"namespace={REDIS_NAMESPACE} | "
+#             f"layer={layer_uuid or 'ALL'}"
+#         )
+#
+#         return cleared_count

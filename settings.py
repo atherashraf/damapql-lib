@@ -84,3 +84,14 @@ DCH_CRYPTO_KEY = os.getenv("CRYPTO_KEY")
 AWS_ACCESS_KEY_ID  = os.getenv("AWS_ACCESS_KEY_ID", None)
 AWS_SECRET_ACCESS_KEY= os.getenv("AWS_SECRET_ACCESS_KEY", None)
 AWS_REGION_NAME = os.getenv("AWS_DEFAULT_REGION", None)
+
+# MinIO Configuration
+MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+
+# Parse boolean safely from environment string
+MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "False").lower() in ("true", "1", "t", "yes")
+
+# Default bucket for ingestion
+MINIO_BUCKET_NAME: str = os.getenv("MINIO_BUCKET_NAME", "damapql-rasters")

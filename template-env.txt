@@ -8,6 +8,7 @@
 IS_LOCAL=True
 IS_DOCKER=False
 APP_FE_URL=http://localhost:5173
+APP_NAME=damapql
 
 # -----------------------------------------------------------------------------
 # DAMAPQL CORE DATABASE
@@ -61,7 +62,17 @@ JWT_REFRESH_SECRET_KEY=
 GMAIL_PASS_CODE=
 
 # -----------------------------------------------------------------------------
-# OPTIONAL AWS S3 STORAGE
+# MINIO / S3 OBJECT STORAGE
+# -----------------------------------------------------------------------------
+
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_SECURE=False
+MINIO_BUCKET_NAME=damapql-rasters
+
+# -----------------------------------------------------------------------------
+# OPTIONAL AWS S3 STORAGE (If using AWS S3 directly)
 # -----------------------------------------------------------------------------
 
 AWS_ACCESS_KEY_ID=

@@ -82,51 +82,47 @@ refreh layer accessibility
     docker exec -it wasa_be python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal --check true
 
 """
+import binascii
+import importlib
+import json
 import os
 import sys
-import json
-import binascii
-import traceback
-import importlib
-import numpy as np
-import pandas as pd
 import time
+import traceback
 from datetime import datetime, timezone
-
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from digitalarzengine.utils.singletons import da_logger
+import numpy as np
+import pandas as pd
+from cryptography.fernet import Fernet
 from fastapi import APIRouter
 from pydantic import ValidationError
-from sqlalchemy import Integer, Float, String, Boolean, JSON, text,  create_engine, select
+from sqlalchemy import Integer, Float, String, Boolean, JSON, text, create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import selectinload
-from sqlalchemy_utils import ChoiceType
 from sqlalchemy.engine import URL
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy_utils import ChoiceType
 
-from cryptography.fernet import Fernet
-
+from app.damapql.auth.dtypes import EmailValidator
+from app.damapql.auth.models import Profile, User, Role, Department, Organization
+from app.damapql.cache.cache import redis_client, REDIS_NAMESPACE
 from app.damapql.dch.api_enum import AccessibilityType
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
+from app.damapql.settings import DCH_DATABASES
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.model_utils import ModelUtils
-# Project Imports
-
 from app.damapql.utils.crypto import CryptoUtils
-from app.damapql.auth.models import Profile, User, Role, Department, Organization
-from app.damapql.auth.dtypes import EmailValidator
-from app.damapql.settings import DCH_DATABASES
 from app.damapql.utils.helper_scripts.table_schema_update import TableSchemaUpdater
+from digitalarzengine.utils.singletons import da_logger
 from settings import DA_APPS, BASE_DIR, DATABASES
 
-manage_router = APIRouter(
-    tags=["manage"],
-    responses={404: {"description": "Not found"}},
-)
+# Project Imports
+
+manage_router = APIRouter(tags=["manage"], responses={404: {"description": "Not found"}}, )
 
 
 def create_dch_databases():
@@ -159,14 +155,8 @@ def create_dch_databases():
 
         print(f"\n🛠️  Checking database '{db_name}' ({label})")
 
-        admin_url = URL.create(
-            drivername="postgresql+psycopg2",
-            username=db_user,
-            password=db_password,
-            host=host,
-            port=port,
-            database="postgres",
-        )
+        admin_url = URL.create(drivername="postgresql+psycopg2", username=db_user, password=db_password, host=host,
+            port=port, database="postgres", )
 
         admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
 
@@ -174,19 +164,14 @@ def create_dch_databases():
             with admin_engine.connect() as conn:
 
                 # Check if database exists
-                exists = conn.execute(
-                    text("SELECT 1 FROM pg_database WHERE datname=:name"),
-                    {"name": db_name}
-                ).scalar()
+                exists = conn.execute(text("SELECT 1 FROM pg_database WHERE datname=:name"), {"name": db_name}).scalar()
 
                 if exists:
                     print(f"⏭️  Database '{db_name}' already exists — skipping.")
                     continue
 
                 # Create database
-                conn.execute(
-                    text(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"')
-                )
+                conn.execute(text(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"'))
 
                 print(f"✅ Database '{db_name}' created with owner '{db_user}'")
 
@@ -195,25 +180,15 @@ def create_dch_databases():
             continue
 
         # Connect to new DB to install PostGIS
-        db_url = URL.create(
-            drivername="postgresql+psycopg2",
-            username=db_user,
-            password=db_password,
-            host=host,
-            port=port,
-            database=db_name,
-        )
+        db_url = URL.create(drivername="postgresql+psycopg2", username=db_user, password=db_password, host=host,
+            port=port, database=db_name, )
 
         engine = create_engine(db_url, isolation_level="AUTOCOMMIT")
 
         try:
             with engine.connect() as conn:
 
-                extensions = [
-                    "postgis",
-                    "postgis_topology",
-                    "postgis_raster"
-                ]
+                extensions = ["postgis", "postgis_topology", "postgis_raster"]
 
                 for ext in extensions:
                     conn.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{ext}"'))
@@ -359,10 +334,7 @@ def get_model_app_info(ModelCls):
     for app_label, app_config in DA_APPS.items():
         models_prefix = f'{app_config["path"]}.models'
 
-        if not (
-            model_module == models_prefix
-            or model_module.startswith(f"{models_prefix}.")
-        ):
+        if not (model_module == models_prefix or model_module.startswith(f"{models_prefix}.")):
             continue
 
         configured_base = app_config.get("base")
@@ -376,18 +348,12 @@ def get_model_app_info(ModelCls):
 
         return app_label, app_config, BaseCls
 
-    raise ValueError(
-        f"Could not resolve DA_APPS configuration for model "
-        f"'{ModelCls.__module__}.{ModelCls.__name__}'."
-    )
+    raise ValueError(f"Could not resolve DA_APPS configuration for model "
+                     f"'{ModelCls.__module__}.{ModelCls.__name__}'.")
 
-def sync_schema(
-        *,
-        app_label: str | None = None,
-        model_name: str | None = None,
-        table_name: str | None = None,
-        rename_map: dict | None = None,
-):
+
+def sync_schema(*, app_label: str | None = None, model_name: str | None = None, table_name: str | None = None,
+        rename_map: dict | None = None, ):
     """
     Synchronize database schema using exactly one selector.
 
@@ -424,30 +390,18 @@ def sync_schema(
     """
     rename_map = rename_map or {}
 
-    selectors = {
-        "app_label": app_label,
-        "model_name": model_name,
-        "table_name": table_name,
-    }
+    selectors = {"app_label": app_label, "model_name": model_name, "table_name": table_name, }
 
-    supplied_selectors = [
-        selector_name
-        for selector_name, selector_value in selectors.items()
-        if selector_value is not None
-        and str(selector_value).strip()
-    ]
+    supplied_selectors = [selector_name for selector_name, selector_value in selectors.items() if
+        selector_value is not None and str(selector_value).strip()]
 
     if not supplied_selectors:
-        raise ValueError(
-            "At least one selector is required: "
-            "app_label, model_name, or table_name."
-        )
+        raise ValueError("At least one selector is required: "
+                         "app_label, model_name, or table_name.")
 
     if len(supplied_selectors) > 1:
-        raise ValueError(
-            "Only one selector can be supplied at a time. "
-            f"Received: {', '.join(supplied_selectors)}"
-        )
+        raise ValueError("Only one selector can be supplied at a time. "
+                         f"Received: {', '.join(supplied_selectors)}")
 
     selected_app_label: str
     ap: dict
@@ -462,13 +416,9 @@ def sync_schema(
         ap = DA_APPS.get(selected_app_label)
 
         if not ap:
-            raise ValueError(
-                f"App label '{selected_app_label}' not found."
-            )
+            raise ValueError(f"App label '{selected_app_label}' not found.")
 
-        importlib.import_module(
-            f'{ap["path"]}.models'
-        )
+        importlib.import_module(f'{ap["path"]}.models')
 
         configured_base = ap.get("base")
 
@@ -479,92 +429,55 @@ def sync_schema(
         else:
             BaseCls = configured_base
 
-        selected_tables = list(
-            BaseCls.metadata.sorted_tables
-        )
+        selected_tables = list(BaseCls.metadata.sorted_tables)
 
     # =========================================================
     # Synchronize one model
     # =========================================================
     elif model_name:
-        ModelCls = ModelUtils.get_model(
-            model_name.strip()
-        )
+        ModelCls = ModelUtils.get_model(model_name.strip())
 
         if ModelCls is None:
-            raise ValueError(
-                f"Model '{model_name}' not found."
-            )
+            raise ValueError(f"Model '{model_name}' not found.")
 
-        (
-            selected_app_label,
-            ap,
-            BaseCls,
-        ) = get_model_app_info(ModelCls)
+        (selected_app_label, ap, BaseCls,) = get_model_app_info(ModelCls)
 
-        selected_tables = [
-            ModelCls.__table__
-        ]
+        selected_tables = [ModelCls.__table__]
 
     # =========================================================
     # Synchronize one table by finding its model
     # =========================================================
     else:
-        ModelCls = ModelUtils.get_model_by_tablename(
-            table_name.strip()
-        )
+        ModelCls = ModelUtils.get_model_by_tablename(table_name.strip())
 
-        (
-            selected_app_label,
-            ap,
-            BaseCls,
-        ) = get_model_app_info(ModelCls)
+        (selected_app_label, ap, BaseCls,) = get_model_app_info(ModelCls)
 
-        selected_tables = [
-            ModelCls.__table__
-        ]
+        selected_tables = [ModelCls.__table__]
 
     if BaseCls is None:
-        raise RuntimeError(
-            "Could not resolve SQLAlchemy BaseCls."
-        )
+        raise RuntimeError("Could not resolve SQLAlchemy BaseCls.")
 
     if not selected_tables:
-        raise ValueError(
-            "No SQLAlchemy tables were selected for synchronization."
-        )
+        raise ValueError("No SQLAlchemy tables were selected for synchronization.")
 
     db_key = ap.get("db_key")
 
     if not db_key:
-        raise ValueError(
-            f"App '{selected_app_label}' does not define db_key."
-        )
+        raise ValueError(f"App '{selected_app_label}' does not define db_key.")
 
-    engine = BaseCls.get_engine(
-        db_key=db_key
-    )
+    engine = BaseCls.get_engine(db_key=db_key)
 
-    da_logger.info(
-        f"Schema synchronization: "
-        f"app={selected_app_label}, "
-        f"base={BaseCls.__name__}, "
-        f"db_key={db_key}"
-    )
+    da_logger.info(f"Schema synchronization: "
+                   f"app={selected_app_label}, "
+                   f"base={BaseCls.__name__}, "
+                   f"db_key={db_key}")
 
-    updater = TableSchemaUpdater(
-        engine=engine,
-        logger=da_logger,
-    )
+    updater = TableSchemaUpdater(engine=engine, logger=da_logger, )
 
-    existing_table_names = set(
-        updater.get_table_names()
-    )
+    existing_table_names = set(updater.get_table_names())
 
-    da_logger.info(
-        "Selected tables: "
-        f"{[table.fullname for table in selected_tables]}"
-    )
+    da_logger.info("Selected tables: "
+                   f"{[table.fullname for table in selected_tables]}")
 
     created_tables = []
     synchronized_tables = []
@@ -577,38 +490,22 @@ def sync_schema(
             if table_name_value not in existing_table_names:
                 updater.create_table(table_obj)
 
-                existing_table_names.add(
-                    table_name_value
-                )
-                created_tables.append(
-                    table_name_value
-                )
+                existing_table_names.add(table_name_value)
+                created_tables.append(table_name_value)
 
                 continue
 
-            table_rename_map = rename_map.get(
-                table_name_value,
-                {},
-            )
+            table_rename_map = rename_map.get(table_name_value, {}, )
 
-            updater.sync_table(
-                table_obj,
-                rename_map=table_rename_map,
-            )
+            updater.sync_table(table_obj, rename_map=table_rename_map, )
 
-            synchronized_tables.append(
-                table_name_value
-            )
+            synchronized_tables.append(table_name_value)
 
         except Exception as exc:
-            failed_tables.append(
-                (table_name_value, str(exc))
-            )
+            failed_tables.append((table_name_value, str(exc)))
 
-            da_logger.exception(
-                f"Schema synchronization failed for "
-                f"'{table_name_value}': {exc}"
-            )
+            da_logger.exception(f"Schema synchronization failed for "
+                                f"'{table_name_value}': {exc}")
 
     print("\n========================================")
     print("Schema Synchronization Summary")
@@ -635,15 +532,12 @@ def sync_schema(
         for failed_table, error in failed_tables:
             print(f"  - {failed_table}: {error}")
 
-        raise RuntimeError(
-            f"Schema synchronization failed for "
-            f"{len(failed_tables)} table(s)."
-        )
+        raise RuntimeError(f"Schema synchronization failed for "
+                           f"{len(failed_tables)} table(s).")
 
-    print(
-        f"\n✅ Schema sync for "
-        f"'{selected_app_label}' complete."
-    )
+    print(f"\n✅ Schema sync for "
+          f"'{selected_app_label}' complete.")
+
 
 def sync_sequences(app_label: str, table_names: str = None):
     """
@@ -701,24 +595,18 @@ def sync_sequences(app_label: str, table_names: str = None):
                 skipped.append((table_name, f"non-integer pk '{pk_name}'"))
                 continue
 
-            seq = session.execute(
-                text("SELECT pg_get_serial_sequence(:tbl, :col)"),
-                {"tbl": table_name, "col": pk_name}
-            ).scalar()
+            seq = session.execute(text("SELECT pg_get_serial_sequence(:tbl, :col)"),
+                {"tbl": table_name, "col": pk_name}).scalar()
 
             if not seq:
                 skipped.append((table_name, f"no backing sequence for '{pk_name}'"))
                 continue
 
-            max_id = session.execute(
-                text(f'SELECT COALESCE(MAX("{pk_name}"), 0) FROM "{table_name}"')
-            ).scalar() or 0
+            max_id = session.execute(text(f'SELECT COALESCE(MAX("{pk_name}"), 0) FROM "{table_name}"')).scalar() or 0
 
             # set sequence so next nextval() becomes max_id + 1
-            session.execute(
-                text("SELECT setval(:seq, :val, :is_called)"),
-                {"seq": seq, "val": max_id, "is_called": True}
-            )
+            session.execute(text("SELECT setval(:seq, :val, :is_called)"),
+                {"seq": seq, "val": max_id, "is_called": True})
 
             synced.append((table_name, pk_name, max_id, seq))
 
@@ -792,16 +680,9 @@ def dumpdata(app_label: str, model: str, output: Optional[str] = None):
         pk_name = model_class.__mapper__.primary_key[0].name
 
         for obj in results:
-            fields = {
-                col.name: to_python_scalar(getattr(obj, col.name))
-                for col in model_class.__table__.columns
-                if col.name != pk_name
-            }
-            data.append({
-                "model": model,
-                "pk": getattr(obj, pk_name),
-                "fields": fields
-            })
+            fields = {col.name: to_python_scalar(getattr(obj, col.name)) for col in model_class.__table__.columns if
+                col.name != pk_name}
+            data.append({"model": model, "pk": getattr(obj, pk_name), "fields": fields})
 
     # ✅ Step 3: Ensure directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -811,6 +692,7 @@ def dumpdata(app_label: str, model: str, output: Optional[str] = None):
         json.dump(data, f, indent=2, default=str)
 
     print(f"📤 Dumped {len(data)} records to {output_path}")
+
 
 def loaddata(app_label: str, file: str):
     """
@@ -869,11 +751,7 @@ def loaddata(app_label: str, file: str):
 
             session.commit()
 
-            reset_pk_sequences(
-                DBBase.get_engine(app_label=app_label),
-                session,
-                touched_models
-            )
+            reset_pk_sequences(DBBase.get_engine(app_label=app_label), session, touched_models)
 
             print(f"📥 Loaded {len(records)} records from {file_path}")
 
@@ -881,6 +759,7 @@ def loaddata(app_label: str, file: str):
             session.rollback()
             print("❌ Data loading failed. Rolling back transaction.")
             raise
+
 
 def reset_pk_sequences(engine, session, touched_models):
     """Fixes ID sequences to avoid PK collisions after bulk load."""
@@ -899,14 +778,9 @@ def reset_pk_sequences(engine, session, touched_models):
     session.commit()
 
 
-def create_layerinfo_from_app_models(
-    app_label: Optional[str] = None,
-    model_name: Optional[str] = None,
-    table_name: Optional[str] = None,
-    layer_category_id: Optional[int] = None,
-    overwrite: bool = True,
-    include_non_spatial: bool = False,
-):
+def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name: Optional[str] = None,
+        table_name: Optional[str] = None, layer_category_id: Optional[int] = None, overwrite: bool = True,
+        include_non_spatial: bool = False, ):
     """
     Generate LayerInfo and LayerAccessibility entries from SQLAlchemy app models.
 
@@ -921,22 +795,14 @@ def create_layerinfo_from_app_models(
     include_non_spatial = _to_bool(include_non_spatial)
 
     # --- Step 1: Validate and Resolve Selector ---
-    selectors = {
-        "app_label": app_label,
-        "model_name": model_name,
-        "table_name": table_name,
-    }
+    selectors = {"app_label": app_label, "model_name": model_name, "table_name": table_name, }
 
     supplied = [k for k, v in selectors.items() if v is not None and str(v).strip()]
 
     if not supplied:
-        raise ValueError(
-            "At least one selector is required: app_label, model_name, or table_name."
-        )
+        raise ValueError("At least one selector is required: app_label, model_name, or table_name.")
     if len(supplied) > 1:
-        raise ValueError(
-            f"Only one selector can be supplied at a time. Received: {', '.join(supplied)}"
-        )
+        raise ValueError(f"Only one selector can be supplied at a time. Received: {', '.join(supplied)}")
 
     target_model_cls = None
 
@@ -972,14 +838,8 @@ def create_layerinfo_from_app_models(
         # --- Step 3: Execute Service Generation ---
         # Note: Ensure your LayerInfoService.save_app_layer_infos accepts
         # target_model or target_table parameters if you want to skip other models in the app.
-        result = service.save_app_layer_infos(
-            db=session,
-            app_label=app_label,
-            layer_category_id=layer_category_id,
-            quality_level_id=quality.id,
-            user=None,
-            overwrite=overwrite,
-            include_non_spatial=include_non_spatial,
+        result = service.save_app_layer_infos(db=session, app_label=app_label, layer_category_id=layer_category_id,
+            quality_level_id=quality.id, user=None, overwrite=overwrite, include_non_spatial=include_non_spatial,
             target_model=target_model_cls,  # Pass the target model class down
         )
 
@@ -1006,16 +866,8 @@ Usage:
 """
 
 
-def create_layerinfo_from_raster(
-        title: str,
-        raster_path: str,
-        layer_category_id=None,
-        temporal: str = None,
-        data_model_type: str = None,
-        overwrite: bool = False,
-        app_label: str = "dch",
-        layer_name: str = None,
-):
+def create_layerinfo_from_raster(title: str, raster_path: str, layer_category_id=None, temporal: str = None,
+        data_model_type: str = None, overwrite: bool = False, app_label: str = "dch", layer_name: str = None, ):
     service = LayerInfoService()
 
     with LayerInfo.managed_session() as session:
@@ -1036,46 +888,23 @@ def create_layerinfo_from_raster(
         if quality is None:
             raise ValueError("QualityLevel with name='Not Accessed' not found")
 
-        obj, changed = service.save_raster_layer_info(
-            db=session,
-            title=title,
-            raster_path=raster_path,
-            layer_category_id=layer_category_id,
-            temporal=temporal,
-            data_model_type=data_model_type,
-            user=None,
-            overwrite=overwrite,
-            app_label=app_label,
-            layer_name=layer_name,
-        )
+        obj, changed = service.save_raster_layer_info(db=session, title=title, raster_path=raster_path,
+            layer_category_id=layer_category_id, temporal=temporal, data_model_type=data_model_type, user=None,
+            overwrite=overwrite, app_label=app_label, layer_name=layer_name, )
 
         if getattr(obj, "quality_level_id", None) is None:
             obj.quality_level_id = quality.id
 
         session.commit()
 
-    print(
-        {
-            "msg": "Raster layer info created/updated" if changed else "Raster layer already exists",
-            "uuid": getattr(obj, "uuid", None),
-            "layer_name": getattr(obj, "layer_name", None),
-            "title": getattr(obj, "title", None),
-            "path": (
-                obj.extra_metadata.get("cog_path")
-                if getattr(obj, "extra_metadata", None)
-                else raster_path
-            ),
-        }
-    )
+    print({"msg": "Raster layer info created/updated" if changed else "Raster layer already exists",
+        "uuid": getattr(obj, "uuid", None), "layer_name": getattr(obj, "layer_name", None),
+        "title": getattr(obj, "title", None),
+        "path": (obj.extra_metadata.get("cog_path") if getattr(obj, "extra_metadata", None) else raster_path), })
     return obj
 
 
-def reconcile_layerinfo(
-    layer_uuid: str = None,
-    table_name: str = None,
-    schema: str = "public",
-    check: bool = False,
-):
+def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: str = "public", check: bool = False, ):
     """
     Reconcile LayerInfo and LayerAccessibility metadata against real DB tables.
 
@@ -1109,26 +938,13 @@ def reconcile_layerinfo(
 
         normalized_key = raw.replace("_", "").replace(" ", "").lower()
 
-        geometry_map = {
-            "point": "Point",
-            "multipoint": "MultiPoint",
-            "linestring": "LineString",
-            "multilinestring": "MultiLineString",
-            "polyline": "LineString",
-            "multipolyline": "MultiLineString",
-            "polygon": "Polygon",
-            "multipolygon": "MultiPolygon",
-            "geometry": "Geometry",
-            "geometrycollection": "GeometryCollection",
-            "circularstring": "CircularString",
-            "compoundcurve": "CompoundCurve",
-            "curvepolygon": "CurvePolygon",
-            "multicurve": "MultiCurve",
-            "multisurface": "MultiSurface",
-            "triangle": "Triangle",
-            "tin": "TIN",
-            "polyhedralsurface": "PolyhedralSurface",
-        }
+        geometry_map = {"point": "Point", "multipoint": "MultiPoint", "linestring": "LineString",
+            "multilinestring": "MultiLineString", "polyline": "LineString", "multipolyline": "MultiLineString",
+            "polygon": "Polygon", "multipolygon": "MultiPolygon", "geometry": "Geometry",
+            "geometrycollection": "GeometryCollection", "circularstring": "CircularString",
+            "compoundcurve": "CompoundCurve", "curvepolygon": "CurvePolygon", "multicurve": "MultiCurve",
+            "multisurface": "MultiSurface", "triangle": "Triangle", "tin": "TIN",
+            "polyhedralsurface": "PolyhedralSurface", }
 
         return geometry_map.get(normalized_key, raw)
 
@@ -1149,17 +965,14 @@ def reconcile_layerinfo(
         return old_value != new_value
 
     with LayerInfo.managed_session() as session:
-        query = session.query(LayerInfo).options(
-            selectinload(LayerInfo.layer_accessibility)
-        )
+        query = session.query(LayerInfo).options(selectinload(LayerInfo.layer_accessibility))
 
         if layer_uuid:
             query = query.filter(LayerInfo.uuid == layer_uuid)
 
         if table_name:
             query = query.join(LayerInfo.layer_accessibility).filter(
-                LayerAccessibility.params.op("->>")("table_name") == table_name
-            )
+                LayerAccessibility.params.op("->>")("table_name") == table_name)
 
         layers = query.all()
 
@@ -1185,16 +998,8 @@ def reconcile_layerinfo(
         skipped_count = 0
         failed_count = 0
 
-        corrections = {
-            "columns": 0,
-            "geometry_column": 0,
-            "primary_key": 0,
-            "srid": 0,
-            "geometry_type": 0,
-            "extent": 0,
-            "extent_3857": 0,
-            "row_count": 0,
-        }
+        corrections = {"columns": 0, "geometry_column": 0, "primary_key": 0, "srid": 0, "geometry_type": 0, "extent": 0,
+            "extent_3857": 0, "row_count": 0, }
 
         for layer in layers:
             access = layer.layer_accessibility
@@ -1211,10 +1016,7 @@ def reconcile_layerinfo(
                 print("   ⏭️ Skipped: LayerAccessibility is missing.\n")
                 continue
 
-            if (
-                not access.accessibility_type
-                or access.accessibility_type.code != AccessibilityType.DB.name
-            ):
+            if (not access.accessibility_type or access.accessibility_type.code != AccessibilityType.DB.name):
                 skipped_count += 1
                 print("   ⏭️ Skipped: layer is not database-backed.\n")
                 continue
@@ -1224,20 +1026,16 @@ def reconcile_layerinfo(
 
             if not actual_table_name or not connection_name:
                 skipped_count += 1
-                print(
-                    "   ⏭️ Skipped: table_name or conn_name is missing "
-                    "from LayerAccessibility.\n"
-                )
+                print("   ⏭️ Skipped: table_name or conn_name is missing "
+                      "from LayerAccessibility.\n")
                 continue
 
             db_conn = DBConnection.get_db_connection(con_name=connection_name)
 
             if not db_conn:
                 skipped_count += 1
-                print(
-                    f"   ❌ Skipped: DB connection '{connection_name}' "
-                    "was not found.\n"
-                )
+                print(f"   ❌ Skipped: DB connection '{connection_name}' "
+                      "was not found.\n")
                 continue
 
             engine = db_conn.get_sqlalchemy_engine()
@@ -1251,26 +1049,16 @@ def reconcile_layerinfo(
                     # -------------------------------------------------
                     # Read actual table columns
                     # -------------------------------------------------
-                    column_rows = (
-                        conn.execute(
-                            text("""
-                            SELECT
-                                column_name,
-                                data_type,
-                                udt_name
-                            FROM information_schema.columns
-                            WHERE table_schema = :schema
-                              AND table_name = :table_name
-                            ORDER BY ordinal_position
-                        """),
-                            {
-                                "schema": schema,
-                                "table_name": actual_table_name,
-                            },
-                        )
-                        .mappings()
-                        .all()
-                    )
+                    column_rows = (conn.execute(text("""
+                                                     SELECT column_name,
+                                                            data_type,
+                                                            udt_name
+                                                     FROM information_schema.columns
+                                                     WHERE table_schema = :schema
+                                                       AND table_name = :table_name
+                                                     ORDER BY ordinal_position
+                                                     """),
+                        {"schema": schema, "table_name": actual_table_name, }, ).mappings().all())
 
                     # -------------------------------------------------
                     # Handle non-existent table (Delete Record)
@@ -1279,50 +1067,36 @@ def reconcile_layerinfo(
                         if check:
                             skipped_count += 1
                             print(
-                                f"   🗑️ Check Mode: Layer marked for deletion (table does not exist: {schema}.{actual_table_name})\n"
-                            )
+                                f"   🗑️ Check Mode: Layer marked for deletion (table does not exist: {schema}.{actual_table_name})\n")
                             continue
 
                         try:
                             session.delete(layer)
                             session.commit()
                             deleted_count += 1
-                            print(
-                                f"   🗑️ Deleted orphan LayerInfo record '{layer.layer_name}' "
-                                f"({layer.uuid}) because table {schema}.{actual_table_name} does not exist.\n"
-                            )
+                            print(f"   🗑️ Deleted orphan LayerInfo record '{layer.layer_name}' "
+                                  f"({layer.uuid}) because table {schema}.{actual_table_name} does not exist.\n")
                         except Exception as delete_error:
                             session.rollback()
                             failed_count += 1
-                            print(
-                                f"   ❌ Failed to delete orphan LayerInfo record: {delete_error}\n"
-                            )
+                            print(f"   ❌ Failed to delete orphan LayerInfo record: {delete_error}\n")
                         continue
 
                     # -------------------------------------------------
                     # Read primary key columns
                     # -------------------------------------------------
-                    pk_rows = (
-                        conn.execute(
-                            text("""
-                            SELECT kcu.column_name
-                            FROM information_schema.table_constraints tc
-                            JOIN information_schema.key_column_usage kcu
-                              ON tc.constraint_name = kcu.constraint_name
-                             AND tc.table_schema = kcu.table_schema
-                            WHERE tc.constraint_type = 'PRIMARY KEY'
-                              AND tc.table_schema = :schema
-                              AND tc.table_name = :table_name
-                            ORDER BY kcu.ordinal_position
-                        """),
-                            {
-                                "schema": schema,
-                                "table_name": actual_table_name,
-                            },
-                        )
-                        .mappings()
-                        .all()
-                    )
+                    pk_rows = (conn.execute(text("""
+                                                 SELECT kcu.column_name
+                                                 FROM information_schema.table_constraints tc
+                                                          JOIN information_schema.key_column_usage kcu
+                                                               ON tc.constraint_name = kcu.constraint_name
+                                                                   AND tc.table_schema = kcu.table_schema
+                                                 WHERE tc.constraint_type = 'PRIMARY KEY'
+                                                   AND tc.table_schema = :schema
+                                                   AND tc.table_name = :table_name
+                                                 ORDER BY kcu.ordinal_position
+                                                 """),
+                        {"schema": schema, "table_name": actual_table_name, }, ).mappings().all())
 
                     pk_cols = [row["column_name"] for row in pk_rows]
 
@@ -1342,13 +1116,7 @@ def reconcile_layerinfo(
                             continue
 
                         columns.append(
-                            {
-                                "name": column_name,
-                                "d_type": ManageDataFrameUtils.getColGenericType(
-                                    data_type
-                                ),
-                            }
-                        )
+                            {"name": column_name, "d_type": ManageDataFrameUtils.getColGenericType(data_type), })
 
                     # Prefer the existing geometry column if it is valid.
                     old_params = dict(access.params or {})
@@ -1357,9 +1125,7 @@ def reconcile_layerinfo(
                     if old_geometry_column in geometry_columns:
                         geometry_column = old_geometry_column
                     else:
-                        geometry_column = (
-                            geometry_columns[0] if geometry_columns else None
-                        )
+                        geometry_column = (geometry_columns[0] if geometry_columns else None)
 
                     # -------------------------------------------------
                     # Default metadata
@@ -1371,12 +1137,7 @@ def reconcile_layerinfo(
                     row_count = 0
                     non_null_geometry_count = 0
 
-                    row_count = int(
-                        conn.execute(
-                            text(f"SELECT COUNT(*) FROM {safe_table}")
-                        ).scalar()
-                        or 0
-                    )
+                    row_count = int(conn.execute(text(f"SELECT COUNT(*) FROM {safe_table}")).scalar() or 0)
 
                     # -------------------------------------------------
                     # Read spatial metadata
@@ -1385,27 +1146,16 @@ def reconcile_layerinfo(
                         safe_geometry = quote_ident(geometry_column)
 
                         # Step A: Query PostGIS catalog view geometry_columns
-                        catalog_metadata = (
-                            conn.execute(
-                                text("""
-                                SELECT
-                                    srid,
-                                    type
-                                FROM geometry_columns
-                                WHERE f_table_schema = :schema
-                                  AND f_table_name = :table_name
-                                  AND f_geometry_column = :geometry_column
-                                LIMIT 1
-                            """),
-                                {
-                                    "schema": schema,
-                                    "table_name": actual_table_name,
-                                    "geometry_column": geometry_column,
-                                },
-                            )
-                            .mappings()
-                            .first()
-                        )
+                        catalog_metadata = (conn.execute(text("""
+                                                              SELECT srid,
+                                                                     type
+                                                              FROM geometry_columns
+                                                              WHERE f_table_schema = :schema
+                                                                AND f_table_name = :table_name
+                                                                AND f_geometry_column = :geometry_column
+                                                              LIMIT 1
+                                                              """), {"schema": schema, "table_name": actual_table_name,
+                            "geometry_column": geometry_column, }, ).mappings().first())
 
                         if catalog_metadata:
                             catalog_srid = catalog_metadata.get("srid")
@@ -1416,14 +1166,10 @@ def reconcile_layerinfo(
 
                             # Normalize catalog_type even if it is GEOMETRY
                             if catalog_type:
-                                geometry_types = normalize_geometry_types(
-                                    [catalog_type]
-                                )
+                                geometry_types = normalize_geometry_types([catalog_type])
 
                         # Step B: Inspect stored rows for actual geometry types and SRIDs
-                        actual_metadata = (
-                            conn.execute(
-                                text(f"""
+                        actual_metadata = (conn.execute(text(f"""
                                 SELECT
                                     COUNT(*) AS geometry_count,
                                     ARRAY_AGG(
@@ -1439,46 +1185,29 @@ def reconcile_layerinfo(
                                 FROM {safe_table}
                                 WHERE {safe_geometry} IS NOT NULL
                                   AND NOT ST_IsEmpty({safe_geometry})
-                            """)
-                            )
-                            .mappings()
-                            .first()
-                        )
+                            """)).mappings().first())
 
                         if actual_metadata:
-                            non_null_geometry_count = int(
-                                actual_metadata.get("geometry_count") or 0
-                            )
+                            non_null_geometry_count = int(actual_metadata.get("geometry_count") or 0)
 
-                            actual_types = normalize_geometry_types(
-                                actual_metadata.get("geometry_types")
-                            )
+                            actual_types = normalize_geometry_types(actual_metadata.get("geometry_types"))
 
                             # If actual rows exist, override with the real row types
                             if actual_types:
                                 geometry_types = actual_types
 
-                            actual_srids = [
-                                int(value)
-                                for value in (
-                                    actual_metadata.get("srids") or []
-                                )
-                                if value not in (None, 0)
-                            ]
+                            actual_srids = [int(value) for value in (actual_metadata.get("srids") or []) if
+                                value not in (None, 0)]
 
                             if actual_srids:
                                 srid = actual_srids[0]
 
                                 if len(set(actual_srids)) > 1:
-                                    print(
-                                        "   ⚠️ Mixed SRIDs found: "
-                                        f"{sorted(set(actual_srids))}"
-                                    )
+                                    print("   ⚠️ Mixed SRIDs found: "
+                                          f"{sorted(set(actual_srids))}")
 
                         # Native extent
-                        extent_row = (
-                            conn.execute(
-                                text(f"""
+                        extent_row = (conn.execute(text(f"""
                                 SELECT
                                     ST_XMin(bounds)::float AS minx,
                                     ST_YMin(bounds)::float AS miny,
@@ -1496,28 +1225,17 @@ def reconcile_layerinfo(
                                       )
                                 ) q
                                 WHERE bounds IS NOT NULL
-                            """)
-                            )
-                            .mappings()
-                            .first()
-                        )
+                            """)).mappings().first())
 
                         if extent_row:
-                            extent = [
-                                extent_row["minx"],
-                                extent_row["miny"],
-                                extent_row["maxx"],
-                                extent_row["maxy"],
-                            ]
+                            extent = [extent_row["minx"], extent_row["miny"], extent_row["maxx"], extent_row["maxy"], ]
 
                         # EPSG:3857 extent
                         if extent and srid and srid > 0:
                             if srid == 3857:
                                 extent_3857 = list(extent)
                             else:
-                                extent_3857_row = (
-                                    conn.execute(
-                                        text(f"""
+                                extent_3857_row = (conn.execute(text(f"""
                                         SELECT
                                             ST_XMin(bounds)::float AS minx,
                                             ST_YMin(bounds)::float AS miny,
@@ -1539,118 +1257,59 @@ def reconcile_layerinfo(
                                               )
                                         ) q
                                         WHERE bounds IS NOT NULL
-                                    """)
-                                    )
-                                    .mappings()
-                                    .first()
-                                )
+                                    """)).mappings().first())
 
                                 if extent_3857_row:
-                                    extent_3857 = [
-                                        extent_3857_row["minx"],
-                                        extent_3857_row["miny"],
-                                        extent_3857_row["maxx"],
-                                        extent_3857_row["maxy"],
-                                    ]
+                                    extent_3857 = [extent_3857_row["minx"], extent_3857_row["miny"],
+                                        extent_3857_row["maxx"], extent_3857_row["maxy"], ]
 
                 checked_count += 1
 
                 # -----------------------------------------------------
                 # Build corrected accessibility params
                 # -----------------------------------------------------
-                new_params = {
-                    **old_params,
-                    "conn_name": connection_name,
-                    "table_name": actual_table_name,
-                    "columns": columns,
-                    "g_col": geometry_column,
-                    "pk_cols": pk_cols,
-                }
+                new_params = {**old_params, "conn_name": connection_name, "table_name": actual_table_name,
+                    "columns": columns, "g_col": geometry_column, "pk_cols": pk_cols, }
 
                 old_extra_metadata = dict(layer.extra_metadata or {})
 
-                new_extra_metadata = {
-                    **old_extra_metadata,
-                    "row_count": row_count,
-                    "non_null_geometry_count": non_null_geometry_count,
-                    "layerinfo_reconciled": True,
-                    "layerinfo_reconciled_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                    "layerinfo_reconciled_from": f"{schema}.{actual_table_name}",
-                }
+                new_extra_metadata = {**old_extra_metadata, "row_count": row_count,
+                    "non_null_geometry_count": non_null_geometry_count, "layerinfo_reconciled": True,
+                    "layerinfo_reconciled_at": datetime.now(timezone.utc).isoformat(),
+                    "layerinfo_reconciled_from": f"{schema}.{actual_table_name}", }
 
                 field_changes = {}
 
-                if values_different(
-                    old_params.get("columns"),
-                    columns,
-                ):
-                    field_changes["columns"] = (
-                        old_params.get("columns"),
-                        columns,
-                    )
+                if values_different(old_params.get("columns"), columns, ):
+                    field_changes["columns"] = (old_params.get("columns"), columns,)
                     corrections["columns"] += 1
 
-                if values_different(
-                    old_params.get("g_col"),
-                    geometry_column,
-                ):
-                    field_changes["geometry_column"] = (
-                        old_params.get("g_col"),
-                        geometry_column,
-                    )
+                if values_different(old_params.get("g_col"), geometry_column, ):
+                    field_changes["geometry_column"] = (old_params.get("g_col"), geometry_column,)
                     corrections["geometry_column"] += 1
 
-                if values_different(
-                    old_params.get("pk_cols", []),
-                    pk_cols,
-                ):
-                    field_changes["primary_key"] = (
-                        old_params.get("pk_cols", []),
-                        pk_cols,
-                    )
+                if values_different(old_params.get("pk_cols", []), pk_cols, ):
+                    field_changes["primary_key"] = (old_params.get("pk_cols", []), pk_cols,)
                     corrections["primary_key"] += 1
 
                 if values_different(layer.srid, srid):
-                    field_changes["srid"] = (
-                        layer.srid,
-                        srid,
-                    )
+                    field_changes["srid"] = (layer.srid, srid,)
                     corrections["srid"] += 1
 
-                if values_different(
-                    layer.geom_type,
-                    geometry_types,
-                ):
-                    field_changes["geometry_type"] = (
-                        layer.geom_type,
-                        geometry_types,
-                    )
+                if values_different(layer.geom_type, geometry_types, ):
+                    field_changes["geometry_type"] = (layer.geom_type, geometry_types,)
                     corrections["geometry_type"] += 1
 
                 if values_different(layer.extent, extent):
-                    field_changes["extent"] = (
-                        layer.extent,
-                        extent,
-                    )
+                    field_changes["extent"] = (layer.extent, extent,)
                     corrections["extent"] += 1
 
-                if values_different(
-                    layer.extent_3857,
-                    extent_3857,
-                ):
-                    field_changes["extent_3857"] = (
-                        layer.extent_3857,
-                        extent_3857,
-                    )
+                if values_different(layer.extent_3857, extent_3857, ):
+                    field_changes["extent_3857"] = (layer.extent_3857, extent_3857,)
                     corrections["extent_3857"] += 1
 
                 if old_extra_metadata.get("row_count") != row_count:
-                    field_changes["row_count"] = (
-                        old_extra_metadata.get("row_count"),
-                        row_count,
-                    )
+                    field_changes["row_count"] = (old_extra_metadata.get("row_count"), row_count,)
                     corrections["row_count"] += 1
 
                 changed = bool(field_changes)
@@ -1674,13 +1333,8 @@ def reconcile_layerinfo(
 
                 print("   Changes:")
 
-                for field_name, (
-                    old_value,
-                    new_value,
-                ) in field_changes.items():
-                    print(
-                        f"      - {field_name}: {old_value} -> {new_value}"
-                    )
+                for field_name, (old_value, new_value,) in field_changes.items():
+                    print(f"      - {field_name}: {old_value} -> {new_value}")
 
                 if check:
                     print("   🟡 Check mode: changes were not saved.\n")
@@ -1713,18 +1367,14 @@ def reconcile_layerinfo(
                     session.rollback()
                     failed_count += 1
 
-                    print(
-                        f"   ❌ Failed to save reconciliation: {save_error}\n"
-                    )
+                    print(f"   ❌ Failed to save reconciliation: {save_error}\n")
 
             except Exception as error:
                 session.rollback()
                 failed_count += 1
 
                 print(f"   ❌ Reconciliation failed: {error}\n")
-                da_logger.exception(
-                    f"LayerInfo reconciliation failed for {layer.layer_name}: {error}"
-                )
+                da_logger.exception(f"LayerInfo reconciliation failed for {layer.layer_name}: {error}")
 
         elapsed = time.time() - started_at
 
@@ -1750,17 +1400,11 @@ def reconcile_layerinfo(
         print(f"Completed in         : {elapsed:.2f} seconds")
 
         if check:
-            print(
-                "\nℹ️ Check mode was enabled. No database changes were saved."
-            )
+            print("\nℹ️ Check mode was enabled. No database changes were saved.")
 
 
-def refresh_layer_accessibility(
-    table_name: str = None,
-    layer_uuid: str = None,
-    check: bool = False,
-    schema: str = "public",
-):
+def refresh_layer_accessibility(table_name: str = None, layer_uuid: str = None, check: bool = False,
+        schema: str = "public", ):
     """
     Refresh DB-backed LayerAccessibility metadata from the real database table.
     Orphan LayerInfo records (where table does not exist) are deleted unless check=True.
@@ -1776,14 +1420,11 @@ def refresh_layer_accessibility(
     started_at = time.time()
 
     with LayerInfo.managed_session() as session:
-        query = session.query(LayerInfo).options(
-            selectinload(LayerInfo.layer_accessibility)
-        )
+        query = session.query(LayerInfo).options(selectinload(LayerInfo.layer_accessibility))
 
         if table_name:
             query = query.join(LayerInfo.layer_accessibility).filter(
-                LayerAccessibility.params.op("->>")("table_name") == table_name
-            )
+                LayerAccessibility.params.op("->>")("table_name") == table_name)
 
         if layer_uuid:
             query = query.filter(LayerInfo.uuid == layer_uuid)
@@ -1822,50 +1463,36 @@ def refresh_layer_accessibility(
                 print(f"⏭️  {layer.layer_name}: no accessibility")
                 continue
 
-            if (
-                not access.accessibility_type
-                or access.accessibility_type.code != AccessibilityType.DB.name
-            ):
+            if (not access.accessibility_type or access.accessibility_type.code != AccessibilityType.DB.name):
                 skipped_count += 1
                 print(f"⏭️  {layer.layer_name}: not DB-backed")
                 continue
 
             if not access.table_name or not access.conn_name:
                 skipped_count += 1
-                print(
-                    f"⏭️  {layer.layer_name}: missing table_name or conn_name"
-                )
+                print(f"⏭️  {layer.layer_name}: missing table_name or conn_name")
                 continue
 
             db_conn = DBConnection.get_db_connection(con_name=access.conn_name)
             if not db_conn:
                 skipped_count += 1
-                print(
-                    f"❌ {layer.layer_name}: DB connection not found: {access.conn_name}"
-                )
+                print(f"❌ {layer.layer_name}: DB connection not found: {access.conn_name}")
                 continue
 
             engine = db_conn.get_sqlalchemy_engine()
 
             try:
                 with engine.connect() as conn:
-                    col_rows = (
-                        conn.execute(
-                            text("""
-                        SELECT 
-                            column_name,
-                            data_type,
-                            udt_name
-                        FROM information_schema.columns
-                        WHERE table_schema = :schema
-                          AND table_name = :table_name
-                        ORDER BY ordinal_position
-                    """),
-                            {"schema": schema, "table_name": access.table_name},
-                        )
-                        .mappings()
-                        .all()
-                    )
+                    col_rows = (conn.execute(text("""
+                                                  SELECT column_name,
+                                                         data_type,
+                                                         udt_name
+                                                  FROM information_schema.columns
+                                                  WHERE table_schema = :schema
+                                                    AND table_name = :table_name
+                                                  ORDER BY ordinal_position
+                                                  """),
+                        {"schema": schema, "table_name": access.table_name}, ).mappings().all())
 
                     # -------------------------------------------------
                     # Handle non-existent table (Delete Record)
@@ -1874,8 +1501,7 @@ def refresh_layer_accessibility(
                         if check:
                             skipped_count += 1
                             print(
-                                f"🗑️  {layer.layer_name}: marked for deletion (table not found: {schema}.{access.table_name})"
-                            )
+                                f"🗑️  {layer.layer_name}: marked for deletion (table not found: {schema}.{access.table_name})")
                             continue
 
                         try:
@@ -1883,34 +1509,25 @@ def refresh_layer_accessibility(
                             session.commit()
                             deleted_count += 1
                             print(
-                                f"🗑️  {layer.layer_name}: deleted orphan layer record (table not found: {schema}.{access.table_name})\n"
-                            )
+                                f"🗑️  {layer.layer_name}: deleted orphan layer record (table not found: {schema}.{access.table_name})\n")
                         except Exception as del_err:
                             session.rollback()
                             failed_count += 1
-                            print(
-                                f"❌ {layer.layer_name}: failed to delete orphan layer: {del_err}\n"
-                            )
+                            print(f"❌ {layer.layer_name}: failed to delete orphan layer: {del_err}\n")
                         continue
 
-                    pk_rows = (
-                        conn.execute(
-                            text("""
-                        SELECT kcu.column_name
-                        FROM information_schema.table_constraints tc
-                        JOIN information_schema.key_column_usage kcu
-                          ON tc.constraint_name = kcu.constraint_name
-                         AND tc.table_schema = kcu.table_schema
-                        WHERE tc.constraint_type = 'PRIMARY KEY'
-                          AND tc.table_schema = :schema
-                          AND tc.table_name = :table_name
-                        ORDER BY kcu.ordinal_position
-                    """),
-                            {"schema": schema, "table_name": access.table_name},
-                        )
-                        .mappings()
-                        .all()
-                    )
+                    pk_rows = (conn.execute(text("""
+                                                 SELECT kcu.column_name
+                                                 FROM information_schema.table_constraints tc
+                                                          JOIN information_schema.key_column_usage kcu
+                                                               ON tc.constraint_name = kcu.constraint_name
+                                                                   AND tc.table_schema = kcu.table_schema
+                                                 WHERE tc.constraint_type = 'PRIMARY KEY'
+                                                   AND tc.table_schema = :schema
+                                                   AND tc.table_name = :table_name
+                                                 ORDER BY kcu.ordinal_position
+                                                 """),
+                        {"schema": schema, "table_name": access.table_name}, ).mappings().all())
 
                     geom_col = None
                     columns = []
@@ -1925,13 +1542,7 @@ def refresh_layer_accessibility(
                             continue
 
                         columns.append(
-                            {
-                                "name": col_name,
-                                "d_type": ManageDataFrameUtils.getColGenericType(
-                                    data_type
-                                ),
-                            }
-                        )
+                            {"name": col_name, "d_type": ManageDataFrameUtils.getColGenericType(data_type), })
 
                     pk_cols = [r["column_name"] for r in pk_rows]
 
@@ -1942,16 +1553,12 @@ def refresh_layer_accessibility(
                     row_count = 0
 
                     if geom_col:
-                        safe_geom = (
-                            f'"{geom_col.replace(chr(34), chr(34) * 2)}"'
-                        )
+                        safe_geom = (f'"{geom_col.replace(chr(34), chr(34) * 2)}"')
                         safe_schema = schema.replace('"', '""')
                         safe_table_name = access.table_name.replace('"', '""')
                         safe_table = f'"{safe_schema}"."{safe_table_name}"'
 
-                        meta = (
-                            conn.execute(
-                                text(f"""
+                        meta = (conn.execute(text(f"""
                             SELECT 
                                 COUNT(*) AS row_count,
                                 ST_SRID({safe_geom}) AS srid,
@@ -1961,20 +1568,14 @@ def refresh_layer_accessibility(
                             GROUP BY ST_SRID({safe_geom}), GeometryType({safe_geom})
                             ORDER BY COUNT(*) DESC
                             LIMIT 1
-                        """)
-                            )
-                            .mappings()
-                            .first()
-                        )
+                        """)).mappings().first())
 
                         if meta:
                             srid = meta["srid"]
                             geom_type = meta["geom_type"]
                             row_count = int(meta["row_count"] or 0)
 
-                        ext = (
-                            conn.execute(
-                                text(f"""
+                        ext = (conn.execute(text(f"""
                             SELECT 
                                 ST_XMin(e)::float AS minx,
                                 ST_YMin(e)::float AS miny,
@@ -1986,24 +1587,13 @@ def refresh_layer_accessibility(
                                 WHERE {safe_geom} IS NOT NULL
                             ) AS q
                             WHERE e IS NOT NULL
-                        """)
-                            )
-                            .mappings()
-                            .first()
-                        )
+                        """)).mappings().first())
 
                         if ext:
-                            extent = [
-                                ext["minx"],
-                                ext["miny"],
-                                ext["maxx"],
-                                ext["maxy"],
-                            ]
+                            extent = [ext["minx"], ext["miny"], ext["maxx"], ext["maxy"], ]
 
                         if extent and srid:
-                            ext3857 = (
-                                conn.execute(
-                                    text(f"""
+                            ext3857 = (conn.execute(text(f"""
                                 SELECT 
                                     ST_XMin(e)::float AS minx,
                                     ST_YMin(e)::float AS miny,
@@ -2017,27 +1607,14 @@ def refresh_layer_accessibility(
                                     WHERE {safe_geom} IS NOT NULL
                                 ) AS q
                                 WHERE e IS NOT NULL
-                            """)
-                                )
-                                .mappings()
-                                .first()
-                            )
+                            """)).mappings().first())
 
                             if ext3857:
-                                extent_3857 = [
-                                    ext3857["minx"],
-                                    ext3857["miny"],
-                                    ext3857["maxx"],
-                                    ext3857["maxy"],
-                                ]
+                                extent_3857 = [ext3857["minx"], ext3857["miny"], ext3857["maxx"], ext3857["maxy"], ]
 
                 old_params = access.params or {}
 
-                old_cols = {
-                    c.get("name")
-                    for c in old_params.get("columns", [])
-                    if c.get("name")
-                }
+                old_cols = {c.get("name") for c in old_params.get("columns", []) if c.get("name")}
 
                 new_cols = {c.get("name") for c in columns if c.get("name")}
 
@@ -2059,16 +1636,8 @@ def refresh_layer_accessibility(
                 extent_3857_changed = layer.extent_3857 != extent_3857
 
                 changed = any(
-                    [
-                        columns_changed,
-                        geom_changed,
-                        pk_changed,
-                        srid_changed,
-                        geom_type_changed,
-                        extent_changed,
-                        extent_3857_changed,
-                    ]
-                )
+                    [columns_changed, geom_changed, pk_changed, srid_changed, geom_type_changed, extent_changed,
+                        extent_3857_changed, ])
 
                 checked_count += 1
 
@@ -2101,9 +1670,7 @@ def refresh_layer_accessibility(
                     print(f"   SRID Fix     : {layer.srid} -> {srid}")
 
                 if geom_type_changed:
-                    print(
-                        f"   Type Fix     : {old_geom_type} -> {new_geom_type}"
-                    )
+                    print(f"   Type Fix     : {old_geom_type} -> {new_geom_type}")
 
                 if extent_changed:
                     print("   Extent       : updated")
@@ -2113,14 +1680,8 @@ def refresh_layer_accessibility(
 
                 if not check and changed:
                     try:
-                        new_params = {
-                            **old_params,
-                            "conn_name": access.conn_name,
-                            "table_name": access.table_name,
-                            "columns": columns,
-                            "g_col": geom_col,
-                            "pk_cols": pk_cols,
-                        }
+                        new_params = {**old_params, "conn_name": access.conn_name, "table_name": access.table_name,
+                            "columns": columns, "g_col": geom_col, "pk_cols": pk_cols, }
 
                         access.params = new_params
                         flag_modified(access, "params")
@@ -2142,9 +1703,7 @@ def refresh_layer_accessibility(
                         extra = layer.extra_metadata or {}
                         extra["row_count"] = row_count
                         extra["accessibility_refreshed"] = True
-                        extra["accessibility_refreshed_at"] = datetime.now(
-                            timezone.utc
-                        ).isoformat()
+                        extra["accessibility_refreshed_at"] = datetime.now(timezone.utc).isoformat()
 
                         layer.extra_metadata = extra
                         flag_modified(layer, "extra_metadata")
@@ -2218,6 +1777,7 @@ def refresh_layer_accessibility(
         if check:
             print("\nℹ️ Check mode only. No database changes were saved.")
 
+
 def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = None):
     """
     Refresh LayerAccessibility.params['columns'] from the real DB table columns.
@@ -2231,9 +1791,7 @@ def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = N
         query = session.query(LayerAccessibility)
 
         if table_name:
-            query = query.filter(
-                LayerAccessibility.params.op("->>")("table_name") == table_name
-            )
+            query = query.filter(LayerAccessibility.params.op("->>")("table_name") == table_name)
 
         access_list = query.all()
 
@@ -2274,10 +1832,7 @@ def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = N
                     g_col = col_name
                     continue
 
-                cols.append({
-                    "name": col_name,
-                    "d_type": ManageDataFrameUtils.getColGenericType(data_type)
-                })
+                cols.append({"name": col_name, "d_type": ManageDataFrameUtils.getColGenericType(data_type)})
 
             params["columns"] = cols
             params["g_col"] = g_col or params.get("g_col")
@@ -2285,12 +1840,11 @@ def sync_layer_accessibility_columns(layer_name: str = None, table_name: str = N
             access.params = params
             flag_modified(access, "params")
 
-            print(
-                f"✅ Synced {access.table_name}: "
-                f"{len(cols)} columns, geom={params.get('g_col')}"
-            )
+            print(f"✅ Synced {access.table_name}: "
+                  f"{len(cols)} columns, geom={params.get('g_col')}")
 
         session.commit()
+
 
 # --- AUTH, ROLES, ORGS & DEPTS ---
 
@@ -2317,15 +1871,8 @@ def createsuperuser():
         username = _prompt_unique_username()
         password = input("Password: ")
 
-        user = User(
-            username=username,
-            password=CryptoUtils().encrypt_txt(password),
-            profile_id=profile.id,
-            is_superuser=True,
-            is_staff=True,
-            is_active=True,
-            is_verified=True,
-        )
+        user = User(username=username, password=CryptoUtils().encrypt_txt(password), profile_id=profile.id,
+            is_superuser=True, is_staff=True, is_active=True, is_verified=True, )
         session.add(user)
         session.commit()
         session.refresh(user)
@@ -2338,18 +1885,13 @@ def create_organization(name: str, description: str = None):
     normalized_name = name.strip()
 
     with DBBase.managed_session(app_label="auth") as session:
-        existing = session.query(Organization).filter(
-            Organization.name == normalized_name
-        ).first()
+        existing = session.query(Organization).filter(Organization.name == normalized_name).first()
 
         if existing:
             print(f"⚠️ Organization '{name}' already exists.")
             return
 
-        organization = Organization(
-            name=normalized_name,
-            description=description
-        )
+        organization = Organization(name=normalized_name, description=description)
         session.add(organization)
         session.commit()
         session.refresh(organization)
@@ -2363,38 +1905,26 @@ def create_department(organization_name: str, name: str, description: str = None
     normalized_dept = name.strip().lower()
 
     with DBBase.managed_session(app_label="auth") as session:
-        organization = session.query(Organization).filter(
-            Organization.name == normalized_org
-        ).first()
+        organization = session.query(Organization).filter(Organization.name == normalized_org).first()
 
         if not organization:
             print(f"❌ Organization '{organization_name}' does not exist.")
             return
 
-        existing = session.query(Department).filter(
-            Department.organization_id == organization.id,
-            Department.name == normalized_dept
-        ).first()
+        existing = session.query(Department).filter(Department.organization_id == organization.id,
+                                                    Department.name == normalized_dept).first()
 
         if existing:
-            print(
-                f"⚠️ Department '{name}' already exists in organization '{organization_name}'."
-            )
+            print(f"⚠️ Department '{name}' already exists in organization '{organization_name}'.")
             return
 
-        department = Department(
-            name=normalized_dept,
-            description=description,
-            organization_id=organization.id,
-        )
+        department = Department(name=normalized_dept, description=description, organization_id=organization.id, )
         session.add(department)
         session.commit()
         session.refresh(department)
 
-        print(
-            f"✅ Department '{name}' created under '{organization_name}' "
-            f"with ID={department.id}."
-        )
+        print(f"✅ Department '{name}' created under '{organization_name}' "
+              f"with ID={department.id}.")
 
 
 def create_role(name: str, description: str = None):
@@ -2415,15 +1945,8 @@ def create_role(name: str, description: str = None):
         print(f"✅ Role '{name}' created with ID={role.id}.")
 
 
-def create_app_user(
-        role_name: str,
-        organization_name: str = None,
-        department_name: str = None,
-        is_staff: bool = True,
-        is_superuser: bool = False,
-        is_active: bool = True,
-        is_verified: bool = True,
-):
+def create_app_user(role_name: str, organization_name: str = None, department_name: str = None, is_staff: bool = True,
+        is_superuser: bool = False, is_active: bool = True, is_verified: bool = True, ):
     """Interactive CLI to create an application user with optional organization and department."""
     print("\n--- Create App User ---")
 
@@ -2437,39 +1960,29 @@ def create_app_user(
 
         organization = None
         if organization_name:
-            organization = session.query(Organization).filter(
-                Organization.name == organization_name.strip()
-            ).first()
+            organization = session.query(Organization).filter(Organization.name == organization_name.strip()).first()
             if not organization:
                 print(f"❌ Organization '{organization_name}' does not exist.")
                 return
 
         department = None
         if department_name:
-            dept_query = session.query(Department).filter(
-                Department.name == department_name.strip().lower()
-            )
+            dept_query = session.query(Department).filter(Department.name == department_name.strip().lower())
 
             if organization:
-                dept_query = dept_query.filter(
-                    Department.organization_id == organization.id
-                )
+                dept_query = dept_query.filter(Department.organization_id == organization.id)
 
             department = dept_query.first()
 
             if not department:
                 if organization_name:
-                    print(
-                        f"❌ Department '{department_name}' does not exist in organization '{organization_name}'."
-                    )
+                    print(f"❌ Department '{department_name}' does not exist in organization '{organization_name}'.")
                 else:
                     print(f"❌ Department '{department_name}' does not exist.")
                 return
 
             if not organization:
-                organization = session.query(Organization).filter(
-                    Organization.id == department.organization_id
-                ).first()
+                organization = session.query(Organization).filter(Organization.id == department.organization_id).first()
 
         email = _prompt_valid_email()
         profile = session.query(Profile).filter(Profile.email == email).first()
@@ -2477,13 +1990,9 @@ def create_app_user(
         if not profile:
             name = input("Full Name: ")
             contact = input("Contact Number: ")
-            profile = Profile(
-                name=name,
-                email=email,
-                contact=contact,
+            profile = Profile(name=name, email=email, contact=contact,
                 organization_id=organization.id if organization else None,
-                department_id=department.id if department else None,
-            )
+                department_id=department.id if department else None, )
             session.add(profile)
             session.flush()
         else:
@@ -2493,9 +2002,7 @@ def create_app_user(
                 return
 
             if department and not organization:
-                organization = session.query(Organization).filter(
-                    Organization.id == department.organization_id
-                ).first()
+                organization = session.query(Organization).filter(Organization.id == department.organization_id).first()
 
             if organization:
                 profile.organization_id = organization.id
@@ -2505,15 +2012,9 @@ def create_app_user(
         username = _prompt_unique_username()
         password = input("Password: ")
 
-        user = User(
-            username=username,
-            password=CryptoUtils().encrypt_txt(password),
-            profile_id=profile.id,
-            is_superuser=_to_bool(is_superuser),
-            is_staff=_to_bool(is_staff),
-            is_active=_to_bool(is_active),
-            is_verified=_to_bool(is_verified),
-        )
+        user = User(username=username, password=CryptoUtils().encrypt_txt(password), profile_id=profile.id,
+            is_superuser=_to_bool(is_superuser), is_staff=_to_bool(is_staff), is_active=_to_bool(is_active),
+            is_verified=_to_bool(is_verified), )
         session.add(user)
         session.flush()
 
@@ -2522,10 +2023,8 @@ def create_app_user(
         session.commit()
         session.refresh(user)
 
-        print(
-            f"✅ App user '{username}' created successfully "
-            f"with role '{role_name}' and ID={user.id}."
-        )
+        print(f"✅ App user '{username}' created successfully "
+              f"with role '{role_name}' and ID={user.id}.")
 
 
 def _prompt_valid_email() -> str:
@@ -2545,6 +2044,8 @@ def _prompt_unique_username() -> str:
             print("❌ Username taken.")
         else:
             return username
+
+
 # def get_user_list():
 #     with User.managed_session() as session:
 #         users = session.query(User.username).all()
@@ -2557,7 +2058,6 @@ def get_user_password(username: str):
     da_logger.success(f"{username} password is {password}")
 
 
-
 # --- SECURITY ---
 
 def generate_crypto_key():
@@ -2567,13 +2067,79 @@ def generate_crypto_key():
 def generate_secret_key_hex(length: int = 32):
     print(binascii.hexlify(os.urandom(int(length))).decode())
 
+
 def encrypt_txt(txt: str, key: str = None):
     """Encrypt a string using CryptoUtils."""
     print(CryptoUtils().encrypt_txt(txt, key))
 
+
 def decrypt_txt(txt: str, key: str = None):
     """Decrypt an encrypted string using CryptoUtils."""
     print(CryptoUtils().decrypt_txt(txt, key))
+
+
+def clear_cache():
+    """
+    Clear all Redis cache entries belonging to the current application.
+
+    Only keys under REDIS_NAMESPACE are removed.
+
+    Examples:
+        APP_NAME=wasa  -> deletes wasa:*
+        APP_NAME=lbdc  -> deletes lbdc:*
+        APP_NAME=pulse -> deletes pulse:*
+
+    Usage:
+        python -m app.damapql.manage clear_cache
+    """
+
+    if redis_client is None:
+        print("❌ Redis client is not configured.")
+        return
+
+    namespace = REDIS_NAMESPACE.strip()
+
+    if not namespace:
+        raise RuntimeError("REDIS_NAMESPACE is empty. "
+                           "Refusing to clear Redis cache.")
+
+    pattern = f"{namespace}:*"
+
+    print("\n========================================")
+    print("Redis Application Cache Clear")
+    print("========================================")
+    print(f"Namespace : {namespace}")
+    print(f"Pattern   : {pattern}")
+    print("========================================")
+
+    deleted_count = 0
+    batch_size = 1000
+    batch = []
+
+    try:
+        # SCAN is used instead of KEYS so Redis is not blocked.
+        for key in redis_client.scan_iter(match=pattern, count=batch_size, ):
+            batch.append(key)
+
+            if len(batch) >= batch_size:
+                deleted_count += redis_client.delete(*batch)
+                batch.clear()
+
+        if batch:
+            deleted_count += redis_client.delete(*batch)
+
+        print(f"\n✅ Cleared {deleted_count} Redis key(s) "
+              f"from namespace '{namespace}'.")
+
+    except Exception as err:
+        da_logger.exception(f"[RedisCacheClearError] "
+                            f"namespace={namespace}: {err}")
+
+        print(f"\n❌ Failed to clear Redis cache "
+              f"for namespace '{namespace}': {err}")
+
+        raise
+
 
 # --- SYSTEM ---
 
