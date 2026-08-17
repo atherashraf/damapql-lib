@@ -1,4 +1,6 @@
 import os
+from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -10,7 +12,7 @@ from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.api_enum import ModelType
 from app.damapql.dch.dtypes import UploadRasterResponse
 from app.damapql.dch.models import LayerInfo
-from app.damapql.dch.services.raster_ingest_service import RasterIngestService
+from app.damapql.dch.services.ingestion.raster_ingest_service import RasterIngestService
 from app.damapql.dch.services.raster_stats_service import RasterStatsService
 from app.damapql.utils.adapters.deps import get_sync_session, get_minio_manager
 from digitalarzengine.io.cog_raster import COGRaster
@@ -41,37 +43,96 @@ async def get_data_model_types():
 
 @dch_raster_router.post("/add_raster_layer_info/", response_model=UploadRasterResponse,
     summary="Register Raster Layer (Upload or Existing Path)",
-    description=("Registers a raster layer either by uploading a new file or by "
-                 "referencing an existing server/MinIO file path."), )
-async def add_raster_layer_info(title: str = Form(...), categoryId: int = Form(...), temporal: str | None = Form(None),
-        data_model_type: str | None = Form(None), isExisting: bool = Form(False),
+    description=("Registers a raster layer either by uploading a new file "
+                 "or by referencing an existing local/MinIO raster."), )
+async def add_raster_layer_info(title: str = Form(...), categoryId: int = Form(...),
+        temporal: str | None = Form(None), data_model_type: str | None = Form(None),
+        # ------------------------------------------------------------
+        # Ingestion mode
+        # ------------------------------------------------------------
+        isExisting: bool = Form(False),
+        # Only relevant when isExisting=True
+        existingStorage: Literal["local", "minio"] | None = Form(None),
+        # ------------------------------------------------------------
+        # Input
+        # ------------------------------------------------------------
         rasterFile: UploadFile | None = File(None), rasterFilePath: str | None = Form(None),
-        session: Session = Depends(get_sync_session), current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        # ------------------------------------------------------------
+        # Dependencies
+        # ------------------------------------------------------------
+        session: Session = Depends(get_sync_session),
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
         minio_manager: MinioManager | None = Depends(get_minio_manager), ):
     require_raster_manager(current_user)
 
-    # 1. Validation for Existing Path Mode
+    # ============================================================
+    # EXISTING RASTER
+    # ============================================================
     if isExisting:
         if not rasterFilePath:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST,
-                detail="`rasterFilePath` is required when `isExisting` is True.", )
-        result = RasterIngestService.ingest_from_path(session=session, title=title, category_id=categoryId,
-            raster_path=rasterFilePath, temporal=temporal, data_model_type=data_model_type, uploaded_by=current_user.id,
-            minio_manager=minio_manager, )
-        msg = "Raster LayerInfo created successfully from existing path."
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=("`rasterFilePath` is required when "
+                                                                          "`isExisting` is True."), )
+        if existingStorage not in ("local", "minio",):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=("`existingStorage` must be either "
+                                                                          "'local' or 'minio' when "
+                                                                          "`isExisting` is True."), )
+        # --------------------------------------------------------
+        # Resolve storage backend explicitly
+        # --------------------------------------------------------
+        if existingStorage == "minio":
+            if minio_manager is None:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=("MinIO storage was selected, but "
+                                                                              "MinIO is not available."), )
+            source_minio_manager = (minio_manager)
+        else:
+            # IMPORTANT:
+            # None explicitly tells ingest_from_path()
+            # that this is a LOCAL existing path.
+            source_minio_manager = None
 
-    # 2. Validation for New File Upload Mode
+        # --------------------------------------------------------
+        # Register existing raster
+        # --------------------------------------------------------
+        result = RasterIngestService.ingest_from_path(session=session,
+            title=title, category_id=categoryId,
+            raster_path=rasterFilePath,
+            temporal=temporal, model_type=data_model_type,
+            uploaded_by=current_user.id,
+            minio_manager=source_minio_manager, )
+
+        msg = ("Raster LayerInfo created successfully "
+               f"from existing {existingStorage} raster.")
+
+    # ============================================================
+    # NEW RASTER UPLOAD
+    # ============================================================
     else:
-        if not rasterFile:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST,
-                detail="`rasterFile` is required when creating a new raster layer.", )
-        result = RasterIngestService.ingest_upload(session=session, title=title, category_id=categoryId,
-            temporal=temporal, data_model_type=data_model_type, raster_file=rasterFile, uploaded_by=current_user.id,
+        if rasterFile is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=("`rasterFile` is required when "
+                                                                          "creating a new raster layer."), )
+        # --------------------------------------------------------
+        # Temporal
+        # --------------------------------------------------------
+        if temporal is None:
+            temporal = date.today().isoformat()
+        # --------------------------------------------------------
+        # Upload
+        # --------------------------------------------------------
+        result = RasterIngestService.ingest_upload(session=session,
+            title=title, category_id=categoryId,
+            temporal=temporal, model_type=data_model_type,
+            raster_file=rasterFile,
+            uploaded_by=current_user.id,
             minio_manager=minio_manager, )
-        msg = "Raster uploaded and LayerInfo created successfully."
+
+        msg = ("Raster uploaded and LayerInfo "
+               "created successfully.")
+
+    # ============================================================
+    # RESPONSE
+    # ============================================================
 
     return {"uuid": result.uuid, "msg": msg, }
-
 
 @dch_raster_router.get("/get_pixel_value/{uuid}/{long}/{lat}/")
 async def get_pixel_value(uuid: str, long: float, lat: float):
