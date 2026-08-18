@@ -2,6 +2,7 @@ from typing import List, Optional, Union
 
 import jenkspy
 import pandas as pd
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -16,7 +17,6 @@ from app.damapql.dch.services.raster_stats_service import RasterStatsService
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.utils.adapters.deps import get_minio_manager
-from dafastmap.utils.singletons import da_logger
 from digitalarzengine.io.managers.minio_manager import MinioManager
 
 dch_layers_router = APIRouter(tags=["dch"])
