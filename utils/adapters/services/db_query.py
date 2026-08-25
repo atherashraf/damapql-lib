@@ -85,7 +85,7 @@ from sqlalchemy import Engine, Table, func, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import ResourceClosedError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, Query
 from sqlalchemy.sql.base import Executable
 from sqlalchemy.sql.selectable import Select
 
@@ -614,7 +614,11 @@ class DBQuery:
         raise ValueError(f"Geometry column '{geom_col}' not found in query results.")
 
     @staticmethod
-    def get_postgres_query_text(stmt: Select) -> str:
+    def get_postgres_query_text(stmt: Union[Select,Query]) -> str:
+        # If a legacy Query object is passed, extract the underlying Select statement
+        if isinstance(stmt, Query):
+            stmt = stmt.statement
+
         compiled = stmt.compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},

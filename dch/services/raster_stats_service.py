@@ -100,7 +100,7 @@ class RasterStatsService:
             da_logger.exception(f"Error extracting pixel value "
                                 f"for uuid={uuid}: {e}")
 
-            raise HTTPException(status_code=500, detail="Internal processing error", )
+            raise HTTPException(status_code=500, detail="Internal workers error", )
 
         finally:
             if raster is not None:
@@ -160,7 +160,7 @@ class RasterStatsService:
             da_logger.exception(f"Error extracting raster info "
                                 f"for uuid={uuid}: {e}")
 
-            raise HTTPException(status_code=500, detail="Internal processing error", )
+            raise HTTPException(status_code=500, detail="Internal workers error", )
 
         finally:
             if raster is not None:

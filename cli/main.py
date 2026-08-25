@@ -5,6 +5,7 @@ from app.damapql.cli import commands
 from app.damapql.manage import parse_params
 
 """
+  python -m app.damapql.cli.main ingest_raster_folder --folder "D:\DevProjects\idss\lbdc_be\media\ETpot" --use_minio true --object_prefix "pid-idss/Surfaces/ETpot"
   python -m app.damapql.cli.main ingest_raster_folder --folder "D:\DevProjects\idss\lbdc_be\media\ETact" --use_minio true --object_prefix "pid-idss/Surfaces/ETact"
 """
 

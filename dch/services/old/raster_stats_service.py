@@ -54,7 +54,7 @@ class RasterStatsService:
             raise
         except Exception as e:
             da_logger.exception(f"Error extracting pixel value for uuid={uuid}: {e}")
-            raise HTTPException(status_code=500, detail="Internal processing error")
+            raise HTTPException(status_code=500, detail="Internal workers error")
 
     @classmethod
     def get_raster_info(cls, uuid: str) -> RasterInfoResult:
@@ -86,7 +86,7 @@ class RasterStatsService:
             raise
         except Exception as e:
             da_logger.exception(f"Error extracting raster info for uuid={uuid}: {e}")
-            raise HTTPException(status_code=500, detail="Internal processing error")
+            raise HTTPException(status_code=500, detail="Internal workers error")
 
     @classmethod
     def get_attribute_summary_df(cls, uuid: str) -> pd.DataFrame:

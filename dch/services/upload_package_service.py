@@ -29,7 +29,7 @@ Responsibilities
 ----------------
 - validate required file presence for a package
 - validate shapefile basename consistency
-- resolve the main file path for downstream processing
+- resolve the main file path for downstream workers
 - return normalized package metadata for router/service use
 
 Non-responsibilities
@@ -41,7 +41,7 @@ Non-responsibilities
 - does not append features
 - does not perform CRS analysis
 
-Those belong in specialized processing services.
+Those belong in specialized workers services.
 
 ===============================================================================
 USAGE EXAMPLE: SHAPEFILE

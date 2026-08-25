@@ -59,7 +59,7 @@ async def finalize_upload(
         category_id: int = Form(...),
         title: Optional[str] = Form(None)
 ):
-    """Assembles chunks and triggers the GIS processing pipeline."""
+    """Assembles chunks and triggers the GIS workers pipeline."""
     upload_dir = os.path.join(CHUNK_STORAGE, upload_id)
     final_path = os.path.join(upload_dir, filename)
 

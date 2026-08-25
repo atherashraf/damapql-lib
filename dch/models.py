@@ -152,7 +152,11 @@ class LayerAccessibility(DBBase):
     # never a Pydantic BaseModel instance.
     params = Column(db.JSON, nullable=False, )
 
-    layer_info: Mapped[LayerInfo] = relationship(back_populates="layer_accessibility")
+    # 1:1 relationship mapping (scalar, not list)
+    layer_info: Mapped["LayerInfo"] = relationship(
+        back_populates="layer_accessibility",
+        uselist=False
+    )
 
     __pydantic__ = LayerAccessibilityType
 
@@ -307,35 +311,16 @@ class LayerAccessibility(DBBase):
     @classmethod
     def create_s3_accessibility(cls, bucket: str, object_name: str, spectral_res: int = 1, spatial_res: Any = None,
             rad_res: str = "8-bit", ) -> LayerAccessibility:
-
         object_name = object_name.lstrip("/")
-
         access_params = S3AccessibilityParams(bucket=bucket, object_name=object_name, spectral_resolution=spectral_res,
             spatial_resolution=spatial_res, radiometric_resolution=rad_res, )
-
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
-
-            stmt = select(cls).filter(cls.params.op("->>")("bucket") == bucket,
-
-                                      cls.params.op("->>")("object_name") == object_name, )
-
-            la = (session.execute(stmt).scalars().first())
-
-            if la is None:
-                la = cls(accessibility_type=(AccessibilityType.S3.value), params=params, )
-
-                session.add(la)
-
-            else:
-                la.accessibility_type = (AccessibilityType.S3.value)
-
-                la.params = params
-
+            la = cls(accessibility_type=AccessibilityType.S3.value, params=params, )
+            session.add(la)
             session.commit()
             session.refresh(la)
-
             return la
 
     # ================================================================
@@ -345,35 +330,16 @@ class LayerAccessibility(DBBase):
     @classmethod
     def create_minio_accessibility(cls, bucket: str, object_name: str, spectral_res: Optional[int] = None,
             spatial_res: Any = None, rad_res: Optional[str] = None, ) -> LayerAccessibility:
-
         object_name = object_name.lstrip("/")
-
         access_params = MinioAccessibilityParams(bucket=bucket, object_name=object_name,
             spectral_resolution=spectral_res, spatial_resolution=spatial_res, radiometric_resolution=rad_res, )
-
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
-
-            stmt = select(cls).filter(cls.params.op("->>")("bucket") == bucket,
-
-                                      cls.params.op("->>")("object_name") == object_name, )
-
-            la = (session.execute(stmt).scalars().first())
-
-            if la is None:
-                la = cls(accessibility_type=(AccessibilityType.Minio.value), params=params, )
-
-                session.add(la)
-
-            else:
-                la.accessibility_type = (AccessibilityType.Minio.value)
-
-                la.params = params
-
+            la = cls(accessibility_type=AccessibilityType.Minio.value, params=params, )
+            session.add(la)
             session.commit()
             session.refresh(la)
-
             return la
 
     # ================================================================
@@ -382,30 +348,14 @@ class LayerAccessibility(DBBase):
 
     @classmethod
     def create_file_accessibility(cls, file_path: str, path_base: str = "media_rel", ) -> LayerAccessibility:
-
         access_params = FileAccessibilityParams(file_path=file_path, path_base=path_base, )
-
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
-
-            stmt = select(cls).filter(cls.params.op("->>")("file_path") == file_path)
-
-            la = (session.execute(stmt).scalars().first())
-
-            if la is None:
-                la = cls(accessibility_type=(AccessibilityType.File.value), params=params, )
-
-                session.add(la)
-
-            else:
-                la.accessibility_type = (AccessibilityType.File.value)
-
-                la.params = params
-
+            la = cls(accessibility_type=AccessibilityType.File.value, params=params, )
+            session.add(la)
             session.commit()
             session.refresh(la)
-
             return la
 
     # ================================================================
@@ -415,48 +365,26 @@ class LayerAccessibility(DBBase):
     @classmethod
     def create_db_accessibility(cls, table_name: str, db_conn: Union[DBConnection, str], columns: dict,
             pk_cols: list, ) -> LayerAccessibility:
-
         cols = []
         g_col = None
 
         for column_name, column_type in columns.items():
-
             type_str = str(column_type).lower()
-
             if "geometry" in type_str:
                 g_col = column_name
-
             else:
-                cols.append({"name": column_name, "d_type": (ManageDataFrameUtils.getColGenericType(type_str)), })
+                cols.append({"name": column_name, "d_type": ManageDataFrameUtils.getColGenericType(type_str), })
 
-        conn_name = (db_conn.name if hasattr(db_conn, "name") else db_conn)
-
+        conn_name = db_conn.name if hasattr(db_conn, "name") else db_conn
         access_params = DBAccessibilityParams(conn_name=conn_name, table_name=table_name, columns=cols, g_col=g_col,
             pk_cols=pk_cols, )
-
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
-
-            stmt = select(cls).filter(cls.conn_name == conn_name, cls.table_name == table_name, )
-
-            la = (session.execute(stmt).scalars().first())
-
-            if la is None:
-
-                la = cls(accessibility_type=(AccessibilityType.DB.value), params=params, )
-
-                session.add(la)
-
-            else:
-
-                la.accessibility_type = (AccessibilityType.DB.value)
-
-                la.params = params
-
+            la = cls(accessibility_type=AccessibilityType.DB.value, params=params, )
+            session.add(la)
             session.commit()
             session.refresh(la)
-
             return la
 
     # ================================================================
@@ -465,34 +393,15 @@ class LayerAccessibility(DBBase):
 
     @classmethod
     def create_url_accessibility(cls, url: str, url_type: Optional[str] = None, ) -> LayerAccessibility:
-
         access_params = URLAccessibilityParams(url=url, url_type=url_type, )
-
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
-
-            stmt = select(cls).filter(cls.url == url)
-
-            la = (session.execute(stmt).scalars().first())
-
-            if la is None:
-
-                la = cls(accessibility_type=(AccessibilityType.URL.value), params=params, )
-
-                session.add(la)
-
-            else:
-
-                la.accessibility_type = (AccessibilityType.URL.value)
-
-                la.params = params
-
+            la = cls(accessibility_type=AccessibilityType.URL.value, params=params, )
+            session.add(la)
             session.commit()
             session.refresh(la)
-
             return la
-
     # ================================================================
     # JSON Hybrid Properties
     # ================================================================
@@ -642,10 +551,16 @@ class LayerInfo(DBBase):
     category_id = Column(db.ForeignKey(LayerCategory.id), name="category_id", nullable=True)
     layer_category = relationship("LayerCategory")
 
-    layer_access_id = Column(db.ForeignKey(LayerAccessibility.id, ondelete="CASCADE"), name="layer_access_id",
-        nullable=False, )
-    layer_accessibility: Mapped[LayerAccessibility] = relationship(back_populates="layer_info", cascade="all, delete",
-        passive_deletes=True, )
+    # Enforce database-level 1:1
+    layer_access_id = Column(
+        db.ForeignKey(LayerAccessibility.id),
+        name="layer_access_id",
+        nullable=False,
+        unique=True
+    )
+    layer_accessibility: Mapped[LayerAccessibility] = relationship(
+        back_populates="layer_info"
+    )
 
     quality_level_id = Column(db.ForeignKey(LayerQualityLevel.id), name="quality_level_id", nullable=True)
     quality_level = relationship("LayerQualityLevel")

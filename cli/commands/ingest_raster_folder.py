@@ -8,9 +8,9 @@ Main and Sub LayerCategories, and registers LayerInfo/LayerAccessibility.
 
 from __future__ import annotations
 
-import re
 import time
-from datetime import date
+import re
+from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -137,9 +137,7 @@ def upload_to_minio_if_needed(minio_manager: MinioManager, bucket_name: str, obj
         else:
             minio_manager.client.fput_object(bucket_name, object_name, str(local_file_path))
 
-import re
-from datetime import datetime, date
-from pathlib import Path
+
 
 
 def extract_date_from_filename(file_path: str, is_str: bool = True, ) -> str | date | None:
@@ -253,7 +251,7 @@ def ingest_raster_folder(folder: Optional[str] = None, f: Optional[str] = None, 
                 #     target_raster_path = str(file_path)
 
 
-                temporal = extract_date_from_filename(file_path.name) if temporal is None else temporal
+                temporal = extract_date_from_filename(file_path.name)
                 result = RasterIngestService.ingest_from_path(session=session, minio_manager=minio_manager, title=title,
                     category_id=resolved_cat_id, raster_path=str(file_path),
                     temporal=temporal or date.today().isoformat(), model_type=model_type,

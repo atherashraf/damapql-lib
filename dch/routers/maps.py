@@ -1,3 +1,5 @@
+from sqlalchemy.orm import selectinload
+
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import case, func, literal, select
@@ -234,22 +236,64 @@ async def delete_map(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_c
     return Response(status_code=204)
 
 
+# @dch_maps_router.delete("/delete_layerinfo_row/{uuid}/")
+# async def delete_layer_info_row(uuid: str,
+#                                 current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+#     require_dch_admin(current_user)
+#
+#     with LayerInfo.managed_session() as session:
+#         obj = session.execute(
+#             select(LayerInfo).where(LayerInfo.uuid == uuid)
+#         ).scalar_one_or_none()
+#
+#         if obj:
+#             session.delete(obj)
+#             session.commit()
+#             return {"payload": {"msg": "Layer Info deleted"}}
+#
+#     return Response(status_code=204)
+
+from fastapi import HTTPException, status
+from fastapi.responses import JSONResponse
+
+
 @dch_maps_router.delete("/delete_layerinfo_row/{uuid}/")
-async def delete_layer_info_row(uuid: str,
-                                current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def delete_layer_info_row(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
     require_dch_admin(current_user)
 
     with LayerInfo.managed_session() as session:
-        obj = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
+        layer = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
-        if obj:
-            session.delete(obj)
-            session.commit()
-            return {"payload": {"msg": "Layer Info deleted"}}
+        if not layer:
+            raise HTTPException(status_code=404, detail="Layer Info not found")
 
-    return Response(status_code=204)
+        # Delete both explicitly
+        if layer.layer_accessibility:
+            session.delete(layer.layer_accessibility)
+        session.delete(layer)
+        session.commit()
+
+        # 4. (Optional) Purge layer from MapInfo JSON configs
+        # session.execute(
+        #     text("""
+        #         UPDATE dch_map_info
+        #         SET layers = (
+        #             SELECT jsonb_agg(elem)
+        #             FROM jsonb_array_elements(layers::jsonb) elem
+        #             WHERE elem->>'uuid' != :uuid
+        #         )
+        #         WHERE layers::text LIKE :like_pattern
+        #     """),
+        #     {"uuid": uuid, "like_pattern": f"%{uuid}%"}
+        # )
+
+        session.commit()
+
+    return {"payload": {"msg": f"Layer {uuid} deleted successfully"}}
 
 
 @dch_maps_router.get("/get_all_layers/")

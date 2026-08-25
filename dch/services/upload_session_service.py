@@ -21,7 +21,7 @@ Future-ready for
 - ZIP packages
 - resumable/chunked uploads
 - raster sidecar handling (.ovr, .aux.xml, .tfw)
-- async processing pipelines
+- async workers pipelines
 
 What this service does
 ----------------------

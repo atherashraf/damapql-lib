@@ -376,7 +376,7 @@ async def update_layer_zoom(uuid: str, request: Request,
         da_logger.exception(f"Failed to update visibility zoom range "
                             f"for layer {uuid}: {err}")
 
-        raise HTTPException(status_code=500, detail="Internal update processing error", )
+        raise HTTPException(status_code=500, detail="Internal update workers error", )
 
 
 @dch_styles_router.get("/get_legend_graphic/{uuid}", response_class=Response)

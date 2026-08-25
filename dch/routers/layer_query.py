@@ -126,7 +126,7 @@ def get_layer_meta(
     - Full layer metadata (category, accessibility, etc.)
 
     Use case:
-    - Load layer config for UI or processing
+    - Load layer config for UI or workers
     """
     return {"payload": LayerQueryService.get_layer_meta(identifier=identifier, by=by)}
 
