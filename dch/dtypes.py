@@ -250,13 +250,19 @@ class LayerAccessibilityType(BaseModel):
         elif acc_type is not None:
             acc_type = str(acc_type)
 
-        if acc_type in ("S3", "MinIO") or ("bucket" in v and "object_name" in v):
+        if acc_type in ("S3", "MinIO") or (
+                "bucket" in v and "object_name" in v
+        ):
             return S3AccessibilityParams(**v)
 
-        if acc_type == "DB":
+        # DB detection
+        if acc_type == "DB" or (
+                "conn_name" in v and
+                "pk_cols" in v
+        ):
             return DBAccessibilityParams(**v)
 
-        if acc_type == "URL":
+        if acc_type == "URL" or "url" in v:
             return URLAccessibilityParams(**v)
 
         if "file_path" in v:

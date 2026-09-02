@@ -118,9 +118,14 @@ async def get_layer_fields(uuid: str, current_user: UserInfo = Depends(AuthUtils
 
 
 @dch_layers_router.get("/layer_field_distinct_values/{uuid}/{field_name}/{field_type}/")
-async def get_field_distinct_values(uuid: str, field_name: str, field_type: str, classification: str = "Stats",
-                                    no_of_classes: int = 0,
-                                    current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
+async def get_field_distinct_values(
+    uuid: str,
+    field_name: str,
+    field_type: str,
+    classification: str = "Stats",
+    no_of_classes: int = 0,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
     """
     Returns distinct field values or classification breaks.
     """
@@ -144,21 +149,21 @@ async def get_field_distinct_values(uuid: str, field_name: str, field_type: str,
 
         if classification.lower() == "quantile":
             bins = pd.qcut(data_series, q=int(no_of_classes), duplicates="drop")
-            res = sorted([interval.right for interval in bins.unique()])
+            res = sorted([float(interval.right) for interval in bins.unique()])
             res.insert(0, float(data_series.min()))
 
         elif classification == "EqualInterval":
             bins = pd.cut(data_series, bins=int(no_of_classes))
-            res = sorted([interval.right for interval in bins.unique()])
+            res = sorted([float(interval.right) for interval in bins.unique()])
             res.insert(0, float(data_series.min()))
 
         elif classification == "NaturalBreak":
-            res = jenkspy.jenks_breaks(data_series.tolist(), n_classes=int(no_of_classes))
+            res = [float(x) for x in jenkspy.jenks_breaks(data_series.tolist(), n_classes=int(no_of_classes))]
 
         else:
-            res = data_series.unique().tolist()
+            res = [x.item() if hasattr(x, "item") else x for x in data_series.unique()]
     else:
-        res = df[field_name].dropna().unique().tolist()
+        res = [x.item() if hasattr(x, "item") else x for x in df[field_name].dropna().unique()]
 
     return {"payload": res}
 
