@@ -50,6 +50,7 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.title,
                 LayerInfo.layer_name,
                 category_label,
+                LayerAccessibility.accessibility_type,
                 LayerAccessibility.params["table_name"].as_string().label("table_name"),
                 LayerInfo.srid,
                 LayerInfo.extent,
@@ -67,8 +68,11 @@ async def get_all_layer_info(current_user: UserInfo =
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
         )
 
-
-        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model", "model_type"])
+        df = DBQuery.execute_stmt_as_df(
+            session,
+            stmt,
+            enum_columns=["data_model", "model_type", "accessibility_type", "geom_type"]
+        )
         # enforce exact order from select list
         column_order = [
             "id",
@@ -76,6 +80,7 @@ async def get_all_layer_info(current_user: UserInfo =
             "title",
             "layer_name",
             "category",
+            "accessibility_type",
             "table_name",
             "srid",
             "extent",

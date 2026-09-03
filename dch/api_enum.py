@@ -15,7 +15,7 @@ class APIEnum(str, Enum):
 
 class AccessibilityType(APIEnum):
     File = 'File'
-    DB = 'Database'
+    DB = 'DB'
     S3 = 'S3'
     Minio = 'Minio'
     D_DB = 'Django Database Key'
