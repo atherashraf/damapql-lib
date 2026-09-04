@@ -349,3 +349,9 @@ def get_map_uuid(layer_title:str, current_user: UserInfo = Depends(AuthUtils.get
         if res is not None:
             return {"payload": res}
         return Response(status_code=204)
+
+@dch_maps_router.get("/get_default_extent/",
+    summary="Get Application Default Extent")
+def get_default_extent():
+    native_ext, ext_3857 = DCHUtils.get_default_extents(3857)
+    return {"native_extent": native_ext, "extent_3857": ext_3857}

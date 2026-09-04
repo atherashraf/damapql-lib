@@ -358,11 +358,15 @@ async def get_column_value(uuid: str, pk_val: str, col_name: str,
 class SpatialSelectRequest(BaseModel):
     geometry: str  # This matches your frontend key
     srid: int = 3857
+    inverse: bool = False
 
 
 @dch_layers_router.post("/spatial_select/{uuid}/")
-async def spatial_selection(uuid: str, data: SpatialSelectRequest,
-                            current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
+async def spatial_selection(
+    uuid: str,
+    data: SpatialSelectRequest,
+    # current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
     info = LayerInfo.get_layer_info_by_uuid(uuid)
     if not info:
         return Response(status_code=204)
@@ -370,25 +374,28 @@ async def spatial_selection(uuid: str, data: SpatialSelectRequest,
     # Get the geometry column name from layer accessibility
     g_col = info.layer_accessibility.geometry_col
     safe_g_col = DBQuery.safe_ident(g_col)
+    target_srid = info.srid or 4326
 
-    # Define a single-pass spatial where clause
-    # We transform the input WKT (3857) to the layer's native SRID
-    spatial_where = f"""
-        ST_Intersects(
-            {safe_g_col}, 
-            ST_Transform(ST_GeomFromText('{data.geometry}', {data.srid}), {info.srid or 4326})
-        )
-    """
+    # Form the transformed target geometry
+    geom_sql = f"ST_Transform(ST_GeomFromText('{data.geometry}', {data.srid}), {target_srid})"
 
-    # execute with the spatial where_clause, skipping extent_3857 to avoid double-filtering
+    # If inverse is True, negate ST_Intersects to select features outside
+    if data.inverse:
+        spatial_where = f"NOT ST_Intersects({safe_g_col}, {geom_sql})"
+    else:
+        spatial_where = f"ST_Intersects({safe_g_col}, {geom_sql})"
+
+    # Execute with the spatial where_clause
     gdf = info.to_layer_gdf(where_clause=spatial_where)
 
     if gdf.empty:
         return Response(status_code=204)
 
     # Return as GeoJSON directly from the database result
-    return {"payload": gdf.to_crs(epsg=4326).__geo_interface__, "meta": {"count": len(gdf), "layer_uuid": uuid}}
-
+    return {
+        "payload": gdf.to_crs(epsg=4326).__geo_interface__,
+        "meta": {"count": len(gdf), "layer_uuid": uuid}
+    }
 
 @dch_layers_router.get("/layer_pk_cols/{uuid}/")
 async def get_layer_pk_cols(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
@@ -583,3 +590,5 @@ def get_layer_attributes_page(uuid: str, limit: int = Query(100, ge=1, le=1000),
     cleaned_df = df.astype(object).where(pd.notnull(df), None)
 
     return {"payload": cleaned_df.to_dict(orient="records")}
+
+

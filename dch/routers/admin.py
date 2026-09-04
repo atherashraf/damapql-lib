@@ -1,3 +1,5 @@
+
+
 import base64
 import io
 import json
@@ -8,12 +10,14 @@ from urllib.parse import quote_plus
 from typing import Any
 
 import geopandas as gpd
-from fastapi import APIRouter, Depends, Request, Body, HTTPException
+from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pyproj import Transformer
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
+
+
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -22,7 +26,7 @@ from app.damapql.dch.api_enum import ModelType, ApplicationURLType
 from app.damapql.dch.dtypes import DBConnectionCreate
 from app.damapql.dch.models import (
     AccessibilityType, DBConnection, DBQuery, DataModel, LayerAccessibility, LayerInfo,
-    LayerCategory, MapInfo
+    LayerCategory, MapInfo, LayerQualityLevel
 )
 from app.damapql.dch.routers.admin_dependencies import require_dch_admin
 from app.damapql.dch.schemas.geojson import GeoJSON
@@ -30,7 +34,11 @@ from app.damapql.dch.services.layer_query_services import LayerQueryService
 from app.damapql.dch.services.upload_package_service import DCHUploadPackageService
 from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
 from app.damapql.dch.services.vector_append_service import DCHVectorAppendService
+from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
+
 from app.damapql.dch.utils.dch_utils import DCHUtils
+from app.damapql.manage import reconcile_layerinfo, create_layerinfo_from_app_models
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import get_sync_session
@@ -1593,3 +1601,80 @@ async def upload_row_geometry(uuid: str, request: Request,
     except Exception as e:
         da_logger.exception(f"Failed to upload geometry for layer {uuid}: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload geometry")
+
+
+# =====================================================================
+# 1. Reconcile Layer Info by UUID
+# =====================================================================
+@dch_admin_router.post("/reconcile_layer_info/{uuid}/")
+async def reconcile_layer_info_by_uuid(
+    uuid: str,
+    schema: str = Query("public", description="Database schema name"),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Reconcile LayerInfo & LayerAccessibility metadata against real DB tables
+    using the core manage.py reconciliation engine.
+    """
+    require_dch_admin(current_user)
+
+    result = reconcile_layerinfo(layer_uuid=uuid, schema=schema, check=False)
+
+    if result["checked_layers"] == 0:
+        raise HTTPException(status_code=404, detail="Layer not found or inaccessible")
+
+    if result["failed_layers"] > 0:
+        err_msg = result["errors"][0]["error"] if result["errors"] else "Unknown error"
+        raise HTTPException(status_code=500, detail=f"Reconciliation failed: {err_msg}")
+
+    # Clear MVT cache for the updated layer
+    try:
+        mvt_cache.clear_layer_cache(uuid)
+    except Exception as e:
+        da_logger.warning(f"Failed to clear tile cache for {uuid}: {e}")
+
+    return {
+        "payload": {
+            "status": "success",
+            "message": f"Layer '{uuid}' reconciled successfully",
+            "summary": result,
+        }
+    }
+
+# =====================================================================
+# 2. Create Layer Info from Model Name
+# =====================================================================
+@dch_admin_router.post("/create_layer_info_from_model/{model_name}/")
+async def create_layer_info_from_model(
+    model_name: str,
+    category_id: int | None = Query(None, description="Optional LayerCategory ID"),
+    overwrite: bool = Query(True, description="Overwrite existing LayerInfo if present"),
+    include_non_spatial: bool = Query(False, description="Allow tables without geometries"),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Generate LayerInfo & LayerAccessibility records from a model name
+    using create_layerinfo_from_app_models from manage.py.
+    """
+    require_dch_admin(current_user)
+
+    try:
+        summary = create_layerinfo_from_app_models(
+            model_name=model_name,
+            layer_category_id=category_id,
+            overwrite=overwrite,
+            include_non_spatial=include_non_spatial,
+        )
+
+        return {
+            "payload": {
+                "status": "success",
+                "message": f"Layer creation from model '{model_name}' completed",
+                "summary": summary,
+            }
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        da_logger.exception(f"Failed to create layer from model '{model_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create layer: {str(e)}")

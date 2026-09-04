@@ -1411,29 +1411,47 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
         elapsed = time.time() - started_at
 
+        summary = {
+            "checked_layers": checked_count,
+            "changed_layers": changed_count,
+            "updated_layers": updated_count,
+            "deleted_layers": deleted_count,
+            "unchanged_layers": unchanged_count,
+            "skipped_layers": skipped_count,
+            "failed_layers": failed_count,
+            "columns_corrected": corrections["columns"],
+            "geometry_column_fixed": corrections["geometry_column"],
+            "primary_keys_fixed": corrections["primary_key"],
+            "srids_corrected": corrections["srid"],
+            "geometry_types_fixed": corrections["geometry_type"],
+            "extents_corrected": corrections["extent"],
+            "extent_3857_fixed": corrections["extent_3857"],
+            "row_counts_updated": corrections["row_count"],
+            "elapsed_seconds": round(elapsed, 2),
+        }
         print("\n================================================")
         print("LayerInfo Reconciliation Summary")
         print("================================================")
-        print(f"Checked layers       : {checked_count}")
-        print(f"Changed layers       : {changed_count}")
-        print(f"Updated layers       : {updated_count}")
-        print(f"Deleted layers       : {deleted_count}")
-        print(f"Unchanged layers     : {unchanged_count}")
-        print(f"Skipped layers       : {skipped_count}")
-        print(f"Failed layers        : {failed_count}")
+        print(f"Checked layers       : {summary['checked_layers']}")
+        print(f"Changed layers       : {summary['changed_layers']}")
+        print(f"Updated layers       : {summary['updated_layers']}")
+        print(f"Deleted layers       : {summary['deleted_layers']}")
+        print(f"Unchanged layers     : {summary['unchanged_layers']}")
+        print(f"Skipped layers       : {summary['skipped_layers']}")
+        print(f"Failed layers        : {summary['failed_layers']}")
         print("------------------------------------------------")
-        print(f"Columns corrected    : {corrections['columns']}")
-        print(f"Geometry col fixed   : {corrections['geometry_column']}")
-        print(f"Primary keys fixed   : {corrections['primary_key']}")
-        print(f"SRIDs corrected      : {corrections['srid']}")
-        print(f"Geometry types fixed : {corrections['geometry_type']}")
-        print(f"Extents corrected    : {corrections['extent']}")
-        print(f"3857 extents fixed   : {corrections['extent_3857']}")
-        print(f"Row counts updated   : {corrections['row_count']}")
-        print(f"Completed in         : {elapsed:.2f} seconds")
-
+        print(f"Columns corrected    : {summary['columns_corrected']}")
+        print(f"Geometry col fixed   : {summary['geometry_column_fixed']}")
+        print(f"Primary keys fixed   : {summary['primary_keys_fixed']}")
+        print(f"SRIDs corrected      : {summary['srids_corrected']}")
+        print(f"Geometry types fixed : {summary['geometry_types_fixed']}")
+        print(f"Extents corrected    : {summary['extents_corrected']}")
+        print(f"3857 extents fixed   : {summary['extent_3857_fixed']}")
+        print(f"Row counts updated   : {summary['row_counts_updated']}")
+        print(f"Completed in         : {summary['elapsed_seconds']:.2f} seconds")
         if check:
             print("\nℹ️ Check mode was enabled. No database changes were saved.")
+        return summary
 
 def refresh_layer_accessibility(table_name: str = None, layer_uuid: str = None, check: bool = False,
         schema: str = "public", ):
