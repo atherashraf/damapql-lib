@@ -612,6 +612,7 @@ class LayerAccessibility(DBBase):
         return (db_conn.get_sqlalchemy_engine())
 
 
+
 class LayerInfo(DBBase):
     __tablename__ = "dch_layer_info"
 
@@ -878,6 +879,25 @@ class LayerInfo(DBBase):
         except Exception as e:
             da_logger.exception(f"Error converting Layer to DataFrame: {e}")
             return pd.DataFrame()
+
+    def recalculate_extent_3857(self):
+        """Syncs extent_3857 from extent using self.srid."""
+        if not self.extent or len(self.extent) != 4:
+            self.extent_3857 = None
+            return
+
+        native_srid = self.srid or 3857
+        if native_srid == 3857:
+            self.extent_3857 = [float(x) for x in self.extent]
+        else:
+            try:
+                transformer = Transformer.from_crs(f"EPSG:{native_srid}", "EPSG:3857", always_xy=True)
+                x1, y1 = transformer.transform(self.extent[0], self.extent[1])
+                x2, y2 = transformer.transform(self.extent[2], self.extent[3])
+                self.extent_3857 = [float(x1), float(y1), float(x2), float(y2)]
+            except Exception as tf_err:
+                da_logger.error(f"Failed to transform extent to 3857 for {self.layer_name}: {tf_err}")
+                self.extent_3857 = None
 
     def to_cog(self) -> COGRaster:
         """Opens COG raster from either MinIO (presigned URL) or local file."""

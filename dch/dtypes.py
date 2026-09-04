@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional, Union, Annotated, Tuple
@@ -278,7 +279,7 @@ class LayerAccessibilityType(BaseModel):
 class LayerInfoType(BaseModel):
     id: int
     uuid: str
-    app_label: str
+    app_label: str = "dch"
     title: str
     layer_name: str
     srid: Optional[int] = None
@@ -308,10 +309,42 @@ class LayerInfoType(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    # 1. Parse stringified list fields (extent, extent_3857, zoom_range, geom_type)
+    @field_validator("extent", "extent_3857", "zoom_range", "geom_type", mode="before")
+    @classmethod
+    def _parse_list_fields(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            try:
+                v = json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                return v  # Pass through so Pydantic raises standard validation error
+        return v
+
+    # 2. Parse stringified JSON/dict fields (layer_styling, layer_setting, extra_metadata)
+    @field_validator("layer_styling", "layer_setting", "extra_metadata", mode="before")
+    @classmethod
+    def _parse_dict_fields(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            try:
+                v = json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                return v
+        return v
+
+    # 3. Existing relationship coercion
     @field_validator("layer_accessibility", mode="before")
     @classmethod
     def _coerce_relationship(cls, v):
-        # If ORM object, map to a dict expected by LayerAccessibilityType
         try:
             if hasattr(v, "id"):
                 acc_type = getattr(v, "accessibility_type", None)

@@ -20,6 +20,34 @@ IS_DOCKER = os.environ.get("IS_DOCKER") == "True"
 DCH_APP_NAME = os.getenv("APP_NAME", "DAMapQL")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # e.g., "DEBUG", "ERROR"
 
+# Fallback SRID: 3857
+try:
+    DEFAULT_EXTENT_SRID = int(os.getenv("DEFAULT_EXTENT_SRID", 3857))
+except (ValueError, TypeError):
+    DEFAULT_EXTENT_SRID = 3857
+
+# Default fallback extent for Pakistan in EPSG:3857: [minx, miny, maxx, maxy]
+PAKISTAN_EXTENT_3857 = [6770000.0, 2690000.0, 8730000.0, 4440000.0]
+
+def _parse_extent(raw_val: str | None) -> list[float]:
+    if not raw_val:
+        return PAKISTAN_EXTENT_3857
+    try:
+        # Handles JSON string like "[6770000, 2690000, 8730000, 4440000]"
+        if raw_val.strip().startswith("["):
+            parsed = json.loads(raw_val)
+            if isinstance(parsed, (list, tuple)) and len(parsed) == 4:
+                return [float(v) for v in parsed]
+        # Handles comma-separated string like "6770000,2690000,8730000,4440000"
+        parts = [float(v.strip()) for v in raw_val.split(",") if v.strip()]
+        if len(parts) == 4:
+            return parts
+    except Exception:
+        pass
+    return PAKISTAN_EXTENT_3857
+
+DEFAULT_EXTENT = _parse_extent(os.getenv("DEFAULT_EXTENT"))
+
 localhost = 'host.docker.internal' if IS_DOCKER else 'localhost'
 
 

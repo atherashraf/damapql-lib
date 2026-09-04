@@ -1,6 +1,7 @@
 import base64
 import gzip
 import io
+import json
 import math
 import re
 import uuid
@@ -9,12 +10,14 @@ from typing import Optional, Union
 import lxml.etree as ET
 from digitalarzengine.utils.singletons import da_logger
 from geopandas import GeoDataFrame
+from pyproj import Transformer
 from shapely.geometry import box
 from sqlalchemy import inspect, select
 from sqlalchemy.engine import Engine
 
 from app.damapql.dch.api_enum import DataModel, ModelType
 from app.damapql.dch.models import LayerInfo, LayerAccessibility, DBConnection
+from app.damapql.settings import DEFAULT_EXTENT_SRID
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.services.spatial_db import SpatialDB
 from app.damapql.utils.adapters.services.db_query import DBQuery
@@ -602,3 +605,66 @@ class DCHUtils:
             res["labels"] = labels
 
         return res
+
+    @staticmethod
+    def get_default_extents(target_srid: int = 3857) -> tuple[list[float], list[float]]:
+        """
+        Returns (native_extent, extent_3857) derived from DEFAULT_EXTENT in settings.
+        Falls back to Pakistan extent in EPSG:3857 if not configured.
+        """
+        # Pakistan EPSG:3857 fallback [minx, miny, maxx, maxy]
+        fallback_3857 = [6770000.0, 2690000.0, 8730000.0, 4440000.0]
+
+        extent = DEFAULT_EXTENT
+        # Parse if still arriving as a string from settings or env
+        if isinstance(extent, str):
+            try:
+                if extent.strip().startswith("["):
+                    extent = json.loads(extent)
+                else:
+                    extent = [float(x.strip()) for x in extent.split(",") if x.strip()]
+            except Exception:
+                extent = None
+
+        if not extent or len(extent) != 4:
+            extent = fallback_3857
+            base_srid = 3857
+        else:
+            try:
+                extent = [float(v) for v in extent]
+                base_srid = int(DEFAULT_EXTENT_SRID or 3857)
+            except (ValueError, TypeError):
+                extent = fallback_3857
+                base_srid = 3857
+
+        target_srid = int(target_srid or 3857)
+
+        # 1. Calculate EPSG:3857 bounds
+        if base_srid == 3857:
+            ext_3857 = [round(v, 4) for v in extent]
+        else:
+            try:
+                tf_3857 = Transformer.from_crs(f"EPSG:{base_srid}", "EPSG:3857", always_xy=True)
+                x1, y1 = tf_3857.transform(extent[0], extent[1])
+                x2, y2 = tf_3857.transform(extent[2], extent[3])
+                ext_3857 = [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)]
+            except Exception as e:
+                da_logger.warning(f"Failed to project default extent to 3857: {e}")
+                ext_3857 = fallback_3857
+
+        # 2. Calculate target native layer SRID bounds
+        if target_srid == base_srid:
+            native_ext = [round(v, 4) for v in extent]
+        elif target_srid == 3857:
+            native_ext = list(ext_3857)
+        else:
+            try:
+                tf_native = Transformer.from_crs(f"EPSG:{base_srid}", f"EPSG:{target_srid}", always_xy=True)
+                nx1, ny1 = tf_native.transform(extent[0], extent[1])
+                nx2, ny2 = tf_native.transform(extent[2], extent[3])
+                native_ext = [round(nx1, 4), round(ny1, 4), round(nx2, 4), round(ny2, 4)]
+            except Exception as e:
+                da_logger.warning(f"Failed to project default extent to EPSG:{target_srid}: {e}")
+                native_ext = list(ext_3857)
+
+        return native_ext, ext_3857

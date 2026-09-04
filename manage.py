@@ -778,13 +778,17 @@ def reset_pk_sequences(engine, session, touched_models):
     session.commit()
 
 
-def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name: Optional[str] = None,
-        table_name: Optional[str] = None, layer_category_id: Optional[int] = None, overwrite: bool = True,
-        include_non_spatial: bool = False, ):
+def create_layerinfo_from_app_models(
+    app_label: Optional[str] = None,
+    model_name: Optional[str] = None,
+    table_name: Optional[str] = None,
+    layer_category_id: Optional[int] = None,
+    overwrite: bool = True,
+    include_non_spatial: bool = False,
+):
     """
     Generate LayerInfo and LayerAccessibility entries from SQLAlchemy app models.
-
-    Supports targeting an entire app, a specific model, or a specific table name.
+    Applies DEFAULT_EXTENT from settings if the table is empty or has no bounding box.
 
     CLI Examples:
         python -m app.damapql.manage create_layerinfo_from_app_models --app_label wasa
@@ -795,8 +799,7 @@ def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name
     include_non_spatial = _to_bool(include_non_spatial)
 
     # --- Step 1: Validate and Resolve Selector ---
-    selectors = {"app_label": app_label, "model_name": model_name, "table_name": table_name, }
-
+    selectors = {"app_label": app_label, "model_name": model_name, "table_name": table_name}
     supplied = [k for k, v in selectors.items() if v is not None and str(v).strip()]
 
     if not supplied:
@@ -806,7 +809,6 @@ def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name
 
     target_model_cls = None
 
-    # Resolve app_label if model_name or table_name was provided
     if model_name:
         target_model_cls = ModelUtils.get_model(model_name.strip())
         if not target_model_cls:
@@ -822,7 +824,7 @@ def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name
     service = LayerInfoService()
 
     with LayerInfo.managed_session() as session:
-        # --- Step 2: Resolve Default Fallback Defaults ---
+        # --- Step 2: Resolve Defaults ---
         if layer_category_id is None:
             qs = select(LayerCategory).where(LayerCategory.main == "Other")
             category = session.execute(qs).scalar_one_or_none()
@@ -835,19 +837,61 @@ def create_layerinfo_from_app_models(app_label: Optional[str] = None, model_name
         if quality is None:
             raise ValueError("QualityLevel with name='Not Accessed' not found")
 
-        # --- Step 3: Execute Service Generation ---
-        # Note: Ensure your LayerInfoService.save_app_layer_infos accepts
-        # target_model or target_table parameters if you want to skip other models in the app.
-        result = service.save_app_layer_infos(db=session, app_label=app_label, layer_category_id=layer_category_id,
-            quality_level_id=quality.id, user=None, overwrite=overwrite, include_non_spatial=include_non_spatial,
-            target_model=target_model_cls,  # Pass the target model class down
+        # --- Step 3: Execute Generation ---
+        result = service.save_app_layer_infos(
+            db=session,
+            app_label=app_label,
+            layer_category_id=layer_category_id,
+            quality_level_id=quality.id,
+            user=None,
+            overwrite=overwrite,
+            include_non_spatial=include_non_spatial,
+            target_model=target_model_cls,
         )
+
+        session.flush()
+
+        # --- Step 4: Apply Default Extent Fallback for Empty Tables ---
+        # Query the layers that were created or updated under this app_label
+        layer_query = select(LayerInfo).where(LayerInfo.app_label == app_label)
+        if target_model_cls:
+            layer_query = layer_query.where(LayerInfo.layer_name == target_model_cls.__tablename__)
+
+        created_layers = session.execute(layer_query).scalars().all()
+
+        fallback_count = 0
+        for layer in created_layers:
+            # Check if extent is missing, empty, or all zeros
+            has_extent = layer.extent and len(layer.extent) == 4 and any(v != 0 for v in layer.extent)
+
+            if not has_extent:
+                srid = layer.srid or 3857
+                native_ext, ext_3857 = get_default_extents(target_srid=srid)
+
+                layer.extent = native_ext
+                layer.extent_3857 = ext_3857
+
+                extra = dict(layer.extra_metadata or {})
+                extra["is_default_extent"] = True
+                layer.extra_metadata = extra
+
+                flag_modified(layer, "extent")
+                flag_modified(layer, "extent_3857")
+                flag_modified(layer, "extra_metadata")
+
+                fallback_count += 1
+                da_logger.info(
+                    f"Applied settings default extent to layer '{layer.layer_name}' "
+                    f"(SRID={srid}): {native_ext}"
+                )
 
         session.commit()
 
+        if fallback_count > 0:
+            print(f"🌍 Applied fallback extent from settings to {fallback_count} empty layer(s).")
+
     print(result)
     return result
-
 
 """
 Usage:
