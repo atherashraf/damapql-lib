@@ -111,6 +111,7 @@ from app.damapql.cache.cache import redis_client, REDIS_NAMESPACE
 from app.damapql.dch.api_enum import AccessibilityType
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.settings import DCH_DATABASES
 from app.damapql.utils.adapters.db import DBBase
@@ -866,7 +867,7 @@ def create_layerinfo_from_app_models(
 
             if not has_extent:
                 srid = layer.srid or 3857
-                native_ext, ext_3857 = get_default_extents(target_srid=srid)
+                native_ext, ext_3857 = DCHUtils.get_default_extents(target_srid=srid)
 
                 layer.extent = native_ext
                 layer.extent_3857 = ext_3857
@@ -948,7 +949,7 @@ def create_layerinfo_from_raster(title: str, raster_path: str, layer_category_id
     return obj
 
 
-def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: str = "public", check: bool = False, ):
+def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: str = "public", check: bool = False):
     """
     Reconcile LayerInfo and LayerAccessibility metadata against real DB tables.
 
@@ -956,13 +957,15 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
     Orphan LayerInfo records (where the underlying table does not exist)
     will be deleted from the database unless check=True.
 
+    If a table exists but contains no rows or non-null geometries, default extents
+    from DCHUtils.get_default_extents(...) are applied.
+
     Usage:
         python -m app.damapql.manage reconcile_layerinfo
         python -m app.damapql.manage reconcile_layerinfo --layer_uuid <uuid>
         python -m app.damapql.manage reconcile_layerinfo --table_name wasa_asset_disposal
         python -m app.damapql.manage reconcile_layerinfo --check true
     """
-
     check = _to_bool(check)
     started_at = time.time()
 
@@ -976,20 +979,19 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
             return None
 
         raw = str(value).strip()
-
         if raw.upper().startswith("ST_"):
             raw = raw[3:]
 
         normalized_key = raw.replace("_", "").replace(" ", "").lower()
-
-        geometry_map = {"point": "Point", "multipoint": "MultiPoint", "linestring": "LineString",
+        geometry_map = {
+            "point": "Point", "multipoint": "MultiPoint", "linestring": "LineString",
             "multilinestring": "MultiLineString", "polyline": "LineString", "multipolyline": "MultiLineString",
             "polygon": "Polygon", "multipolygon": "MultiPolygon", "geometry": "Geometry",
             "geometrycollection": "GeometryCollection", "circularstring": "CircularString",
             "compoundcurve": "CompoundCurve", "curvepolygon": "CurvePolygon", "multicurve": "MultiCurve",
             "multisurface": "MultiSurface", "triangle": "Triangle", "tin": "TIN",
-            "polyhedralsurface": "PolyhedralSurface", }
-
+            "polyhedralsurface": "PolyhedralSurface",
+        }
         return geometry_map.get(normalized_key, raw)
 
     def normalize_geometry_types(values) -> list[str] | None:
@@ -1016,7 +1018,8 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
         if table_name:
             query = query.join(LayerInfo.layer_accessibility).filter(
-                LayerAccessibility.params.op("->>")("table_name") == table_name)
+                LayerAccessibility.params.op("->>")("table_name") == table_name
+            )
 
         layers = query.all()
 
@@ -1042,8 +1045,10 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
         skipped_count = 0
         failed_count = 0
 
-        corrections = {"columns": 0, "geometry_column": 0, "primary_key": 0, "srid": 0, "geometry_type": 0, "extent": 0,
-            "extent_3857": 0, "row_count": 0, }
+        corrections = {
+            "columns": 0, "geometry_column": 0, "primary_key": 0, "srid": 0,
+            "geometry_type": 0, "extent": 0, "extent_3857": 0, "row_count": 0,
+        }
 
         for layer in layers:
             access = layer.layer_accessibility
@@ -1060,7 +1065,7 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                 print("   ⏭️ Skipped: LayerAccessibility is missing.\n")
                 continue
 
-            if (not access.accessibility_type or access.accessibility_type.code != AccessibilityType.DB.name):
+            if not access.accessibility_type or access.accessibility_type.code != AccessibilityType.DB.name:
                 skipped_count += 1
                 print("   ⏭️ Skipped: layer is not database-backed.\n")
                 continue
@@ -1070,20 +1075,16 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
             if not actual_table_name or not connection_name:
                 skipped_count += 1
-                print("   ⏭️ Skipped: table_name or conn_name is missing "
-                      "from LayerAccessibility.\n")
+                print("   ⏭️ Skipped: table_name or conn_name is missing from LayerAccessibility.\n")
                 continue
 
             db_conn = DBConnection.get_db_connection(con_name=connection_name)
-
             if not db_conn:
                 skipped_count += 1
-                print(f"   ❌ Skipped: DB connection '{connection_name}' "
-                      "was not found.\n")
+                print(f"   ❌ Skipped: DB connection '{connection_name}' was not found.\n")
                 continue
 
             engine = db_conn.get_sqlalchemy_engine()
-
             safe_schema = quote_ident(schema)
             safe_table_name = quote_ident(actual_table_name)
             safe_table = f"{safe_schema}.{safe_table_name}"
@@ -1093,16 +1094,13 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                     # -------------------------------------------------
                     # Read actual table columns
                     # -------------------------------------------------
-                    column_rows = (conn.execute(text("""
-                                                     SELECT column_name,
-                                                            data_type,
-                                                            udt_name
-                                                     FROM information_schema.columns
-                                                     WHERE table_schema = :schema
-                                                       AND table_name = :table_name
-                                                     ORDER BY ordinal_position
-                                                     """),
-                        {"schema": schema, "table_name": actual_table_name, }, ).mappings().all())
+                    column_rows = conn.execute(text("""
+                        SELECT column_name, data_type, udt_name
+                        FROM information_schema.columns
+                        WHERE table_schema = :schema
+                          AND table_name = :table_name
+                        ORDER BY ordinal_position
+                    """), {"schema": schema, "table_name": actual_table_name}).mappings().all()
 
                     # -------------------------------------------------
                     # Handle non-existent table (Delete Record)
@@ -1110,16 +1108,14 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                     if not column_rows:
                         if check:
                             skipped_count += 1
-                            print(
-                                f"   🗑️ Check Mode: Layer marked for deletion (table does not exist: {schema}.{actual_table_name})\n")
+                            print(f"   🗑️ Check Mode: Layer marked for deletion (table does not exist: {schema}.{actual_table_name})\n")
                             continue
 
                         try:
                             session.delete(layer)
                             session.commit()
                             deleted_count += 1
-                            print(f"   🗑️ Deleted orphan LayerInfo record '{layer.layer_name}' "
-                                  f"({layer.uuid}) because table {schema}.{actual_table_name} does not exist.\n")
+                            print(f"   🗑️ Deleted orphan LayerInfo record '{layer.layer_name}' ({layer.uuid}) because table {schema}.{actual_table_name} does not exist.\n")
                         except Exception as delete_error:
                             session.rollback()
                             failed_count += 1
@@ -1129,18 +1125,17 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                     # -------------------------------------------------
                     # Read primary key columns
                     # -------------------------------------------------
-                    pk_rows = (conn.execute(text("""
-                                                 SELECT kcu.column_name
-                                                 FROM information_schema.table_constraints tc
-                                                          JOIN information_schema.key_column_usage kcu
-                                                               ON tc.constraint_name = kcu.constraint_name
-                                                                   AND tc.table_schema = kcu.table_schema
-                                                 WHERE tc.constraint_type = 'PRIMARY KEY'
-                                                   AND tc.table_schema = :schema
-                                                   AND tc.table_name = :table_name
-                                                 ORDER BY kcu.ordinal_position
-                                                 """),
-                        {"schema": schema, "table_name": actual_table_name, }, ).mappings().all())
+                    pk_rows = conn.execute(text("""
+                        SELECT kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.constraint_type = 'PRIMARY KEY'
+                          AND tc.table_schema = :schema
+                          AND tc.table_name = :table_name
+                        ORDER BY kcu.ordinal_position
+                    """), {"schema": schema, "table_name": actual_table_name}).mappings().all()
 
                     pk_cols = [row["column_name"] for row in pk_rows]
 
@@ -1159,47 +1154,46 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                             geometry_columns.append(column_name)
                             continue
 
-                        columns.append(
-                            {"name": column_name, "d_type": ManageDataFrameUtils.getColGenericType(data_type), })
+                        columns.append({
+                            "name": column_name,
+                            "d_type": ManageDataFrameUtils.getColGenericType(data_type),
+                        })
 
-                    # Prefer the existing geometry column if it is valid.
                     old_params = dict(access.params or {})
                     old_geometry_column = old_params.get("g_col")
 
                     if old_geometry_column in geometry_columns:
                         geometry_column = old_geometry_column
                     else:
-                        geometry_column = (geometry_columns[0] if geometry_columns else None)
+                        geometry_column = geometry_columns[0] if geometry_columns else None
 
                     # -------------------------------------------------
-                    # Default metadata
+                    # Spatial metadata inspection
                     # -------------------------------------------------
                     srid = None
                     geometry_types = None
                     extent = None
                     extent_3857 = None
-                    row_count = 0
                     non_null_geometry_count = 0
 
                     row_count = int(conn.execute(text(f"SELECT COUNT(*) FROM {safe_table}")).scalar() or 0)
 
-                    # -------------------------------------------------
-                    # Read spatial metadata
-                    # -------------------------------------------------
                     if geometry_column:
                         safe_geometry = quote_ident(geometry_column)
 
                         # Step A: Query PostGIS catalog view geometry_columns
-                        catalog_metadata = (conn.execute(text("""
-                                                              SELECT srid,
-                                                                     type
-                                                              FROM geometry_columns
-                                                              WHERE f_table_schema = :schema
-                                                                AND f_table_name = :table_name
-                                                                AND f_geometry_column = :geometry_column
-                                                              LIMIT 1
-                                                              """), {"schema": schema, "table_name": actual_table_name,
-                            "geometry_column": geometry_column, }, ).mappings().first())
+                        catalog_metadata = conn.execute(text("""
+                            SELECT srid, type
+                            FROM geometry_columns
+                            WHERE f_table_schema = :schema
+                              AND f_table_name = :table_name
+                              AND f_geometry_column = :geometry_column
+                            LIMIT 1
+                        """), {
+                            "schema": schema,
+                            "table_name": actual_table_name,
+                            "geometry_column": geometry_column,
+                        }).mappings().first()
 
                         if catalog_metadata:
                             catalog_srid = catalog_metadata.get("srid")
@@ -1207,153 +1201,153 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
                             if catalog_srid not in (None, 0):
                                 srid = int(catalog_srid)
-
-                            # Normalize catalog_type even if it is GEOMETRY
                             if catalog_type:
                                 geometry_types = normalize_geometry_types([catalog_type])
 
                         # Step B: Inspect stored rows for actual geometry types and SRIDs
-                        actual_metadata = (conn.execute(text(f"""
-                                SELECT
-                                    COUNT(*) AS geometry_count,
-                                    ARRAY_AGG(
-                                        DISTINCT ST_GeometryType(
-                                            {safe_geometry}
-                                        )
-                                    ) AS geometry_types,
-                                    ARRAY_AGG(
-                                        DISTINCT ST_SRID(
-                                            {safe_geometry}
-                                        )
-                                    ) AS srids
-                                FROM {safe_table}
-                                WHERE {safe_geometry} IS NOT NULL
-                                  AND NOT ST_IsEmpty({safe_geometry})
-                            """)).mappings().first())
+                        actual_metadata = conn.execute(text(f"""
+                            SELECT
+                                COUNT(*) AS geometry_count,
+                                ARRAY_AGG(DISTINCT ST_GeometryType({safe_geometry})) AS geometry_types,
+                                ARRAY_AGG(DISTINCT ST_SRID({safe_geometry})) AS srids
+                            FROM {safe_table}
+                            WHERE {safe_geometry} IS NOT NULL
+                              AND NOT ST_IsEmpty({safe_geometry})
+                        """)).mappings().first()
 
                         if actual_metadata:
                             non_null_geometry_count = int(actual_metadata.get("geometry_count") or 0)
-
                             actual_types = normalize_geometry_types(actual_metadata.get("geometry_types"))
 
-                            # If actual rows exist, override with the real row types
                             if actual_types:
                                 geometry_types = actual_types
 
-                            actual_srids = [int(value) for value in (actual_metadata.get("srids") or []) if
-                                value not in (None, 0)]
-
+                            actual_srids = [
+                                int(value) for value in (actual_metadata.get("srids") or [])
+                                if value not in (None, 0)
+                            ]
                             if actual_srids:
                                 srid = actual_srids[0]
-
                                 if len(set(actual_srids)) > 1:
-                                    print("   ⚠️ Mixed SRIDs found: "
-                                          f"{sorted(set(actual_srids))}")
+                                    print(f"   ⚠️ Mixed SRIDs found: {sorted(set(actual_srids))}")
 
-                        # Native extent
-                        extent_row = (conn.execute(text(f"""
-                                SELECT
-                                    ST_XMin(bounds)::float AS minx,
-                                    ST_YMin(bounds)::float AS miny,
-                                    ST_XMax(bounds)::float AS maxx,
-                                    ST_YMax(bounds)::float AS maxy
-                                FROM (
-                                    SELECT
-                                        ST_Extent(
-                                            {safe_geometry}
-                                        )::geometry AS bounds
-                                    FROM {safe_table}
-                                    WHERE {safe_geometry} IS NOT NULL
-                                      AND NOT ST_IsEmpty(
-                                          {safe_geometry}
-                                      )
-                                ) q
-                                WHERE bounds IS NOT NULL
-                            """)).mappings().first())
+                        # Step C: Native Extent from DB Features
+                        extent_row = conn.execute(text(f"""
+                            SELECT
+                                ST_XMin(bounds)::float AS minx,
+                                ST_YMin(bounds)::float AS miny,
+                                ST_XMax(bounds)::float AS maxx,
+                                ST_YMax(bounds)::float AS maxy
+                            FROM (
+                                SELECT ST_Extent({safe_geometry})::geometry AS bounds
+                                FROM {safe_table}
+                                WHERE {safe_geometry} IS NOT NULL
+                                  AND NOT ST_IsEmpty({safe_geometry})
+                            ) q
+                            WHERE bounds IS NOT NULL
+                        """)).mappings().first()
 
                         if extent_row:
-                            extent = [extent_row["minx"], extent_row["miny"], extent_row["maxx"], extent_row["maxy"], ]
+                            extent = [
+                                extent_row["minx"], extent_row["miny"],
+                                extent_row["maxx"], extent_row["maxy"]
+                            ]
 
-                        # EPSG:3857 extent
+                        # Step D: EPSG:3857 Extent from DB Features
                         if extent and srid and srid > 0:
                             if srid == 3857:
                                 extent_3857 = list(extent)
                             else:
-                                extent_3857_row = (conn.execute(text(f"""
-                                        SELECT
-                                            ST_XMin(bounds)::float AS minx,
-                                            ST_YMin(bounds)::float AS miny,
-                                            ST_XMax(bounds)::float AS maxx,
-                                            ST_YMax(bounds)::float AS maxy
-                                        FROM (
-                                            SELECT
-                                                ST_Extent(
-                                                    ST_Transform(
-                                                        {safe_geometry},
-                                                        3857
-                                                    )
-                                                )::geometry AS bounds
-                                            FROM {safe_table}
-                                            WHERE {safe_geometry}
-                                                  IS NOT NULL
-                                              AND NOT ST_IsEmpty(
-                                                  {safe_geometry}
-                                              )
-                                        ) q
-                                        WHERE bounds IS NOT NULL
-                                    """)).mappings().first())
+                                extent_3857_row = conn.execute(text(f"""
+                                    SELECT
+                                        ST_XMin(bounds)::float AS minx,
+                                        ST_YMin(bounds)::float AS miny,
+                                        ST_XMax(bounds)::float AS maxx,
+                                        ST_YMax(bounds)::float AS maxy
+                                    FROM (
+                                        SELECT ST_Extent(ST_Transform({safe_geometry}, 3857))::geometry AS bounds
+                                        FROM {safe_table}
+                                        WHERE {safe_geometry} IS NOT NULL
+                                          AND NOT ST_IsEmpty({safe_geometry})
+                                    ) q
+                                    WHERE bounds IS NOT NULL
+                                """)).mappings().first()
 
                                 if extent_3857_row:
-                                    extent_3857 = [extent_3857_row["minx"], extent_3857_row["miny"],
-                                        extent_3857_row["maxx"], extent_3857_row["maxy"], ]
+                                    extent_3857 = [
+                                        extent_3857_row["minx"], extent_3857_row["miny"],
+                                        extent_3857_row["maxx"], extent_3857_row["maxy"]
+                                    ]
+
+                    # -------------------------------------------------
+                    # Fallback to DCHUtils Default Extents if Empty
+                    # -------------------------------------------------
+                    is_default_extent = False
+                    if not extent or non_null_geometry_count == 0 or row_count == 0:
+                        resolved_srid = srid or layer.srid or 3857
+                        extent, extent_3857 = DCHUtils.get_default_extents(target_srid=resolved_srid)
+                        is_default_extent = True
+                        if srid is None:
+                            srid = resolved_srid
+                        print(f"   ℹ️ Applied fallback extent from DCHUtils (SRID={resolved_srid}): {extent}")
 
                 checked_count += 1
 
                 # -----------------------------------------------------
-                # Build corrected accessibility params
+                # Build corrected accessibility params and metadata
                 # -----------------------------------------------------
-                new_params = {**old_params, "conn_name": connection_name, "table_name": actual_table_name,
-                    "columns": columns, "g_col": geometry_column, "pk_cols": pk_cols, }
+                new_params = {
+                    **old_params,
+                    "conn_name": connection_name,
+                    "table_name": actual_table_name,
+                    "columns": columns,
+                    "g_col": geometry_column,
+                    "pk_cols": pk_cols,
+                }
 
                 old_extra_metadata = dict(layer.extra_metadata or {})
-
-                new_extra_metadata = {**old_extra_metadata, "row_count": row_count,
-                    "non_null_geometry_count": non_null_geometry_count, "layerinfo_reconciled": True,
+                new_extra_metadata = {
+                    **old_extra_metadata,
+                    "row_count": row_count,
+                    "non_null_geometry_count": non_null_geometry_count,
+                    "is_default_extent": is_default_extent,
+                    "layerinfo_reconciled": True,
                     "layerinfo_reconciled_at": datetime.now(timezone.utc).isoformat(),
-                    "layerinfo_reconciled_from": f"{schema}.{actual_table_name}", }
+                    "layerinfo_reconciled_from": f"{schema}.{actual_table_name}",
+                }
 
                 field_changes = {}
 
-                if values_different(old_params.get("columns"), columns, ):
-                    field_changes["columns"] = (old_params.get("columns"), columns,)
+                if values_different(old_params.get("columns"), columns):
+                    field_changes["columns"] = (old_params.get("columns"), columns)
                     corrections["columns"] += 1
 
-                if values_different(old_params.get("g_col"), geometry_column, ):
-                    field_changes["geometry_column"] = (old_params.get("g_col"), geometry_column,)
+                if values_different(old_params.get("g_col"), geometry_column):
+                    field_changes["geometry_column"] = (old_params.get("g_col"), geometry_column)
                     corrections["geometry_column"] += 1
 
-                if values_different(old_params.get("pk_cols", []), pk_cols, ):
-                    field_changes["primary_key"] = (old_params.get("pk_cols", []), pk_cols,)
+                if values_different(old_params.get("pk_cols", []), pk_cols):
+                    field_changes["primary_key"] = (old_params.get("pk_cols", []), pk_cols)
                     corrections["primary_key"] += 1
 
                 if values_different(layer.srid, srid):
-                    field_changes["srid"] = (layer.srid, srid,)
+                    field_changes["srid"] = (layer.srid, srid)
                     corrections["srid"] += 1
 
-                if values_different(layer.geom_type, geometry_types, ):
-                    field_changes["geometry_type"] = (layer.geom_type, geometry_types,)
+                if values_different(layer.geom_type, geometry_types):
+                    field_changes["geometry_type"] = (layer.geom_type, geometry_types)
                     corrections["geometry_type"] += 1
 
                 if values_different(layer.extent, extent):
-                    field_changes["extent"] = (layer.extent, extent,)
+                    field_changes["extent"] = (layer.extent, extent)
                     corrections["extent"] += 1
 
-                if values_different(layer.extent_3857, extent_3857, ):
-                    field_changes["extent_3857"] = (layer.extent_3857, extent_3857,)
+                if values_different(layer.extent_3857, extent_3857):
+                    field_changes["extent_3857"] = (layer.extent_3857, extent_3857)
                     corrections["extent_3857"] += 1
 
                 if old_extra_metadata.get("row_count") != row_count:
-                    field_changes["row_count"] = (old_extra_metadata.get("row_count"), row_count,)
+                    field_changes["row_count"] = (old_extra_metadata.get("row_count"), row_count)
                     corrections["row_count"] += 1
 
                 changed = bool(field_changes)
@@ -1374,10 +1368,8 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
                     continue
 
                 changed_count += 1
-
                 print("   Changes:")
-
-                for field_name, (old_value, new_value,) in field_changes.items():
+                for field_name, (old_value, new_value) in field_changes.items():
                     print(f"      - {field_name}: {old_value} -> {new_value}")
 
                 if check:
@@ -1404,19 +1396,16 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
                     session.commit()
                     updated_count += 1
-
                     print("   ✅ Reconciliation saved.\n")
 
                 except Exception as save_error:
                     session.rollback()
                     failed_count += 1
-
                     print(f"   ❌ Failed to save reconciliation: {save_error}\n")
 
             except Exception as error:
                 session.rollback()
                 failed_count += 1
-
                 print(f"   ❌ Reconciliation failed: {error}\n")
                 da_logger.exception(f"LayerInfo reconciliation failed for {layer.layer_name}: {error}")
 
@@ -1445,7 +1434,6 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
 
         if check:
             print("\nℹ️ Check mode was enabled. No database changes were saved.")
-
 
 def refresh_layer_accessibility(table_name: str = None, layer_uuid: str = None, check: bool = False,
         schema: str = "public", ):
