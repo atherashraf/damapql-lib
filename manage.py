@@ -1,4 +1,6 @@
 """
+Remove-Item "D:\PostgreSQL\17\data\postmaster.pid" -Force
+
 DAMapQL Management Utilities
 
 This module provides CLI-style management commands for DAMapQL-based FastAPI
