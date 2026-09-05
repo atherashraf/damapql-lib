@@ -191,9 +191,17 @@ MINIO_ENDPOINT=minio:9000
 
 ```
 
----
+-------
+## 10. Spatial Defaults & Viewport Extents
+Configures the default spatial coordinate system and initial bounding box fallback for newly registered layers or empty tables.
+```dotenv
+DEFAULT_SRID=3857
+DEFAULT_EXTENT_SRID=3857
+DEFAULT_EXTENT=6775796.0,2716186.0,8665099.0,4457375.0
 
-## 10. Security notes
+```
+---------
+## 11. Security notes
 
 * Copy `.env-template.txt` to `.env`; do not edit the distributable template with real secrets.
 

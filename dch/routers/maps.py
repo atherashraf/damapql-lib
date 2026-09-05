@@ -52,6 +52,7 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.title,
                 LayerInfo.layer_name,
                 category_label,
+                LayerAccessibility.accessibility_type,
                 LayerAccessibility.params["table_name"].as_string().label("table_name"),
                 LayerInfo.srid,
                 LayerInfo.extent,
@@ -69,8 +70,11 @@ async def get_all_layer_info(current_user: UserInfo =
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
         )
 
-
-        df = DBQuery.execute_stmt_as_df(session, stmt, enum_columns=["data_model", "model_type"])
+        df = DBQuery.execute_stmt_as_df(
+            session,
+            stmt,
+            enum_columns=["data_model", "model_type", "accessibility_type", "geom_type"]
+        )
         # enforce exact order from select list
         column_order = [
             "id",
@@ -78,6 +82,7 @@ async def get_all_layer_info(current_user: UserInfo =
             "title",
             "layer_name",
             "category",
+            "accessibility_type",
             "table_name",
             "srid",
             "extent",
@@ -368,17 +373,39 @@ async def get_layer_info(uuid: str, current_user: UserInfo = Depends(AuthUtils.g
     return Response(status_code=204)
 
 
+
+MAX_3857 = 20037508.342789244
+
+def is_valid_3857_extent(extent) -> bool:
+    if not isinstance(extent, (list, tuple)) or len(extent) != 4:
+        return False
+    try:
+        min_x, min_y, max_x, max_y = [float(v) for v in extent]
+    except (ValueError, TypeError):
+        return False
+
+    # Check finite numbers, positive dimensions, and Web Mercator bounds
+    if not (min_x < max_x and min_y < max_y):
+        return False
+    if any(abs(v) > MAX_3857 for v in (min_x, min_y, max_x, max_y)):
+        return False
+
+    return True
+
+
 @dch_maps_router.get("/layer_extent/{uuid}/")
-async def get_layer_extent(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def get_layer_extent(uuid: str):
     with LayerInfo.managed_session() as session:
         extent = session.execute(
             select(LayerInfo.extent_3857).where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
-        if extent is not None:
+        if is_valid_3857_extent(extent):
             return {"payload": extent}
 
-    return Response(status_code=204)
+        # Fallback to default configured bounds
+        _, fallback_3857 = DCHUtils.get_default_extents(3857)
+        return {"payload": fallback_3857}
 
 @dch_maps_router.get("/get_map_uuid/{layer_title}/")
 def get_map_uuid(layer_title:str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
@@ -388,3 +415,9 @@ def get_map_uuid(layer_title:str, current_user: UserInfo = Depends(AuthUtils.get
         if res is not None:
             return {"payload": res}
         return Response(status_code=204)
+
+@dch_maps_router.get("/get_default_extent/",
+    summary="Get Application Default Extent")
+def get_default_extent():
+    native_ext, ext_3857 = DCHUtils.get_default_extents(3857)
+    return {"native_extent": native_ext, "extent_3857": ext_3857}
