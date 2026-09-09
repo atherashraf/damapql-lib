@@ -158,10 +158,12 @@ def get_layer_mvt(identifier: str, tile_size: int, z: int, x: int, y: int, model
     # -------------------------------------------------------------
     # COLUMNS & RESOLUTION
     # -------------------------------------------------------------
-    requested_cols = cols or list(allowed_cols)
-    if allowed_cols:
-        requested_cols = [c for c in requested_cols if c in allowed_cols]
+    # requested_cols = cols or list(allowed_cols)
+    # if allowed_cols:
+    #     requested_cols = [c for c in requested_cols if c in allowed_cols]
+    requested_cols = allowed_cols
     requested_cols = sorted(set(requested_cols))
+    da_logger.debug(f"Requested columns: {requested_cols}")
 
     if resolution <= 0:
         resolution = 78271.52 / (2 ** z)

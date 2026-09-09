@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from starlette.responses import Response
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -395,4 +396,63 @@ def get_feature_geojson(
         by=by,
         pk_values=[pk]
     )
+    return {"payload": feature}
+
+
+
+@layer_query_router.get(
+    "/layer-query/{identifier}/feature-geojson-by-value"
+)
+def get_feature_geojson_by_value(
+    identifier: str,
+    col_name: str,
+    value: str,
+    by: LayerLookupBy = Query(default="uuid"),
+    native_projection: bool = Query(
+        default=False,
+        description=(
+            "If true, return geometry in the layer's native projection. "
+            "Otherwise geometry is returned in EPSG:4326."
+        ),
+    ),
+    current_user: UserInfo = Depends(
+        AuthUtils.get_current_user
+    ),
+):
+    """
+    Get a single feature as GeoJSON by column/value.
+
+    Endpoint:
+    GET /api/dch/layer-query/{identifier}/feature-geojson-by-value
+
+    Query params:
+    - identifier: uuid | layer_name | table_name
+    - by: lookup type
+    - col_name: column to search
+    - value: value to match
+    - native_projection:
+        false -> return EPSG:3857
+        true  -> return layer native projection
+
+    Use case:
+    - Map highlight
+    - Zoom to feature
+    - Lookup feature using a business key such as imis_code
+    """
+
+    target_srid = None if native_projection else 3857
+
+    feature = LayerQueryService.get_feature_geojson_by_value(
+        identifier=identifier,
+        col_name=col_name,
+        value=value,
+        by=by,
+        target_srid=target_srid,
+    )
+
+
+
+    if isinstance(feature, Response):
+        return feature
+
     return {"payload": feature}

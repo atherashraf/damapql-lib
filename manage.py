@@ -951,7 +951,8 @@ def create_layerinfo_from_raster(title: str, raster_path: str, layer_category_id
     return obj
 
 
-def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: str = "public", check: bool = False):
+def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, model_name: str = None, schema: str = "public",
+        check: bool = False, ):
     """
     Reconcile LayerInfo and LayerAccessibility metadata against real DB tables.
 
@@ -966,10 +967,33 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, schema: 
         python -m app.damapql.manage reconcile_layerinfo
         python -m app.damapql.manage reconcile_layerinfo --layer_uuid <uuid>
         python -m app.damapql.manage reconcile_layerinfo --table_name wasa_asset_disposal
+        python -m app.damapql.manage reconcile_layerinfo --model_name CanalCommandArea
         python -m app.damapql.manage reconcile_layerinfo --check true
     """
     check = _to_bool(check)
     started_at = time.time()
+    # ---------------------------------------------------------
+    # Resolve model_name -> table_name
+    # ---------------------------------------------------------
+    resolved_model_name = None
+
+    if model_name:
+        ModelCls = ModelUtils.get_model(model_name.strip())
+
+        if ModelCls is None:
+            raise ValueError(f"Model '{model_name}' not found.")
+
+        resolved_model_name = ModelCls.__name__
+        model_table_name = ModelCls.__tablename__
+
+        # Avoid ambiguous selectors
+        if table_name and table_name != model_table_name:
+            raise ValueError(
+                f"Model '{model_name}' maps to table "
+                f"'{model_table_name}', but --table_name '{table_name}' was supplied."
+            )
+
+        table_name = model_table_name
 
     def quote_ident(value: str) -> str:
         """Safely quote a PostgreSQL identifier."""

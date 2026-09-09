@@ -968,3 +968,124 @@ class LayerQueryService:
             crs=crs,
             features=features,
         )
+
+    @staticmethod
+    def get_feature_geojson_by_value(
+            identifier: str,
+            col_name: str,
+            value: str,
+            by: LayerLookupBy = "uuid",
+            target_srid: int | None = 4326,
+    ) -> dict[str, Any] | Response:
+        """
+        Return a single feature as GeoJSON by column/value.
+
+        By default, geometry is transformed to EPSG:4326.
+        Pass target_srid=None to return geometry in the layer's native SRID.
+        """
+
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+
+        if not geom_col:
+            raise HTTPException(
+                status_code=400,
+                detail="Layer has no geometry column",
+            )
+
+        allowed_cols = set(access.cols_name or [])
+        pk_cols = set(access.pk_cols or [])
+
+        if col_name not in allowed_cols and col_name not in pk_cols:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid column: {col_name}",
+            )
+
+        engine = access.get_external_engine()
+
+        if not engine:
+            return Response(status_code=204)
+
+        schema_name = (access.params or {}).get("schema", "public")
+
+        table = (
+            f"{DBQuery.safe_ident(schema_name)}."
+            f"{DBQuery.safe_ident(access.table_name)}"
+        )
+
+        geom = DBQuery.safe_ident(geom_col)
+        target_col = DBQuery.safe_ident(col_name)
+
+        # Native geometry or transformed geometry
+        output_geom = (
+            f"ST_Transform({geom}, {target_srid})"
+            if target_srid is not None
+            else geom
+        )
+
+        sql = text(
+            f"""
+            SELECT
+                *,
+                ST_SRID({output_geom}) AS __srid,
+                ST_AsGeoJSON({output_geom}) AS __geojson_geometry
+            FROM {table}
+            WHERE CAST({target_col} AS TEXT) = :value
+            LIMIT 1
+            """
+        )
+
+        with Session(engine) as session:
+            row = session.execute(
+                sql,
+                {"value": str(value)},
+            ).mappings().first()
+
+        if not row:
+            return Response(status_code=204)
+
+        row_dict = dict(row)
+
+        geometry_json = row_dict.pop("__geojson_geometry", None)
+        srid = row_dict.pop("__srid", None)
+
+        row_dict.pop(geom_col, None)
+        row_dict.pop("geom", None)
+        row_dict.pop("geometry", None)
+
+        if geometry_json is None:
+            return Response(status_code=204)
+
+        if isinstance(geometry_json, str):
+            geometry = json.loads(geometry_json)
+        elif isinstance(geometry_json, dict):
+            geometry = geometry_json
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unsupported geometry JSON type: {type(geometry_json)}",
+            )
+
+        pk_columns = access.pk_cols or []
+
+        feature_id = None
+
+        if len(pk_columns) == 1:
+            feature_id = row_dict.get(pk_columns[0])
+        elif len(pk_columns) > 1:
+            feature_id = {
+                col: row_dict.get(col)
+                for col in pk_columns
+            }
+
+        return {
+            "id": feature_id,
+            "type": "Feature",
+            "crs": f"EPSG:{srid}" if srid not in (None, 0) else None,
+            "geometry": geometry,
+            "properties": row_dict,
+        }
