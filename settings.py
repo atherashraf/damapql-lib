@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -79,7 +80,9 @@ def get_dch_model_bases() -> list[type]:
     from app.damapql.utils.adapters.db import DBBase
     return [DBBase]
 
+
 DCH_DATABASES = {
+    "stac_db":  DCH_BASE_DIR / "data" / f"stac_{DCH_APP_NAME}.duckdb",
     "cache_db": {
         "engine": "sqlite",
         "file_path": os.path.join(DCH_BASE_DIR, "../../dch_cache.sqlite")
@@ -117,7 +120,6 @@ AWS_REGION_NAME = os.getenv("AWS_DEFAULT_REGION", None)
 MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
 MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-
 # Parse boolean safely from environment string
 MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "False").lower() in ("true", "1", "t", "yes")
 

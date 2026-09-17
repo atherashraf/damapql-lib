@@ -78,10 +78,17 @@ Add and reconcile Layer Info
         python -m app.damapql.manage reconcile_layerinfo \
             --check true
 
+
 correct layer accessibility col names
     python -m app.damapql.manage sync_layer_accessibility_columns --table_name wasa_asset_disposal
 refreh layer accessibility
     docker exec -it wasa_be python -m app.damapql.manage refresh_layer_accessibility --table_name wasa_asset_disposal --check true
+
+add Layer category
+    python -m app.damapql.manage create_layer_category -main Surfaces --sub Elevation
+
+create stac
+    python -m app.damapql.manage create_stac --layer_uuid <uuid>
 
 """
 import binascii
@@ -113,10 +120,12 @@ from app.damapql.cache.cache import redis_client, REDIS_NAMESPACE
 from app.damapql.dch.api_enum import AccessibilityType
 from app.damapql.dch.models import DBConnection, LayerInfo, LayerCategory, LayerQualityLevel, LayerAccessibility
 from app.damapql.dch.services.layer_info_services import LayerInfoService
+from app.damapql.dch.services.layer_info_stac_services import LayerInfoStacService
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.settings import DCH_DATABASES
 from app.damapql.utils.adapters.db import DBBase
+from app.damapql.utils.adapters.deps import get_stac_manager
 from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.utils.helper_scripts.table_schema_update import TableSchemaUpdater
@@ -762,6 +771,121 @@ def loaddata(app_label: str, file: str):
             session.rollback()
             print("❌ Data loading failed. Rolling back transaction.")
             raise
+
+def create_stac(
+    layer_uuid: Optional[str] = None,
+    all_layers: bool = False,
+    overwrite: bool = True,
+):
+    """
+    Register LayerInfo records into the DuckDB STAC catalog.
+
+    Usage:
+        python -m app.damapql.manage create_stac --layer_uuid <uuid>
+        python -m app.damapql.manage create_stac --all_layers true
+        python -m app.damapql.manage create_stac --all_layers true --overwrite false
+    """
+    all_layers = _to_bool(all_layers)
+    overwrite = _to_bool(overwrite)
+
+    if not layer_uuid and not all_layers:
+        print("❌ Error: You must supply either --layer_uuid <uuid> or --all_layers true")
+        return
+
+    started_at = time.time()
+    stac_mgr = get_stac_manager()
+    service = LayerInfoStacService(stac_mgr=stac_mgr)
+
+    # -------------------------------------------------------------------------
+    # Single Layer Registration
+    # -------------------------------------------------------------------------
+    if layer_uuid:
+        print(f"\n🚀 Registering Layer UUID '{layer_uuid}' into STAC...")
+        with LayerInfo.managed_session() as session:
+            stmt = (
+                select(LayerInfo)
+                .options(
+                    selectinload(LayerInfo.layer_accessibility),
+                    selectinload(LayerInfo.layer_category),
+                    selectinload(LayerInfo.quality_level),
+                )
+                .where(LayerInfo.uuid == layer_uuid)
+            )
+            layer = session.execute(stmt).scalar_one_or_none()
+
+            if not layer:
+                print(f"❌ LayerInfo with UUID '{layer_uuid}' was not found.")
+                return
+
+            if not overwrite and (layer.extra_metadata or {}).get("stac_registered"):
+                print(f"⏭️  Layer '{layer.layer_name}' ({layer.uuid}) is already registered in STAC. Skipping.")
+                return
+
+            try:
+                success = service.register_layer(layer, session=session)
+                if success:
+                    print(f"✅ Successfully registered '{layer.layer_name}' ({layer.uuid}) into STAC catalog.")
+                else:
+                    print(f"❌ Failed to register '{layer.layer_name}' ({layer.uuid}) into STAC.")
+            except Exception as e:
+                print(f"💥 Error registering STAC item: {e}")
+                da_logger.exception(f"Error during create_stac for uuid {layer_uuid}: {e}")
+        return
+
+    # -------------------------------------------------------------------------
+    # Batch Registration (All Layers)
+    # -------------------------------------------------------------------------
+    if all_layers:
+        print("\n🚀 Batch registering LayerInfo records into STAC...")
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        with LayerInfo.managed_session() as session:
+            stmt = (
+                select(LayerInfo)
+                .options(
+                    selectinload(LayerInfo.layer_accessibility),
+                    selectinload(LayerInfo.layer_category),
+                    selectinload(LayerInfo.quality_level),
+                )
+                .order_by(LayerInfo.id.asc())
+            )
+            layers = session.execute(stmt).scalars().all()
+
+            print(f"Found {len(layers)} layer(s) in database.\n")
+
+            for layer in layers:
+                # Check for prior registration when overwrite=False
+                if not overwrite and (layer.extra_metadata or {}).get("stac_registered"):
+                    print(f"  ⏭️  Skipped: {layer.layer_name} (already indexed)")
+                    skipped_count += 1
+                    continue
+
+                try:
+                    ok = service.register_layer(layer, session=session)
+                    if ok:
+                        print(f"  ✅ Registered: {layer.layer_name} ({layer.uuid})")
+                        success_count += 1
+                    else:
+                        print(f"  ❌ Failed: {layer.layer_name} ({layer.uuid})")
+                        failed_count += 1
+                except Exception as ex:
+                    print(f"  ❌ Error {layer.layer_name}: {ex}")
+                    da_logger.exception(f"STAC batch registration failed for {layer.layer_name}: {ex}")
+                    failed_count += 1
+
+        elapsed = time.time() - started_at
+
+        print("\n========================================")
+        print("STAC Registration Summary")
+        print("========================================")
+        print(f"Total Evaluated : {len(layers)}")
+        print(f"Successful      : {success_count}")
+        print(f"Skipped         : {skipped_count}")
+        print(f"Failed          : {failed_count}")
+        print(f"Elapsed Time    : {elapsed:.2f}s")
+        print("========================================\n")
 
 
 def reset_pk_sequences(engine, session, touched_models):
@@ -1478,6 +1602,35 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, model_na
         if check:
             print("\nℹ️ Check mode was enabled. No database changes were saved.")
         return summary
+
+def create_layer_category(
+    main: str,
+    sub: Optional[str] = None,
+):
+    """
+    Create a layer category if it does not already exist.
+
+    Examples:
+        python -m app.damapql.manage create_layer_category --main Surfaces
+
+        python -m app.damapql.manage create_layer_category \
+            --main Surfaces \
+            --sub Elevation
+    """
+
+    category = LayerCategory.create_category(
+        main=main,
+        sub=sub,
+    )
+
+    print(
+        f"✅ Layer category: "
+        f"id={category.id}, "
+        f"main='{category.main}', "
+        f"sub='{category.sub or ''}'"
+    )
+
+    return category
 
 def refresh_layer_accessibility(table_name: str = None, layer_uuid: str = None, check: bool = False,
         schema: str = "public", ):

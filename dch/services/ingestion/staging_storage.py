@@ -68,6 +68,11 @@ class StagingStorage(ABC):
         finally:
             self.cleanup(staged)
 
+    @abstractmethod
+    def create_scratch_file(self, filename: str) -> StagedFile:
+        """Allocates a local scratch path for internal worker operations."""
+        pass
+
 
 class LocalStagingStorage(StagingStorage):
     """
@@ -105,6 +110,11 @@ class LocalStagingStorage(StagingStorage):
                 da_logger.debug(f"Local staging cleaned: {target_dir}")
             except Exception as e:
                 da_logger.warning(f"Failed to clean staging directory {target_dir}: {e}")
+
+    def create_scratch_file(self, filename: str) -> StagedFile:
+        staging_dir = tempfile.mkdtemp(prefix="digitalarz_scratch_", dir=self.base_dir)
+        local_path = os.path.join(staging_dir, filename)
+        return StagedFile(local_path=local_path, staging_dir=staging_dir)
 
 
 class MinioStagingStorage(StagingStorage):
@@ -169,3 +179,14 @@ class MinioStagingStorage(StagingStorage):
                 da_logger.debug(f"Deleted MinIO staging object: {staged_file.s3_uri}")
             except Exception as e:
                 da_logger.warning(f"Failed to clean MinIO staging object {staged_file.s3_uri}: {e}")
+
+    def create_scratch_file(self, filename: str) -> StagedFile:
+        staging_dir = tempfile.mkdtemp(prefix="digitalarz_scratch_", dir=self.local_base_dir)
+        local_path = os.path.join(staging_dir, filename)
+        object_name = f"{self.prefix}/{filename}"
+        return StagedFile(
+            local_path=local_path,
+            staging_dir=staging_dir,
+            bucket_name=self.bucket_name,
+            object_name=object_name,
+        )

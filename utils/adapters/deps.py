@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Generator
 from urllib.parse import quote_plus
 
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from digitalarzengine.io.managers.minio_manager import MinioManager
+from digitalarzengine.io.managers.stac_manager import STACManager
 from digitalarzengine.utils.singletons import da_logger
 
 from app.damapql.settings import (
@@ -50,7 +52,7 @@ from app.damapql.settings import (
     MINIO_ACCESS_KEY,
     MINIO_ENDPOINT,
     MINIO_SECRET_KEY,
-    MINIO_SECURE,
+    MINIO_SECURE, DCH_DATABASES,
 )
 from app.damapql.utils.crypto import CryptoUtils
 from settings import DATABASES
@@ -64,7 +66,46 @@ _sync_session_factories: dict[str, sessionmaker] = {}
 
 _minio_instance: MinioManager | None = None
 
+# --- STAC Manager Singleton Registry ---
+_stac_manager_instance: STACManager | None = None
 
+
+def get_stac_manager_instance() -> STACManager:
+    """
+    Returns a process-wide cached singleton instance of STACManager.
+    Prevents DuckDB on-disk file locking collisions and repeated extension installations.
+    """
+    global _stac_manager_instance
+    if _stac_manager_instance is None:
+        minio_manager = get_minio_manager_instance()
+
+        stac_db_config = DCH_DATABASES.get("stac_db")
+        if isinstance(stac_db_config, dict):
+            stac_db_path_raw = stac_db_config.get("file_path") or stac_db_config.get("name")
+        else:
+            stac_db_path_raw = stac_db_config
+
+        if not stac_db_path_raw:
+            raise ValueError("DCH_DATABASES['stac_db'] path is not configured.")
+
+        stac_db_path = Path(stac_db_path_raw)
+        stac_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        _stac_manager_instance = STACManager(
+            db_path=str(stac_db_path),
+            minio_mgr=minio_manager,
+            minio_endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            use_ssl=MINIO_SECURE,
+        )
+
+    return _stac_manager_instance
+
+
+def get_stac_manager() -> STACManager:
+    """FastAPI Dependency and CLI entry point for STACManager."""
+    return get_stac_manager_instance()
 # --- MinIO Storage Providers ---
 def get_minio_manager_instance() -> MinioManager:
     """
@@ -85,6 +126,10 @@ def get_minio_manager_instance() -> MinioManager:
 def get_minio_manager() -> MinioManager:
     """FastAPI Dependency for injecting MinioManager into endpoints."""
     return get_minio_manager_instance()
+
+
+# app/damapql/utils/adapters/deps.py
+
 
 
 # --- URL Builder ---

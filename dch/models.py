@@ -18,39 +18,26 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy_utils import ChoiceType
 
 from app.damapql.dch.api_enum import AccessibilityType, DataModel, ModelType
+from app.damapql.dch.dtypes import (DBConnectionType, LayerAccessibilityType, LayerAccessibilityParams,
+                                    DBAccessibilityParams, URLAccessibilityParams, MinioAccessibilityParams,
+                                    S3AccessibilityParams, FileAccessibilityParams, LayerCategoryType, LayerInfoType,
+                                    LayerQualityLevelType, MapInfoType, )
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.settings import IS_LOCAL, MEDIA_BASE
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import ExternalEngineRegistry, get_minio_manager
 from app.damapql.utils.adapters.services.db_query import DBQuery
 from app.damapql.utils.crypto import CryptoUtils
-from app.damapql.dch.dtypes import (
-    DBConnectionType,
-    LayerAccessibilityType,
-    LayerAccessibilityParams,
-    DBAccessibilityParams,
-    URLAccessibilityParams,
-    MinioAccessibilityParams,
-    S3AccessibilityParams,
-    FileAccessibilityParams,
-    LayerCategoryType,
-    LayerInfoType,
-    LayerQualityLevelType,
-    MapInfoType,
-)
-
 from digitalarzengine.io.cog_raster import COGRaster
 from digitalarzengine.io.rio_raster import RioRaster
 from digitalarzengine.processing.raster.band_process import BandProcess
 from digitalarzengine.utils.singletons import da_logger
 
 
-
-
 class LayerCategory(DBBase):
     __tablename__ = "dch_layer_category"
 
-    __table_args__ = (db.UniqueConstraint("main", "sub", name="uq_dch_layer_category_main_sub"),)
+    __table_args__ = (db.UniqueConstraint("main", "sub", name="uq_dch_layer_category_main_sub", ),)
 
     id = db.Column(db.INTEGER, primary_key=True, nullable=False)
     main = db.Column(db.VARCHAR, nullable=False)
@@ -67,6 +54,41 @@ class LayerCategory(DBBase):
         text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
         text = re.sub(r"[^\w\s-]", "", text).strip().lower()
         return re.sub(r"[-\s]+", "-", text)
+
+    @classmethod
+    def resolve_category(cls, cat_id: Optional[int] = None, main: Optional[str] = None, sub: Optional[str] = None,
+                         session: Optional[Session] = None) -> Optional["LayerCategory"]:
+        with cls.managed_session(session) as session:
+            if cat_id is not None:
+                return session.query(cls).filter(cls.id == cat_id).first()
+            if not main:
+                return None
+            main = main.strip()
+            sub = sub.strip() if sub else None
+            query = session.query(cls).filter(cls.main == main)
+            if sub is not None:
+                query = query.filter(cls.sub == sub)
+            else:
+                query = query.filter(cls.sub.is_(None))
+            return query.first()
+
+    @classmethod
+    def create_category(cls, main: str, sub: Optional[str] = None,
+                        session: Optional[Session] = None, ) -> "LayerCategory":
+
+        with cls.managed_session(session) as session:
+            existing = cls.resolve_category(session=session, main=main, sub=sub, )
+
+            if existing:
+                return existing
+
+            category = cls(main=main.strip(), sub=sub.strip() if sub else None, )
+
+            session.add(category)
+            session.commit()
+            session.refresh(category)
+
+            return category
 
 
 class DBConnection(DBBase):
@@ -92,7 +114,7 @@ class DBConnection(DBBase):
         db_name = db_config.get("name")
 
         return cls.get_db_connection(con_name=cls.get_connection_name(db_name, host), engine=engine, host=host,
-            port=port, user=user, password=password, db_name=db_name, )
+                                     port=port, user=user, password=password, db_name=db_name, )
 
     @staticmethod
     def get_connection_name(db_name: str, host: str) -> str:
@@ -100,7 +122,7 @@ class DBConnection(DBBase):
 
     @classmethod
     def get_db_connection(cls, con_name: str, engine: str = None, host: str = None, port: str = None, user: str = None,
-            password: str = None, db_name: str = None, ) -> DBConnection:
+                          password: str = None, db_name: str = None, ) -> DBConnection:
         with cls.managed_session() as session:
             try:
                 stmt = select(cls).where(cls.name == con_name)
@@ -116,7 +138,7 @@ class DBConnection(DBBase):
                     db_conn = cls()
                     db_conn.name = con_name
                     db_conn.params = {"engine": engine, "host": host, "port": port, "user": user,
-                        "password": encrypted_password, "name": db_name, }
+                                      "password": encrypted_password, "name": db_name, }
                     session.add(db_conn)
                     session.commit()
 
@@ -153,10 +175,7 @@ class LayerAccessibility(DBBase):
     params = Column(db.JSON, nullable=False, )
 
     # 1:1 relationship mapping (scalar, not list)
-    layer_info: Mapped["LayerInfo"] = relationship(
-        back_populates="layer_accessibility",
-        uselist=False
-    )
+    layer_info: Mapped["LayerInfo"] = relationship(back_populates="layer_accessibility", uselist=False)
 
     __pydantic__ = LayerAccessibilityType
 
@@ -200,7 +219,7 @@ class LayerAccessibility(DBBase):
     # ================================================================
 
     @property
-    def accessibility_params(self ) -> LayerAccessibilityParams:
+    def accessibility_params(self) -> LayerAccessibilityParams:
         """
         Convert raw database JSON params into the correct
         polymorphic Pydantic model.
@@ -310,10 +329,10 @@ class LayerAccessibility(DBBase):
 
     @classmethod
     def create_s3_accessibility(cls, bucket: str, object_name: str, spectral_res: int = 1, spatial_res: Any = None,
-            rad_res: str = "8-bit", ) -> LayerAccessibility:
+                                rad_res: str = "8-bit", ) -> LayerAccessibility:
         object_name = object_name.lstrip("/")
         access_params = S3AccessibilityParams(bucket=bucket, object_name=object_name, spectral_resolution=spectral_res,
-            spatial_resolution=spatial_res, radiometric_resolution=rad_res, )
+                                              spatial_resolution=spatial_res, radiometric_resolution=rad_res, )
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
@@ -329,10 +348,11 @@ class LayerAccessibility(DBBase):
 
     @classmethod
     def create_minio_accessibility(cls, bucket: str, object_name: str, spectral_res: Optional[int] = None,
-            spatial_res: Any = None, rad_res: Optional[str] = None, ) -> LayerAccessibility:
+                                   spatial_res: Any = None, rad_res: Optional[str] = None, ) -> LayerAccessibility:
         object_name = object_name.lstrip("/")
         access_params = MinioAccessibilityParams(bucket=bucket, object_name=object_name,
-            spectral_resolution=spectral_res, spatial_resolution=spatial_res, radiometric_resolution=rad_res, )
+                                                 spectral_resolution=spectral_res, spatial_resolution=spatial_res,
+                                                 radiometric_resolution=rad_res, )
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
@@ -364,7 +384,7 @@ class LayerAccessibility(DBBase):
 
     @classmethod
     def create_db_accessibility(cls, table_name: str, db_conn: Union[DBConnection, str], columns: dict,
-            pk_cols: list, ) -> LayerAccessibility:
+                                pk_cols: list, ) -> LayerAccessibility:
         cols = []
         g_col = None
 
@@ -377,7 +397,7 @@ class LayerAccessibility(DBBase):
 
         conn_name = db_conn.name if hasattr(db_conn, "name") else db_conn
         access_params = DBAccessibilityParams(conn_name=conn_name, table_name=table_name, columns=cols, g_col=g_col,
-            pk_cols=pk_cols, )
+                                              pk_cols=pk_cols, )
         params = cls.serialize_params(access_params)
 
         with cls.managed_session() as session:
@@ -402,6 +422,7 @@ class LayerAccessibility(DBBase):
             session.commit()
             session.refresh(la)
             return la
+
     # ================================================================
     # JSON Hybrid Properties
     # ================================================================
@@ -521,7 +542,6 @@ class LayerAccessibility(DBBase):
         return (db_conn.get_sqlalchemy_engine())
 
 
-
 class LayerInfo(DBBase):
     __tablename__ = "dch_layer_info"
 
@@ -553,15 +573,8 @@ class LayerInfo(DBBase):
     layer_category = relationship("LayerCategory")
 
     # Enforce database-level 1:1
-    layer_access_id = Column(
-        db.ForeignKey(LayerAccessibility.id),
-        name="layer_access_id",
-        nullable=False,
-        unique=True
-    )
-    layer_accessibility: Mapped[LayerAccessibility] = relationship(
-        back_populates="layer_info"
-    )
+    layer_access_id = Column(db.ForeignKey(LayerAccessibility.id), name="layer_access_id", nullable=False, unique=True)
+    layer_accessibility: Mapped[LayerAccessibility] = relationship(back_populates="layer_info")
 
     quality_level_id = Column(db.ForeignKey(LayerQualityLevel.id), name="quality_level_id", nullable=True)
     quality_level = relationship("LayerQualityLevel")
@@ -598,7 +611,7 @@ class LayerInfo(DBBase):
     def get_layer_info_by_uuid(cls, uuid: str) -> Optional[LayerInfo]:
         with cls.managed_session() as session:
             stmt = (select(cls).options(selectinload(cls.layer_accessibility), selectinload(cls.layer_category),
-                selectinload(cls.quality_level), ).where(cls.uuid == uuid))
+                                        selectinload(cls.quality_level), ).where(cls.uuid == uuid))
             return session.execute(stmt).scalar_one_or_none()
 
     def _get_default_attribute_cols(self, access: LayerAccessibility) -> list[str]:
@@ -606,13 +619,13 @@ class LayerInfo(DBBase):
         g_col = (access.geometry_col or "").lower()
         raw_cols = access.cols_name or []
         clean_cols = list(pk_cols) + [c for c in raw_cols if
-            c and c.lower() not in {"extent", g_col, "geojson", "geom", "geometry"}]
+                                      c and c.lower() not in {"extent", g_col, "geojson", "geom", "geometry"}]
         seen = set()
         return [c for c in clean_cols if c and not (c in seen or seen.add(c))]
 
     def to_layer_gdf(self, cols=(), g_col: str | None = None, extent_3857=None, where_clause: str | None = None,
-            limit: int = -1, offset: int = 0, session: Session = None,
-            min_intersection_ratio: float = 0.90, ) -> GeoDataFrame:
+                     limit: int = -1, offset: int = 0, session: Session = None,
+                     min_intersection_ratio: float = 0.90, ) -> GeoDataFrame:
         """
         Return GeoDataFrame for vector DB layers.
 
@@ -786,7 +799,7 @@ class LayerInfo(DBBase):
                     return pd.DataFrame.from_records(res)
 
                 summaries = [BandProcess.get_summary_data(raster.get_data_array(b), nodata=raster.get_nodata_value())
-                    for b in range(1, band_count + 1)]
+                             for b in range(1, band_count + 1)]
                 return pd.DataFrame(summaries)
 
             return pd.DataFrame()
@@ -828,7 +841,7 @@ class LayerInfo(DBBase):
             if access.is_minio:
                 minio_manager = get_minio_manager()
                 return COGRaster.open_from_minio(access.accessibility_params,
-                                                 minio_manager=minio_manager)  #  # url = minio_manager.generate_presigned_url(  #     bucket_name=access.s3_bucket,  #     object_name=access.s3_object_name,  #     expires_minutes=30,  # )  # return COGRaster.open_cog(url) if url else None
+                                                 minio_manager=minio_manager)  # # url = minio_manager.generate_presigned_url(  #     bucket_name=access.s3_bucket,  #     object_name=access.s3_object_name,  #     expires_minutes=30,  # )  # return COGRaster.open_cog(url) if url else None
 
             # 2. Local File Storage fallback
             file_path = access.file_path
@@ -881,7 +894,7 @@ class LayerInfo(DBBase):
                 self.extent = new_b
             else:
                 self.extent = [min(self.extent[0], new_b[0]), min(self.extent[1], new_b[1]),
-                    max(self.extent[2], new_b[2]), max(self.extent[3], new_b[3]), ]
+                               max(self.extent[2], new_b[2]), max(self.extent[3], new_b[3]), ]
 
             try:
                 native_srid = self.srid or 3857
@@ -897,7 +910,10 @@ class LayerInfo(DBBase):
 
             flag_modified(self, "extent")
             flag_modified(self, "extent_3857")
+
             session.commit()
+
+
 
 
 class MapInfo(DBBase):

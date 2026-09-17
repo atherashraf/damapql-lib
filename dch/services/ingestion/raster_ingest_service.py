@@ -224,7 +224,12 @@ class RasterIngestService:
             staging_storage: Optional[StagingStorage] = None, *, title: str, category_id: int, temporal: str,
             model_type: str, raster_file: UploadFile, uploaded_by: Optional[int],
             bucket_name: str = MINIO_BUCKET_NAME, ) -> RasterIngestResult:
-        """Ingests a multipart uploaded raster, converts to COG, persists, and registers 1:1 records."""
+        """
+        Ingests a multipart uploaded raster, converts to COG, persists, and registers 1:1 records.
+            Ingestion Source → Staging/Preparation → COG Normalization
+            → Persistent Storage → Persistent Raster Validation → Accessibility Registration
+            → Layer Catalog Registration → Transaction Commit.
+        """
         category = session.get(LayerCategory, category_id)
         if not category:
             raise HTTPException(status_code=400, detail="Invalid category ID")
