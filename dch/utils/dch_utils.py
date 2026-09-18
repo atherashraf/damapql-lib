@@ -43,37 +43,58 @@ class DCHUtils:
         s = re.sub(r"_+", "_", s).strip("_")
         return s
 
+    # utils.py or inside DCHUtils
+    import re
+
+    @staticmethod
+    def get_app_prefix() -> str:
+        prefix = DCH_APP_NAME if DCH_APP_NAME else "damapql"
+        return prefix.strip().lower() + "_"
+
     @classmethod
-    def short_table_name(cls, filename_without_ext: str, max_len: int = 50, li_uuid: str = None) -> str:
+    def format_table_name(cls, raw_name: str, max_len: int = 54) -> str:
         """
-        Produce a short, Postgres-safe table name so index names stay <= 63 chars.
-        GeoPandas appends 'idx_' (4 chars) and '_geom' (5 chars), requiring table_name <= 54.
+        Ensures table starts with prefix, contains valid characters,
+        does not double-prefix, and fits within max_len (<= 54 chars).
         """
-        # 1. Normalize the UUID string (remove dashes if present)
+        prefix = cls.get_app_prefix()
+        clean = cls._slug(raw_name).lower()
+
+        # Prevent double prefixing
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):]
+
+        # Calculate max allowed length for the user portion
+        allowed_user_len = max_len - len(prefix)
+        truncated_user = clean[:max(allowed_user_len, 1)].rstrip("_")
+
+        return f"{prefix}{truncated_user}"
+
+    @classmethod
+    def short_table_name(cls, filename_without_ext: str, max_len: int = 54, li_uuid: str = None) -> str:
+        """
+        Creates a guaranteed unique, Postgres-safe table name with prefix and UUID suffix.
+        Total length <= 54 characters so idx_{table}_geom is <= 63 characters.
+        """
+        prefix = cls.get_app_prefix()
+
         if li_uuid is None:
             raw_uuid = cls.get_uuid1()
         else:
             raw_uuid = str(li_uuid)
 
         clean_uuid = raw_uuid.replace("-", "")
+        uuid_suffix = clean_uuid[:12]
 
-        # 2. Reserve a fixed token length for uniqueness (12 hex chars is plenty)
-        uuid_token_len = min(12, len(clean_uuid))
-        uuid_suffix = clean_uuid[:uuid_token_len]
+        slug_name = cls._slug(filename_without_ext).lower()
+        if slug_name.startswith(prefix):
+            slug_name = slug_name[len(prefix):]
 
-        # 3. Slugify base name and prefix
-        slug_name = cls._slug(filename_without_ext)
-        # prefix = "damapql_"
-        prefix = DCH_APP_NAME if DCH_APP_NAME else "damapql"
-        prefix = prefix.lower() + "_"
-        # 4. Calculate remaining space for the base slug:
-        # max_len - len(prefix) - 1 (separator) - len(uuid_suffix)
+        # max_len - prefix - '_' - uuid_suffix
         allowed_slug_len = max_len - len(prefix) - 1 - len(uuid_suffix)
-
         trimmed_slug = slug_name[:max(allowed_slug_len, 1)].rstrip("_")
 
         return f"{prefix}{trimmed_slug}_{uuid_suffix}"
-
     # @staticmethod
     # def create_title(name: str) -> str:
     #     title = name.title()

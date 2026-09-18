@@ -3,7 +3,9 @@
 import base64
 import io
 import json
+import re
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -13,7 +15,7 @@ import geopandas as gpd
 from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pyproj import Transformer
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select, text, inspect
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -39,7 +41,7 @@ from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.manage import reconcile_layerinfo, create_layerinfo_from_app_models
-from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY
+from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY, DCH_APP_NAME
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import get_sync_session
 from app.damapql.utils.adapters.model_utils import ModelUtils
@@ -625,88 +627,138 @@ async def save_layer_info(
         raise HTTPException(status_code=500, detail=f"Failed to save layer info: {str(e)}")
 
 
-# ---------------------------------------------------------------------
-# Shapefile Upload & Append Pipelines
-# ---------------------------------------------------------------------
-@dch_admin_router.post("/upload_shp_file/")
-async def upload_shp_file(request: Request, current_user: dict = Depends(AuthUtils.require_role("app_manager"))):
-    """
-    Upload shapefile parts, import into DB, register the new vector layer,
-    and remove temporary uploaded files after successful import.
 
-    This version uses:
-    - DCHUploadSessionService for generic temp upload/session handling
-    - DCHUploadPackageService for shapefile package validation/resolution
-    """
+
+
+# ------------------------------------------------------------------
+# Check Table Name Availability Route
+# ------------------------------------------------------------------
+@dch_admin_router.get("/check_table_name/")
+async def check_table_name(
+        table_name: str = Query(..., min_length=1, max_length=100),
+        current_user: dict = Depends(AuthUtils.require_role("app_manager")),
+):
+    prefix = DCHUtils.get_app_prefix()
+
+    # 1. Normalize and strip any double prefix
+    normalized_name = DCHUtils.format_table_name(table_name, max_len=54)
+
+    engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
+    target_schema = "public"
+
+    with engine.connect() as conn:
+        inspector = inspect(conn)
+        existing_tables = {t.lower() for t in inspector.get_table_names(schema=target_schema)}
+
+    # Helper to generate unique suggestion
+    def get_suggestion():
+        for _ in range(5):
+            candidate = DCHUtils.short_table_name(table_name, max_len=54)
+            if candidate.lower() not in existing_tables:
+                return candidate
+        return DCHUtils.short_table_name(f"layer_{int(time.time())}", max_len=54)
+
+    # 2. Validate SQL format
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", normalized_name):
+        return {
+            "available": False,
+            "table_name": normalized_name,
+            "reason": "Name contains invalid characters.",
+            "suggested_name": get_suggestion(),
+        }
+
+    # 3. Check for collision
+    if normalized_name.lower() in existing_tables:
+        return {
+            "available": False,
+            "table_name": normalized_name,
+            "reason": f"Table '{normalized_name}' already exists.",
+            "suggested_name": get_suggestion(),
+        }
+
+    return {
+        "available": True,
+        "table_name": normalized_name,
+        "suggested_name": None,
+    }
+
+
+
+
+# ------------------------------------------------------------------
+# Updated Upload Handler
+# ------------------------------------------------------------------
+
+@dch_admin_router.post("/upload_shp_file/")
+async def upload_shp_file(
+        request: Request,
+        current_user: dict = Depends(AuthUtils.require_role("app_manager")),
+):
     form = await request.form()
     layer_category_id = form.get("layer_category_id")
+    custom_table_name = form.get("table_name")
 
     if not layer_category_id:
         raise HTTPException(status_code=400, detail="layer_category_id is required")
 
-    upload_service = DCHUploadSessionService(media_dir=DCH_MEDIA_DIR, logger=da_logger, )
+    upload_service = DCHUploadSessionService(media_dir=DCH_MEDIA_DIR, logger=da_logger)
     package_service = DCHUploadPackageService(upload_service=upload_service)
 
     upload_id = None
     success = False
 
     try:
-        # ------------------------------------------------------------------
-        # Save uploaded files into a generic upload session
-        # ------------------------------------------------------------------
-        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(form=form,
-            upload_type="shapefile", metadata={"purpose": "vector_import"}, )
+        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(
+            form=form, upload_type="shapefile", metadata={"purpose": "vector_import"}
+        )
 
-        # ------------------------------------------------------------------
-        # Resolve and validate shapefile package
-        # Ensures:
-        #   - .shp exists
-        #   - .shx exists
-        #   - .dbf exists
-        #   - required files share the same basename
-        # ------------------------------------------------------------------
         shape_info = package_service.resolve_shapefile(upload_id)
         shp_fp = shape_info["main_file"]
         filename_without_ext = shape_info["base_name"]
 
-        # ------------------------------------------------------------------
-        # Read shapefile into GeoDataFrame
-        # ------------------------------------------------------------------
+        # Enforce prefix and safe <=54 character table name without double prefixing
+        raw_name = (custom_table_name or filename_without_ext).strip()
+        table_name = DCHUtils.format_table_name(raw_name, max_len=54)
+
+        engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
+        target_schema_name = "public"
+
+        # If table name already taken, fall back automatically to unique short_table_name with UUID
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            if table_name in [t.lower() for t in inspector.get_table_names(schema=target_schema_name)]:
+                table_name = DCHUtils.short_table_name(filename_without_ext, max_len=54)
+
         gdf = gpd.read_file(shp_fp)
         gdf.rename_geometry("geom", inplace=True)
         gdf.columns = gdf.columns.str.lower()
 
-        # Remove common ID columns if they exist
-        cols_to_drop = [c for c in ["objectid", "fid", "id"] if c in gdf.columns]
+        cols_to_drop = [c for c in ["objectid", "fid", "id", "dch_id"] if c in gdf.columns]
         if cols_to_drop:
             gdf.drop(columns=cols_to_drop, inplace=True)
 
-        # ------------------------------------------------------------------
-        # Prepare table / DB connection
-        # ------------------------------------------------------------------
-        uuid = DCHUtils.get_uuid1()
-        table_name = DCHUtils.short_table_name(filename_without_ext, li_uuid=uuid)
-        engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
-
-        # Define the schema explicitly (use "public" or your config)
-        target_schema_name = "public"
-
-        gdf.to_postgis(table_name, con=engine, schema=target_schema_name, if_exists="replace", index=False)
+        gdf.to_postgis(
+            table_name,
+            con=engine,
+            schema=target_schema_name,
+            if_exists="fail",
+            index=False,
+        )
 
         with engine.begin() as conn:
-            # Use double quotes for table name to handle special characters/case sensitivity
-            conn.execute(text(f"""
-                ALTER TABLE "{target_schema_name}"."{table_name}" 
-                ADD COLUMN dch_id SERIAL PRIMARY KEY;
-            """))
+            conn.execute(
+                text(f"""
+                    ALTER TABLE "{target_schema_name}"."{table_name}" 
+                    ADD COLUMN dch_id SERIAL PRIMARY KEY;
+                """)
+            )
 
-        # ------------------------------------------------------------------
-        # Register vector layer metadata
-        # ------------------------------------------------------------------
-        DCHUtils.create_vector_layer_info(engine, table_name, uuid=uuid, layer_category_id=layer_category_id)
+        uuid = DCHUtils.get_uuid1()
+        DCHUtils.create_vector_layer_info(
+            engine, table_name, uuid=uuid, layer_category_id=layer_category_id
+        )
 
         success = True
-
         return {
             "payload": {
                 "msg": "Shapefile uploaded and imported successfully",
@@ -720,11 +772,10 @@ async def upload_shp_file(request: Request, current_user: dict = Depends(AuthUti
         raise
     except Exception as e:
         da_logger.exception(f"PostGIS import error during shapefile upload: {e}")
-        raise HTTPException(status_code=500, detail="Failed to import spatial data to database")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if success and upload_id:
             upload_service.cleanup_session(upload_id)
-
 
 # ---------------------------------------------------------------------
 # Shapefile upload -> PREVIEW append into existing table
