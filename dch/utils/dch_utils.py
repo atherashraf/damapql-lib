@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 
 from app.damapql.dch.api_enum import DataModel, ModelType
 from app.damapql.dch.models import LayerInfo, LayerAccessibility, DBConnection
-from app.damapql.settings import DEFAULT_EXTENT_SRID
+from app.damapql.settings import DEFAULT_EXTENT_SRID, DCH_APP_NAME
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.services.spatial_db import SpatialDB
 from app.damapql.utils.adapters.services.db_query import DBQuery
@@ -44,21 +44,35 @@ class DCHUtils:
         return s
 
     @classmethod
-    def short_table_name(cls, filename_without_ext: str, max_len: int = 60, li_uuid: str = None) -> str:
+    def short_table_name(cls, filename_without_ext: str, max_len: int = 50, li_uuid: str = None) -> str:
         """
-        Produce a short, Postgres-safe table name so index names stay < 63 chars.
+        Produce a short, Postgres-safe table name so index names stay <= 63 chars.
+        GeoPandas appends 'idx_' (4 chars) and '_geom' (5 chars), requiring table_name <= 54.
         """
-        base = cls._slug(filename_without_ext)
-        base = f"damapql_{base}"
-        cut = max_len - (len(base) + 1)
-
+        # 1. Normalize the UUID string (remove dashes if present)
         if li_uuid is None:
-            li_uuid = cls.get_uuid1()[:cut]
+            raw_uuid = cls.get_uuid1()
         else:
-            li_uuid = li_uuid[:cut]
+            raw_uuid = str(li_uuid)
 
-        # base = base[:max(cut, 1)]
-        return f"{base}_{li_uuid}"
+        clean_uuid = raw_uuid.replace("-", "")
+
+        # 2. Reserve a fixed token length for uniqueness (12 hex chars is plenty)
+        uuid_token_len = min(12, len(clean_uuid))
+        uuid_suffix = clean_uuid[:uuid_token_len]
+
+        # 3. Slugify base name and prefix
+        slug_name = cls._slug(filename_without_ext)
+        # prefix = "damapql_"
+        prefix = DCH_APP_NAME if DCH_APP_NAME else "damapql"
+        prefix = prefix.lower() + "_"
+        # 4. Calculate remaining space for the base slug:
+        # max_len - len(prefix) - 1 (separator) - len(uuid_suffix)
+        allowed_slug_len = max_len - len(prefix) - 1 - len(uuid_suffix)
+
+        trimmed_slug = slug_name[:max(allowed_slug_len, 1)].rstrip("_")
+
+        return f"{prefix}{trimmed_slug}_{uuid_suffix}"
 
     # @staticmethod
     # def create_title(name: str) -> str:
