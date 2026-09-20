@@ -1,3 +1,7 @@
+import math
+
+import numpy as np
+import pandas as pd
 from sqlalchemy.orm import selectinload
 
 from digitalarzengine.utils.singletons import da_logger
@@ -301,8 +305,53 @@ async def delete_layer_info_row(uuid: str, current_user: UserInfo = Depends(Auth
     return {"payload": {"msg": f"Layer {uuid} deleted successfully"}}
 
 
+
+def make_json_safe(value):
+    if value is None:
+        return None
+
+    # numpy arrays
+    if isinstance(value, np.ndarray):
+        return [make_json_safe(v) for v in value.tolist()]
+
+    # lists / tuples / sets
+    if isinstance(value, (list, tuple, set)):
+        return [make_json_safe(v) for v in value]
+
+    # dictionaries
+    if isinstance(value, dict):
+        return {
+            str(k): make_json_safe(v)
+            for k, v in value.items()
+        }
+
+    # numpy / Python floating point
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    # numpy integer
+    if isinstance(value, np.integer):
+        return int(value)
+
+    # numpy bool
+    if isinstance(value, np.bool_):
+        return bool(value)
+
+    # pandas missing values
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and missing:
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    return value
+
 @dch_maps_router.get("/get_all_layers/")
-async def get_all_layers(current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def get_all_layers(
+    current_user: UserInfo = Depends(AuthUtils.get_current_user)
+):
     with LayerInfo.managed_session() as session:
         stmt = (
             select(
@@ -312,13 +361,25 @@ async def get_all_layers(current_user: UserInfo = Depends(AuthUtils.get_current_
                 LayerInfo.extent_3857,
                 LayerCategory.main.label("category"),
             )
-            .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
-            .where(LayerInfo.data_model!=DataModel.Application.name)
+            .join(
+                LayerCategory,
+                LayerCategory.id == LayerInfo.category_id,
+                isouter=True,
+            )
+            .where(
+                LayerInfo.data_model != DataModel.Application.name
+            )
         )
 
         df = DBQuery.execute_stmt_as_df(session, stmt)
-        da_logger.info(f"get_all_layers: {df.to_dict(orient='records')}")
-        return {"payload": df.to_dict(orient="records")}
+
+        records = df.to_dict(orient="records")
+        payload = make_json_safe(records)
+
+        da_logger.info(f"get_all_layers: {payload}")
+
+        return {"payload": payload}
+
 
 @dch_maps_router.get("/get_application_url/{url_type}/")
 async def get_application_layers(
@@ -347,7 +408,10 @@ async def get_application_layers(
 
 
 @dch_maps_router.get("/layer_info/{uuid}/")
-async def get_layer_info(uuid: str, current_user: UserInfo = Depends(AuthUtils.get_current_user)):
+async def get_layer_info(
+    uuid: str,
+    current_user: UserInfo = Depends(AuthUtils.get_current_user)
+):
     with LayerInfo.managed_session() as session:
         info = session.execute(
             select(LayerInfo).where(LayerInfo.uuid == uuid)
@@ -371,7 +435,6 @@ async def get_layer_info(uuid: str, current_user: UserInfo = Depends(AuthUtils.g
             }
 
     return Response(status_code=204)
-
 
 
 MAX_3857 = 20037508.342789244

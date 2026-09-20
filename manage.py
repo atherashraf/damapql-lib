@@ -140,6 +140,7 @@ manage_router = APIRouter(tags=["manage"], responses={404: {"description": "Not 
 def create_dch_databases():
     """
     Create PostgreSQL databases defined in DCH_DATABASES.
+
     If a database already exists it is skipped.
 
     For newly created databases:
@@ -148,6 +149,11 @@ def create_dch_databases():
     """
 
     for label, cfg in DCH_DATABASES.items():
+
+        # DCH_DATABASES can also contain paths, e.g. stac_db
+        if not isinstance(cfg, dict):
+            print(f"⏭️  Skipping '{label}' (not a database configuration)")
+            continue
 
         engine_name = str(cfg.get("engine", "")).lower()
 
@@ -170,47 +176,58 @@ def create_dch_databases():
         admin_url = URL.create(drivername="postgresql+psycopg2", username=db_user, password=db_password, host=host,
             port=port, database="postgres", )
 
-        admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+        admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", )
 
         try:
             with admin_engine.connect() as conn:
 
-                # Check if database exists
-                exists = conn.execute(text("SELECT 1 FROM pg_database WHERE datname=:name"), {"name": db_name}).scalar()
+                exists = conn.execute(text("SELECT 1 FROM pg_database "
+                                           "WHERE datname = :name"), {"name": db_name}, ).scalar()
 
                 if exists:
                     print(f"⏭️  Database '{db_name}' already exists — skipping.")
                     continue
 
-                # Create database
-                conn.execute(text(f'CREATE DATABASE "{db_name}" OWNER "{db_user}"'))
+                conn.execute(text(f'CREATE DATABASE "{db_name}" '
+                                  f'OWNER "{db_user}"'))
 
-                print(f"✅ Database '{db_name}' created with owner '{db_user}'")
+                print(f"✅ Database '{db_name}' created "
+                      f"with owner '{db_user}'")
 
         except Exception as e:
             print(f"❌ Failed creating '{db_name}': {e}")
             continue
 
-        # Connect to new DB to install PostGIS
+        finally:
+            admin_engine.dispose()
+
+        # --------------------------------------------------------
+        # Install PostGIS extensions
+        # --------------------------------------------------------
+
         db_url = URL.create(drivername="postgresql+psycopg2", username=db_user, password=db_password, host=host,
             port=port, database=db_name, )
 
-        engine = create_engine(db_url, isolation_level="AUTOCOMMIT")
+        engine = create_engine(db_url, isolation_level="AUTOCOMMIT", )
 
         try:
             with engine.connect() as conn:
 
-                extensions = ["postgis", "postgis_topology", "postgis_raster"]
+                extensions = ["postgis", "postgis_topology", "postgis_raster", ]
 
                 for ext in extensions:
                     conn.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{ext}"'))
+
                     print(f"✅ Extension '{ext}' installed")
 
             print(f"🎉 Database '{db_name}' ready.\n")
 
         except Exception as e:
-            print(f"❌ Extension setup failed for '{db_name}': {e}")
+            print(f"❌ Extension setup failed for "
+                  f"'{db_name}': {e}")
 
+        finally:
+            engine.dispose()
 
 def add_db_connection(db_key: Optional[str] = None):
     with DBConnection.managed_session() as session:
