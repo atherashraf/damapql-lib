@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -28,49 +29,53 @@ class RasterTileService:
 
         return info
 
-    @classmethod
-    def render_tile(cls, *, uuid: str, z: int, x: int, y: int, minio_manager: MinioManager | None = None,
-            tile_size: int | None = None, ) -> RasterTileResult:
 
-        tile_size = (tile_size or cls.DEFAULT_TILE_SIZE)
+    @classmethod
+    def render_tile(
+            cls,
+            *,
+            uuid: str,
+            z: int,
+            x: int,
+            y: int,
+            minio_manager: MinioManager | None = None,
+            tile_size: int | None = None,
+            custom_color_map: Any = None,  # <-- Pass custom colormap
+    ) -> RasterTileResult:
+
+        tile_size = tile_size or cls.DEFAULT_TILE_SIZE
 
         try:
             info = cls.get_layer(uuid)
 
-            # ---------------------------------------------
-            # Open raster
-            # ---------------------------------------------
+            # 1. Open raster (MinIO or Local)
+            cog_raster = RasterAccessService.open_cog(info, minio_manager)
 
-            cog_raster = RasterAccessService.open_cog(info, minio_manager, )
+            # 2. Styling: custom_color_map takes priority, then layer_styling, else grayscale
+            if custom_color_map is not None:
+                color_map = custom_color_map
+            elif info.layer_styling:
+                color_map = COGRaster.create_color_map(info.layer_styling)
+            else:
+                color_map = None
 
-            # ---------------------------------------------
-            # Styling
-            # ---------------------------------------------
+            # 3. Read XYZ tile
+            data = cog_raster.read_tile_as_png(
+                x=x,
+                y=y,
+                z=z,
+                color_map=color_map,
+                tile_size=tile_size,
+            )
 
-            color_map = (COGRaster.create_color_map(info.layer_styling) if info.layer_styling else None)
+            da_logger.debug(f"[RasterTile] SUCCESS uuid={uuid}, z={z}, x={x}, y={y}")
 
-            # ---------------------------------------------
-            # Read XYZ tile
-            # ---------------------------------------------
-
-            data = cog_raster.read_tile_as_png(x=x, y=y, z=z, color_map=color_map, tile_size=tile_size, )
-
-            da_logger.debug(f"[RasterTile] SUCCESS "
-                            f"uuid={uuid}, "
-                            f"z={z}, x={x}, y={y}")
-
-            return RasterTileResult(content=data.getvalue(), media_type="image/png", )
+            return RasterTileResult(content=data.getvalue(), media_type="image/png")
 
         except HTTPException:
             raise
-
         except Exception as e:
-
-            da_logger.exception(f"[RasterTileError] "
-                                f"uuid={uuid}, "
-                                f"z={z}, "
-                                f"x={x}, "
-                                f"y={y} - "
-                                f"{type(e).__name__}: {e}")
-
-            raise HTTPException(status_code=500, detail=(f"Unable to render raster tile: {e}"), )
+            da_logger.exception(
+                f"[RasterTileError] uuid={uuid}, z={z}, x={x}, y={y} - {type(e).__name__}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=f"Unable to render raster tile: {e}")
