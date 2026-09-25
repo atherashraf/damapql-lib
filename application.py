@@ -141,14 +141,21 @@ def configure_middlewares(
     secret_key: str,
     allowed_origins: list[str],
 ) -> None:
-    app.add_middleware(
-        CORSMiddleware,
-        # allow_origins=allowed_origins,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Browsers reject `Access-Control-Allow-Origin: *` together with
+    # `Access-Control-Allow-Credentials: true`. When callers allow any origin,
+    # reflect the request Origin via regex so credentialed/Authorization calls work.
+    origins = allowed_origins or ["*"]
+    cors_kwargs: dict = {
+        "allow_credentials": True,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+    if origins == ["*"] or "*" in origins:
+        cors_kwargs["allow_origin_regex"] = r"https?://.*"
+    else:
+        cors_kwargs["allow_origins"] = origins
+
+    app.add_middleware(CORSMiddleware, **cors_kwargs)
 
     app.add_middleware(
         LoggingMiddleware,
