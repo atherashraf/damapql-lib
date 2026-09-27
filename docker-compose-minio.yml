@@ -27,7 +27,7 @@
 # LIFECYCLE COMMANDS:
 # ------------------------------------------------------------------------------
 # Launch in background:
-#    docker compose -f docker-compose-minio.yml up -d
+#    sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml up -d
 #
 # View real-time logs:
 #    docker compose -f docker-compose-minio.yml logs -f
@@ -57,8 +57,8 @@ services:
       - "9001:9001"
 
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
 
     volumes:
           # Host path : Container path (para iti Bitnami, /bitnami/minio/data ti usarenna)
