@@ -44,32 +44,26 @@
 # Web Console:  http://<HOST_IP>:9001  (User: minioadmin | Pass: minioadmin)
 # S3 API URL:   http://127.0.0.1:9000
 # ==============================================================================
-
 services:
   minio:
-    image: ghcr.io/minio/minio:latest
+    image: bitnami/minio:latest
     container_name: damapql-minio
     restart: always
 
-    # Port mappings: S3 API (9000) and Web Console (9001)
     ports:
       - "9000:9000"
       - "9001:9001"
 
-    # Root access keys for MinIO API and Web UI
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
 
     volumes:
-      # Direct Host Bind Mount: <HOST_PATH>:<CONTAINER_PATH>
-      - /var/lib/minio/data:/data
-
-    # Bind API to 0.0.0.0:9000 and Web Console to 0.0.0.0:9001
-    command: server /data --console-address ":9001"
+      # Host path : Container path (para iti Bitnami, /bitnami/minio/data ti usarenna)
+      - /var/lib/minio/data:/bitnami/minio/data
 
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
