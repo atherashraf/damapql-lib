@@ -48,7 +48,7 @@
 
 services:
   minio:
-    image: dhi.io/minio:0.20251015.172955
+    image: minio/minio:latest
     container_name: damapql-minio
     restart: unless-stopped
 
