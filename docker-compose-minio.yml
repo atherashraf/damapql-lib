@@ -47,7 +47,7 @@
 
 services:
   minio:
-    image: minio/minio:latest
+    image: ghcr.io/minio/minio:latest
     container_name: damapql-minio
     restart: always
 
@@ -68,7 +68,6 @@ services:
     # Bind API to 0.0.0.0:9000 and Web Console to 0.0.0.0:9001
     command: server /data --console-address ":9001"
 
-    # Healthcheck using internal MinIO client
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 30s
