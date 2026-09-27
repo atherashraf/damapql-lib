@@ -94,6 +94,8 @@
 # ==============================================================================
 #
 # Run the following commands from the deployment project root.
+#  but before must create directory with permission in host
+#  use  ONE-TIME HOST INITIALIZATION
 #
 # The examples assume:
 #   .env
@@ -110,24 +112,19 @@
 #
 # Validate configuration:
 #
-#   sudo docker compose --env-file .env \
-#     -f app/damapql/docker-compose-minio.yml config --quiet
+#   sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml config --quiet
 #
 # Start in background:
 #
-#   sudo docker compose --env-file .env \
-#     -f app/damapql/docker-compose-minio.yml up -d
+#   sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml up -d
 #
 # Check container status:
 #
-#   sudo docker compose --env-file .env \
-#     -f app/damapql/docker-compose-minio.yml ps
+#   sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml ps
 #
 # View real-time logs:
 #
-#   sudo docker compose --env-file .env \
-#     -f app/damapql/docker-compose-minio.yml logs -f
-#
+#   sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml logs -f
 # Stop without removing the container:
 #
 #   sudo docker compose --env-file .env \
