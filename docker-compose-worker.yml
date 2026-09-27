@@ -1,0 +1,28 @@
+# docker-compose-worker.yml
+version: '3.8'
+
+services:
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wasa-ingestion-worker
+    restart: always
+    command: celery -A app.core.celery worker --loglevel=info --concurrency=4 -Q spatial_ingestion
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://wasa_user:wasa_password@wasa-postgis:5432/wasa_db
+      - MINIO_ENDPOINT=wasa-minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - RABBITMQ_URL=amqp://wasa_admin:wasa_secret@wasa-broker:5672//
+      - REDIS_URL=redis://:wasa_cache_secret@wasa-redis:6379/0
+    networks:
+      - wasa_net
+    depends_on:
+      - postgis
+      - minio
+      - rabbitmq
+
+networks:
+  wasa_net:
+    external: true

@@ -1,3 +1,53 @@
+# ==============================================================================
+# Docker Compose: MinIO High-Performance Object Storage
+# Storage Mode: Host Bind Mount (Persists directly to /var/lib/minio/data)
+# ==============================================================================
+#
+# STORAGE BEHAVIOR & PERSISTENCE NOTICE:
+# - This setup uses a direct Host Bind Mount rather than an internal Docker volume.
+# - All S3 buckets (e.g., 'wasa'), ingested GeoParquets, working papers (PDFs),
+#   and original ZIP packages persist directly on your Ubuntu host at:
+#       /var/lib/minio/data
+# - Persistence across container life-cycles:
+#     * Running `docker compose down` stops and destroys the container, but
+#       host storage files remain 100% untouched.
+#     * Running `docker compose down -v` will NOT delete host directory data.
+#     * When executing `docker compose up -d` again, MinIO immediately mounts
+#       `/var/lib/minio/data`, detecting all existing buckets, object keys, and
+#       metadata without data loss.
+#
+# ------------------------------------------------------------------------------
+# ONE-TIME HOST INITIALIZATION (Run once before the initial launch):
+# ------------------------------------------------------------------------------
+# 1. Create the persistent storage directory on the host:
+#    sudo mkdir -p /var/lib/minio/data
+#
+# 2. Assign ownership to the MinIO container user/root (UID/GID 1000 or open access):
+#    sudo chown -R 1000:1000 /var/lib/minio/data
+#    sudo chmod -R 775 /var/lib/minio/data
+#
+# ------------------------------------------------------------------------------
+# LIFECYCLE COMMANDS:
+# ------------------------------------------------------------------------------
+# Launch in background:
+#    docker compose -f docker-compose-minio.yml up -d
+#
+# View real-time logs:
+#    docker compose -f docker-compose-minio.yml logs -f
+#
+# Stop container safely (all buckets & objects stay intact on host):
+#    docker compose -f docker-compose-minio.yml down
+#
+# Restart / Reattach to existing buckets:
+#    docker compose -f docker-compose-minio.yml up -d
+#
+# ------------------------------------------------------------------------------
+# ENDPOINTS & CLIENT CONFIGURATION (FastAPI / DAMapQL):
+# ------------------------------------------------------------------------------
+# Web Console:  http://<HOST_IP>:9001  (User: minioadmin | Pass: minioadmin)
+# S3 API URL:   http://127.0.0.1:9000
+# ==============================================================================
+
 version: '3.8'
 
 services:
@@ -5,24 +55,36 @@ services:
     image: quay.io/minio/minio:latest
     container_name: minio-server
     restart: always
+
+    # Port mappings: S3 API (9000) and Browser Dashboard (9001)
     ports:
-      # S3 API port
       - "9000:9000"
-      # MinIO Web Console port
       - "9001:9001"
+
+    # Root access keys for MinIO API and Web UI
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+
     volumes:
-      # Daataa MinIO qabachuuf bakka kuusaa (volume)
-      - minio_data:/data
+      # Direct Host Bind Mount: <HOST_PATH>:<CONTAINER_PATH>
+      # Stores all buckets, GeoParquets, and documents directly on the host system
+      # - <HOST_PATH>:<CONTAINER_PATH>
+      - /var/lib/minio/data:/data
+
+    # Startup command binding the API to all interfaces and exposing console on :9001
     command: server /data --console-address ":9001"
+
+    networks:
+      - wasa_net
+
+    # Healthcheck checking live API responsiveness
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-volumes:
-  minio_data:
-    driver: local
+networks:
+  wasa_net:
+    driver: bridge

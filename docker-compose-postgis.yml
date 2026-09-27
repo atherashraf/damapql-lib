@@ -1,0 +1,84 @@
+# ==============================================================================
+# Docker Compose: PostgreSQL 16 with PostGIS 3.4
+# Storage Mode: Host Bind Mount (Persists directly to /var/lib/postgresql/data)
+# ==============================================================================
+#
+# STORAGE BEHAVIOR & PERSISTENCE NOTICE:
+# - This configuration utilizes a direct Host Bind Mount, NOT an internal
+#   ephemeral Docker volume.
+# - All database tables, spatial indexes, PostGIS schemas, configs, and
+#   transaction logs (WAL) live persistently on your Ubuntu host at:
+#       /var/lib/postgresql/data
+# - Persistence across container life-cycles:
+#     * Running `docker compose down` will safely stop and remove the container,
+#       but DOES NOT delete or modify host files.
+#     * Even running `docker compose down -v` will NOT affect host directories.
+#     * When executing `docker compose up -d` again, PostgreSQL detects the
+#       existing database cluster (`PG_VERSION`, `base/`, `global/`) and immediately
+#       boots back up with all existing data, tables, and spatial layers intact.
+#
+# ------------------------------------------------------------------------------
+# ONE-TIME HOST INITIALIZATION (Run once before the initial launch):
+# ------------------------------------------------------------------------------
+# 1. Create the persistent host directory:
+#    sudo mkdir -p /var/lib/postgresql/data
+#
+# 2. Assign ownership to PostgreSQL inside the container (UID/GID 999):
+#    sudo chown -R 999:999 /var/lib/postgresql/data
+#    sudo chmod 700 /var/lib/postgresql/data
+#
+# ------------------------------------------------------------------------------
+# LIFECYCLE COMMANDS:
+# ------------------------------------------------------------------------------
+# Launch in background:
+#    docker compose -f docker-compose-postgis.yml up -d
+#
+# Stop container safely (data remains 100% intact on host):
+#    docker compose -f docker-compose-postgis.yml down
+#
+# Restart / Reattach to existing data:
+#    docker compose -f docker-compose-postgis.yml up -d
+#
+# Verify table persistence after restart:
+#    docker exec -it wasa-postgis psql -U wasa_user -d wasa_db -c "\dt"
+#
+# ------------------------------------------------------------------------------
+# FASTAPI / APPLICATION CONNECTION STRING:
+# ------------------------------------------------------------------------------
+#    postgresql+psycopg2://wasa_user:wasa_password@127.0.0.1:5432/wasa_db
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: wasa-postgis
+    restart: always
+
+    environment:
+      POSTGRES_USER: wasa_user
+      POSTGRES_PASSWORD: wasa_password
+      POSTGRES_DB: wasa_db
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      # Direct Host Bind Mount: <HOST_PATH>:<CONTAINER_PATH>
+      # Container maps to the host's existing data directory on every startup
+      # - <HOST_PATH>:<CONTAINER_PATH>
+      - /var/lib/postgresql/data:/var/lib/postgresql/data
+
+    networks:
+      - wasa_net
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wasa_user -d wasa_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  wasa_net:
+    driver: bridge

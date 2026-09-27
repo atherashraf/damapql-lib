@@ -1,0 +1,24 @@
+# docker-compose-redis.yml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: wasa-redis
+    restart: always
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass wasa_cache_secret
+    ports:
+      - "6379:6379"
+    volumes:
+      - /var/lib/redis/data:/data
+    networks:
+      - wasa_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "wasa_cache_secret", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  wasa_net:
+    external: true
