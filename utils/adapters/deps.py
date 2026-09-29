@@ -52,7 +52,7 @@ from app.damapql.settings import (
     MINIO_ACCESS_KEY,
     MINIO_ENDPOINT,
     MINIO_SECRET_KEY,
-    MINIO_SECURE, DCH_DATABASES,
+    MINIO_SECURE, DCH_DATABASES, MINIO_BUCKET_NAME,
 )
 from app.damapql.utils.crypto import CryptoUtils
 from settings import DATABASES
@@ -119,6 +119,7 @@ def get_minio_manager_instance() -> MinioManager:
             access_key=MINIO_ACCESS_KEY,
             secret_key=MINIO_SECRET_KEY,
             secure=MINIO_SECURE,
+            bucket_name=MINIO_BUCKET_NAME,
         )
     return _minio_instance
 
