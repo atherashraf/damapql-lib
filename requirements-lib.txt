@@ -29,3 +29,5 @@ minio~=7.2.20
 argon2-cffi~=25.1.0
 argon2-cffi-bindings~=25.1.0
 pycryptodome~=3.23.0
+
+pyarrow~=25.0.1
