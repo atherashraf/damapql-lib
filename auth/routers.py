@@ -948,9 +948,10 @@ def create_role(
             is_active=True,
         )
 
-        session.add(role)
-        session.flush()
-        session.refresh(role)
+        # session.add(role)
+        # session.flush()
+        # session.refresh(role)
+        role.save(session=session)
 
         return {
             "message": "Role created successfully",
