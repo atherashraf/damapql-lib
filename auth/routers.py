@@ -785,7 +785,7 @@ def get_user_list(
                 ),
                 selectinload(User.roles),
             )
-            .filter(User.is_active.is_(True))
+            # .filter(User.is_active.is_(True))
         )
 
         if current_user.is_superuser:
