@@ -931,10 +931,6 @@ def create_role(
             .first()
         )
 
-        da_logger.debug(f"Session: {session}")
-        da_logger.debug(f"Session bind: {session.get_bind()}")
-        da_logger.debug(f"Engine URL: {session.get_bind().url.render_as_string(hide_password=True)}")
-        da_logger.debug(f"Pool status: {session.get_bind().pool.status()}")
 
         if existing_role:
             raise HTTPException(

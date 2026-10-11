@@ -913,3 +913,35 @@ class ModelHelpersMixin:
         can be used directly on this connection.
         """
         return cls.is_postgres(app_label=app_label, db_key=db_key)
+
+    @staticmethod
+    def log_session_status(session: Session):
+        engine = session.get_bind()
+        pool = engine.pool
+        url = engine.url
+
+        pool_size = pool.size()
+        checked_out = pool.checkedout()
+        checked_in = pool.checkedin()
+        overflow = pool.overflow()
+        max_overflow = pool._max_overflow
+
+        max_connections = pool_size + max_overflow
+        utilization = (checked_out / max_connections * 100) if max_connections > 0 else 0
+
+        da_logger.debug(
+            f"\n--- SQLAlchemy Session & Pool Status ---"
+            f"\nHost             : {url.host}:{url.port}"
+            f"\nDatabase         : {url.database}"
+            f"\nUsername         : {url.username}"
+            f"\nSession Active   : {session.is_active}"
+            f"\nIn Transaction   : {session.in_transaction()}"
+            f"\nPool Size        : {pool_size}"
+            f"\nMax Overflow     : {max_overflow}"
+            f"\nMax Connections  : {max_connections}"
+            f"\nChecked Out      : {checked_out}"
+            f"\nAvailable        : {checked_in}"
+            f"\nOverflow         : {overflow}"
+            f"\nPool Utilization : {utilization:.1f}%"
+            f"\n--------------------------------------"
+        )
