@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Union, Optional, List
 
 import jwt
+from digitalarzengine.utils.singletons import da_logger
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
@@ -25,7 +26,11 @@ JWT_REFRESH_SECRET_KEY = os.environ["JWT_REFRESH_SECRET_KEY"]
 ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/swagger", scheme_name="JWT")
-
+optional_oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/auth/swagger",
+    scheme_name="OptionalJWT",
+    auto_error=False,
+)
 
 class AuthUtils:
 
@@ -78,6 +83,7 @@ class AuthUtils:
             username = payload.get("sub")
 
             if not username:
+                da_logger.error(f"Invalid token payload: {payload}")
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid token payload",
@@ -86,6 +92,7 @@ class AuthUtils:
             user = User.get_user_info(username)
 
             if not user:
+                da_logger.error(f"User {username} not found")
                 raise HTTPException(
                     status_code=401,
                     detail="User not found",
@@ -97,6 +104,7 @@ class AuthUtils:
                 ExpiredSignatureError,
                 InvalidTokenError,
         ):
+            da_logger.error("Could not validate credentials")
             raise HTTPException(
                 status_code=401,
                 detail="Could not validate credentials",
@@ -412,3 +420,13 @@ class AuthUtils:
             return required_roles.issubset(user_roles)
 
         return bool(user_roles.intersection(required_roles))
+
+    @staticmethod
+    def get_optional_user(
+            token: str | None = Depends(optional_oauth2_scheme),
+    ) -> UserInfo | None:
+        da_logger.debug(f"Optional token: {token}")
+        if not token:
+            return None
+
+        return AuthUtils.get_current_user(token)

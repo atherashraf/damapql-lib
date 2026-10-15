@@ -86,6 +86,7 @@ async def get_raster_tile(
     )
 
 
+
 @dch_tiles_router.get(
     "/layer_mvt/{uuid}/{tile_size}/{z}/{x}/{y}",
     name="get_layer_mvt",
@@ -93,7 +94,7 @@ async def get_raster_tile(
     summary="Get Mapbox Vector Tile",
 )
 def get_layer_mvt(
-    uuid: str,  # MUST match {uuid} in the path template
+    uuid: str,
     tile_size: int,
     z: int,
     x: int,
@@ -104,14 +105,9 @@ def get_layer_mvt(
     db_key: str | None = Query(None),
     resolution: float = 0,
     cols: list[str] | None = Query(None),
+    user = Depends(AuthUtils.get_current_user),
 ):
-    """
-    Unified MVT tile endpoint supporting:
-    1. LayerInfo UUID lookup
-    2. SQLAlchemy model lookup
-    3. Direct PostGIS table lookup
-    """
-    identifier = uuid  # Preserves downstream identifier naming
+    identifier = uuid
 
     model_cls = None
     external_engine = None
@@ -137,15 +133,11 @@ def get_layer_mvt(
         if not access:
             return Response(status_code=204, headers=MVT_HEADERS)
 
-        layer_total_rows = info.count_layer_rows()
-        if layer_total_rows == 0:
-            return Response(
-                content=b"",
-                media_type=MVT_MEDIA_TYPE,
-                headers=MVT_HEADERS,
-            )
+        # Use cached row count from layer metadata; never run COUNT(*) per tile
+        feature_count = getattr(info, "total_rows", None)
+        if feature_count == 0:
+            return Response(content=b"", media_type=MVT_MEDIA_TYPE, headers=MVT_HEADERS)
 
-        feature_count = layer_total_rows
         external_engine = access.get_external_engine()
         target_table = access.table_name
         target_geom = access.geometry_col
@@ -212,10 +204,13 @@ def get_layer_mvt(
             return Response(content=b"", media_type=MVT_MEDIA_TYPE, headers=MVT_HEADERS)
 
     # -------------------------------------------------------------
-    # COLUMNS & RESOLUTION
+    # COLUMNS FILTER & RESOLUTION
     # -------------------------------------------------------------
-    requested_cols = sorted(allowed_cols)
-    da_logger.debug(f"Requested columns: {requested_cols}")
+    # Intersect with client requested columns to minimize payload & query cost
+    if cols:
+        requested_cols = sorted(allowed_cols.intersection(cols))
+    else:
+        requested_cols = sorted(allowed_cols)
 
     if resolution <= 0:
         resolution = 78271.52 / (2 ** z)
@@ -236,13 +231,13 @@ def get_layer_mvt(
         return Response(content=cached, media_type=MVT_MEDIA_TYPE, headers=MVT_HEADERS)
 
     # -------------------------------------------------------------
-    # DISTRIBUTED TILE LOCK & RECHECK
+    # DISTRIBUTED TILE LOCK & RETRY
     # -------------------------------------------------------------
     lock_token = mvt_cache.acquire_tile_lock(identifier, x, y, z, variant)
 
     if lock_token is None:
         for _ in range(10):
-            time.sleep(0.1)
+            time.sleep(0.05)
             cached = mvt_cache.get_cached_tile(identifier, x, y, z, variant)
             if cached is not None:
                 return Response(content=cached, media_type=MVT_MEDIA_TYPE, headers=MVT_HEADERS)
@@ -273,7 +268,8 @@ def get_layer_mvt(
                 else pk_sql_fragment
             )
             safe_geom = DBQuery.safe_ident(target_geom)
-            safe_table = DBQuery.safe_ident(target_table)
+            # Safe schema.table resolution
+            safe_table = ".".join(DBQuery.safe_ident(part) for part in target_table.split("."))
 
             stmt = f"SELECT {all_cols_sql}, {safe_geom} FROM {safe_table}"
 
@@ -290,7 +286,6 @@ def get_layer_mvt(
                     resolution=resolution,
                 )
 
-        # Cache valid result (empty tiles cached to avoid redundant expensive DB hits)
         if mvt_bytes is not None:
             mvt_cache.set_cached_tile(identifier, x, y, z, variant, mvt_bytes)
 
