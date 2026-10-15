@@ -105,7 +105,7 @@ def get_layer_mvt(
     db_key: str | None = Query(None),
     resolution: float = 0,
     cols: list[str] | None = Query(None),
-    user = Depends(AuthUtils.get_current_user),
+    user = Depends(AuthUtils.get_optional_user),
 ):
     identifier = uuid
 
