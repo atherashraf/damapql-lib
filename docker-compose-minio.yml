@@ -178,14 +178,14 @@
 # Expected result:
 #   HTTP 200 indicates that the server is responding.
 #
-# Inspect container health:
+# Inspect container status:
 #
 #   sudo docker inspect damapql-minio \
-#     --format='{{json .State.Health}}'
+#     --format='{{.State.Status}}'
 #
-# The container healthcheck requires a compatible executable.
-# Verify that the selected hardened image includes the required
-# healthcheck utility.
+# The hardened dhi.io/minio image has no shell, curl, wget, or mc, so an
+# in-container Docker healthcheck cannot run. Rely on the host curl to
+# /minio/health/live (above). healthcheck is disabled in the service block.
 #
 # ==============================================================================
 # 7. MULTI-APPLICATION STORAGE MANAGEMENT
@@ -244,9 +244,7 @@ services:
       - --console-address
       - ":9001"
 
+    # Hardened image has no mc/curl/sh — in-container checks always fail.
+    # Probe from the host: curl -f http://127.0.0.1:9000/minio/health/live
     healthcheck:
-      test: [ "CMD", "mc", "ready", "local" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      disable: true
