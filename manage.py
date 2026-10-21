@@ -2421,6 +2421,7 @@ def main():
         print("💥 Execution failed:")
         traceback.print_exc()
 
+from app.damapql.scripts.minio_manage_integration import *
 
 if __name__ == "__main__":
     main()
