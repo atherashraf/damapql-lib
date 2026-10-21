@@ -137,8 +137,8 @@
 #
 # Restart or recreate:
 #
-#   sudo docker compose --env-file .env \
-#     -f app/damapql/docker-compose-minio.yml up -d
+#   sudo docker compose --env-file .env -f app/damapql/docker-compose-minio.yml up -d
+#
 #
 # ==============================================================================
 # 5. ENDPOINTS AND CONNECTIVITY
@@ -233,10 +233,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
 
     volumes:
-      # Persistent host storage shared across applications
-      # Hardened MinIO uses UID/GID 65532
-      # <Host> : <Container>
-      - /var/lib/minio/data:/data
+      - /home/idss/idss_be/minio_data:/data
 
     command:
       - server
@@ -245,7 +242,7 @@ services:
       - ":9001"
 
     healthcheck:
-      test: [ "CMD", "mc", "ready", "local" ]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 30s
       timeout: 10s
       retries: 3
