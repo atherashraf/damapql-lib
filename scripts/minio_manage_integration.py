@@ -1,24 +1,45 @@
 """Copy these functions/imports into app/damapql/manage.py.
 Adjust the MinioManager import to its actual location in your project.
-Backup complete bucket
+
+=============================================================================
+BACKUP EXAMPLES
+=============================================================================
+
+Backup complete bucket (as ZIP archive by default)
     python -m app.damapql.manage backup_minio --bucket lbdc-rasters --dest ./backups
-Backup specific subfolder
+
+Backup specific subfolder / prefix
     python -m app.damapql.manage backup_minio --bucket lbdc --prefix rasters/ --dest ./backups
 
-Preview restore
-    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP --mode dry-run
+Backup without compression (faster for already-compressed rasters/images)
+    python -m app.damapql.manage backup_minio --bucket lbdc --dest ./backups --compress false
 
-Restore into another bucket
-    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP --bucket lbdc-restored --mode overwrite --verify true
+Backup to uncompressed folder directory instead of ZIP (legacy format)
+    python -m app.damapql.manage backup_minio --bucket lbdc --dest ./backups --as_zip false
 
-Restore selected subfolder
-    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP --prefix rasters/ --mode skip
+=============================================================================
+RESTORE EXAMPLES (Supports both .zip archives and directory paths)
+=============================================================================
 
+Restore into the ORIGINAL / SAME bucket
+    # Omitting --bucket automatically restores back into the bucket recorded in manifest.json:
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --mode overwrite
+
+    # Or explicitly specify the same bucket name:
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --bucket lbdc --mode overwrite
+
+    # Safe restore (only restores missing files, skips existing ones):
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --mode skip
+
+Preview restore without uploading (Dry-Run)
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --mode dry-run
+
+Restore into a DIFFERENT bucket
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --bucket lbdc-restored --mode overwrite --verify true
+
+Restore selected subfolder / prefix only
+    python -m app.damapql.manage restore_minio --source ./backups/lbdc/TIMESTAMP.zip --prefix rasters/ --mode skip
 """
-import os
-
-from app.damapql.scripts.minio_backup import MinioBackupManager
-from digitalarzengine.io.managers.minio_manager import MinioManager
 
 import os
 
