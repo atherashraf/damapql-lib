@@ -185,3 +185,49 @@ def clear_minio_bucket(
         "remaining": 0,
         "dry_run": False,
     }
+
+
+def minio_bucket_info(bucket: str = "lbdc-rasters") -> dict:
+    """
+    Display MinIO bucket statistics.
+
+    Example:
+        python -m app.damapql.manage minio_bucket_info \
+            --bucket lbdc-rasters
+    """
+
+    service = _minio_backup_service()
+    client = service.client
+
+    if not client.bucket_exists(bucket):
+        raise ValueError(f"MinIO bucket does not exist: {bucket}")
+
+    total_objects = 0
+    total_bytes = 0
+
+    for obj in client.list_objects(bucket, recursive=True):
+        if obj.object_name.endswith("/"):
+            continue
+
+        total_objects += 1
+        total_bytes += obj.size or 0
+
+    total_mb = round(total_bytes / (1024 ** 2), 2)
+    total_gb = round(total_bytes / (1024 ** 3), 3)
+
+    print("=" * 50)
+    print("MINIO BUCKET INFORMATION")
+    print("=" * 50)
+    print(f"Bucket        : {bucket}")
+    print(f"Total Objects : {total_objects:,}")
+    print(f"Total Size    : {total_mb:,.2f} MB")
+    print(f"Total Size    : {total_gb:,.3f} GB")
+    print("=" * 50)
+
+    return {
+        "bucket": bucket,
+        "total_objects": total_objects,
+        "total_bytes": total_bytes,
+        "total_mb": total_mb,
+        "total_gb": total_gb,
+    }
