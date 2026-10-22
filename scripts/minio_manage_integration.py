@@ -95,3 +95,93 @@ def restore_minio(source: str, bucket: str = None, prefix: str = "",
         mode=mode,
         verify=str(verify).lower() in ("true", "1", "yes"),
     )
+
+
+def clear_minio_bucket(
+    bucket: str,
+    confirm: str | bool = False,
+    dry_run: str | bool = True,
+):
+    """
+    Delete all current objects from a MinIO bucket.
+
+    Examples:
+        # Preview objects
+        python -m app.damapql.manage clear_minio_bucket \
+            --bucket lbdc-rasters
+
+        # Permanently delete objects
+        python -m app.damapql.manage clear_minio_bucket \
+            --bucket lbdc-rasters \
+            --confirm true \
+            --dry_run false
+
+    Notes:
+        - Preserves the bucket itself.
+        - Does not delete local ZIP backups.
+        - Does not remove historical versions in versioned buckets.
+    """
+
+    is_confirmed = str(confirm).lower() in ("true", "1", "yes")
+    is_dry_run = str(dry_run).lower() in ("true", "1", "yes")
+
+    service = _minio_backup_service()
+    client = service.client
+
+    if not client.bucket_exists(bucket):
+        raise ValueError(f"Bucket does not exist: {bucket}")
+
+    objects = list(client.list_objects(bucket, recursive=True))
+    count = len(objects)
+    total_size = sum(obj.size or 0 for obj in objects)
+
+    print(f"Bucket: {bucket}")
+    print(f"Objects: {count}")
+    print(f"Total size: {total_size / (1024 ** 2):.2f} MB")
+
+    if is_dry_run:
+        print("DRY RUN: No objects deleted.")
+        return {
+            "bucket": bucket,
+            "selected": count,
+            "deleted": 0,
+            "dry_run": True,
+        }
+
+    if not is_confirmed:
+        raise ValueError(
+            "Deletion requires --confirm true --dry_run false"
+        )
+
+    from minio.deleteobjects import DeleteObject
+
+    errors = list(
+        client.remove_objects(
+            bucket,
+            (DeleteObject(obj.object_name) for obj in objects),
+        )
+    )
+
+    if errors:
+        for error in errors:
+            print(f"DELETE ERROR: {error}")
+        raise RuntimeError(
+            f"Failed to delete all objects from bucket '{bucket}'"
+        )
+
+    remaining = list(client.list_objects(bucket, recursive=True))
+
+    if remaining:
+        raise RuntimeError(
+            f"Bucket '{bucket}' still contains {len(remaining)} objects"
+        )
+
+    print(f"SUCCESS: Cleared bucket '{bucket}'")
+
+    return {
+        "bucket": bucket,
+        "selected": count,
+        "deleted": count,
+        "remaining": 0,
+        "dry_run": False,
+    }
