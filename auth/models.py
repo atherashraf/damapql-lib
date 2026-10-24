@@ -1,9 +1,9 @@
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 import sqlalchemy as db
-from sqlalchemy import select
+from sqlalchemy import select, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship, selectinload, validates
 
 from app.damapql.auth.dtypes import ProfileType, UserInfo
@@ -459,3 +459,52 @@ class User(DBBase):
                 return []
 
             return [role.name for role in user.roles]
+
+
+class OTPAuthenticator(DBBase):
+    __tablename__ = "otp_authenticators"
+
+    __table_args__ = (UniqueConstraint("application_code", "code", name="uq_otp_authenticator_app_code", ),)
+
+    id: Mapped[int] = mapped_column(db.Integer, primary_key=True, autoincrement=True, )
+
+    # LBDC, WASA, PLRA, etc.
+    application_code: Mapped[str] = mapped_column(db.String(50), nullable=False, index=True, )
+
+    # LUMS, PU, PID, ADMIN, etc.
+    code: Mapped[str] = mapped_column(db.String(50), nullable=False, )
+
+    name: Mapped[str] = mapped_column(db.String(150), nullable=False, )
+
+    encrypted_totp_secret: Mapped[str] = mapped_column(db.String(512), nullable=False, )
+
+    # e.g. lbdc:advisory:tune,lbdc:advisory:execute
+    permissions: Mapped[List[str]] = mapped_column(db.JSON, nullable=False, default=list, )
+
+    is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, )
+
+    last_accepted_step: Mapped[int | None] = mapped_column(db.BigInteger, nullable=True, )
+
+    # Inside OTPAuthenticator
+    sessions: Mapped[List["OTPAuthorizationSession"]] = relationship("OTPAuthorizationSession",
+        back_populates="authenticator", lazy="raise", )
+    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc), )
+
+
+class OTPAuthorizationSession(DBBase):
+    __tablename__ = "otp_authorization_sessions"
+
+    id: Mapped[str] = mapped_column(db.String(64), primary_key=True, )
+
+    authenticator_id: Mapped[int] = mapped_column(db.ForeignKey("otp_authenticators.id"), nullable=False, index=True, )
+
+    expires_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, )
+
+    revoked: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False, )
+
+    # Inside OTPAuthorizationSession
+    authenticator: Mapped["OTPAuthenticator"] = relationship("OTPAuthenticator", back_populates="sessions", )
+
+    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc), )

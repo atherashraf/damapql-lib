@@ -2387,6 +2387,8 @@ def clear_cache():
         raise
 
 
+
+
 # --- SYSTEM ---
 
 def help():
@@ -2422,6 +2424,7 @@ def main():
         traceback.print_exc()
 
 from app.damapql.scripts.minio_manage_integration import *
+from app.damapql.auth.manage.google_authenticator import *
 
 if __name__ == "__main__":
     main()
