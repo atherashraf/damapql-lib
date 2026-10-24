@@ -1,6 +1,7 @@
 import traceback
 from datetime import datetime, timezone
 from typing import Optional, List
+from uuid import uuid4
 
 import sqlalchemy as db
 from sqlalchemy import select, UniqueConstraint
@@ -461,50 +462,170 @@ class User(DBBase):
             return [role.name for role in user.roles]
 
 
+
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class OTPAuthenticator(DBBase):
+    """
+    Team-level TOTP authenticator.
+
+    One authenticator per (application_code, code).
+
+    Example:
+        application_code = "LBDC"
+        code = "PID"
+
+    Multiple users may share this authenticator.
+    Each user receives an independent authorization session
+    after successfully verifying an unused TOTP code.
+    """
+
     __tablename__ = "otp_authenticators"
 
-    __table_args__ = (UniqueConstraint("application_code", "code", name="uq_otp_authenticator_app_code", ),)
+    __table_args__ = (UniqueConstraint("application_code", "code", name="uq_otp_authenticator_application_team", ),
+                      db.Index("ix_otp_authenticator_application_active", "application_code", "is_active", ),)
 
     id: Mapped[int] = mapped_column(db.Integer, primary_key=True, autoincrement=True, )
 
-    # LBDC, WASA, PLRA, etc.
-    application_code: Mapped[str] = mapped_column(db.String(50), nullable=False, index=True, )
+    application_code: Mapped[str] = mapped_column(db.String(32), nullable=False, index=True, )
 
-    # LUMS, PU, PID, ADMIN, etc.
-    code: Mapped[str] = mapped_column(db.String(50), nullable=False, )
+    code: Mapped[str] = mapped_column(db.String(32), nullable=False, index=True, )
 
-    name: Mapped[str] = mapped_column(db.String(150), nullable=False, )
+    name: Mapped[str] = mapped_column(db.String(255), nullable=False, )
 
+    # Encrypted with the persistent Fernet encryption key.
     encrypted_totp_secret: Mapped[str] = mapped_column(db.String(512), nullable=False, )
 
-    # e.g. lbdc:advisory:tune,lbdc:advisory:execute
-    permissions: Mapped[List[str]] = mapped_column(db.JSON, nullable=False, default=list, )
+    # Example:
+    # ["lbdc:advisory:tune", "lbdc:advisory:execute"]
+    permissions: Mapped[list[str]] = mapped_column(db.JSON, nullable=False, default=list, )
 
-    is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=True, )
+    # Enrollment / administrative status.
+    # Does NOT represent whether a form is currently open.
+    is_active: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False, )
 
-    last_accepted_step: Mapped[int | None] = mapped_column(db.BigInteger, nullable=True, )
+    # Prevents reuse of a TOTP time step across all team members.
+    last_accepted_step: Mapped[Optional[int]] = mapped_column(db.BigInteger, nullable=True, )
 
-    # Inside OTPAuthenticator
-    sessions: Mapped[List["OTPAuthorizationSession"]] = relationship("OTPAuthorizationSession",
+    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utc_now, )
+
+    updated_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utc_now,
+        onupdate=utc_now, )
+
+    sessions: Mapped[list["OTPAuthorizationSession"]] = relationship("OTPAuthorizationSession",
         back_populates="authenticator", lazy="raise", )
-    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False,
-        default=lambda: datetime.now(timezone.utc), )
+
+    def __repr__(self) -> str:
+        return (f"<OTPAuthenticator("
+                f"id={self.id}, "
+                f"application_code={self.application_code!r}, "
+                f"code={self.code!r}, "
+                f"is_active={self.is_active}"
+                f")>")
 
 
 class OTPAuthorizationSession(DBBase):
+    """
+    User-bound, form-scoped step-up authorization session.
+
+    Lifecycle:
+        OTP verified -> OPEN
+        Form in use -> OPEN
+        Form closed -> REVOKED
+        Idle/max lifetime exceeded -> EXPIRED (derived)
+
+    The backend must validate this session for protected
+    operations, including RAM optimizer execution.
+    """
+
     __tablename__ = "otp_authorization_sessions"
 
-    id: Mapped[str] = mapped_column(db.String(64), primary_key=True, )
+    __table_args__ = (db.Index("ix_otp_session_authenticator_revoked", "authenticator_id", "revoked", ),
+                      db.Index("ix_otp_session_user_form", "user_id", "form_code", ),
+                      db.Index("ix_otp_session_expires_at", "expires_at", ),)
 
-    authenticator_id: Mapped[int] = mapped_column(db.ForeignKey("otp_authenticators.id"), nullable=False, index=True, )
+    # UUID identifies the session record.
+    id: Mapped[str] = mapped_column(db.String(64), primary_key=True, default=lambda: uuid4().hex, )
 
+    authenticator_id: Mapped[int] = mapped_column(db.Integer,
+        db.ForeignKey("otp_authenticators.id", ondelete="CASCADE", ), nullable=False, )
+
+    # Store the authenticated DAMapQL user's ID.
+    # Change this column type if your User model uses
+    # a UUID or string primary key.
+    user_id: Mapped[int] = mapped_column(db.Integer, nullable=False, index=True, )
+
+    # Example: LBDC_RAM_OPTIMIZER
+    form_code: Mapped[str] = mapped_column(db.String(100), nullable=False, )
+
+    # SHA-256 hash of the random session token.
+    # Never store the plaintext bearer token.
+    token_hash: Mapped[str] = mapped_column(db.String(64), nullable=False, unique=True, )
+
+    # Snapshot of permissions granted at unlock time.
+    # Must also be checked against current authenticator
+    # permissions to respect later administrative changes.
+    permissions: Mapped[list[str]] = mapped_column(db.JSON, nullable=False, default=list, )
+
+    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utc_now, )
+
+    last_activity_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, default=utc_now, )
+
+    # Absolute maximum session lifetime.
+    # The authorization service assigns this on creation.
     expires_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False, )
 
+    # True when the form is explicitly closed or access
+    # is administratively revoked.
     revoked: Mapped[bool] = mapped_column(db.Boolean, nullable=False, default=False, )
 
-    # Inside OTPAuthorizationSession
-    authenticator: Mapped["OTPAuthenticator"] = relationship("OTPAuthenticator", back_populates="sessions", )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(db.DateTime(timezone=True), nullable=True, )
 
-    created_at: Mapped[datetime] = mapped_column(db.DateTime(timezone=True), nullable=False,
-        default=lambda: datetime.now(timezone.utc), )
+    authenticator: Mapped["OTPAuthenticator"] = relationship("OTPAuthenticator", back_populates="sessions",
+        lazy="raise", )
+
+    def is_valid(self, now: Optional[datetime] = None, idle_timeout_seconds: int = 1800, ) -> bool:
+        """
+        Local time/status check only.
+
+        The authorization service must additionally verify:
+        - Session token hash
+        - Authenticated user identity
+        - Form code
+        - Required permission
+        - Authenticator active status
+        - Current authenticator permissions
+        """
+        now = now or utc_now()
+
+        if self.revoked:
+            return False
+
+        if now >= self.expires_at:
+            return False
+
+        idle_seconds = (now - self.last_activity_at).total_seconds()
+
+        if idle_seconds >= idle_timeout_seconds:
+            return False
+
+        return True
+
+    def revoke(self) -> None:
+        self.revoked = True
+        self.revoked_at = utc_now()
+
+    def touch(self) -> None:
+        self.last_activity_at = utc_now()
+
+    def __repr__(self) -> str:
+        return (f"<OTPAuthorizationSession("
+                f"id={self.id!r}, "
+                f"user_id={self.user_id}, "
+                f"form_code={self.form_code!r}, "
+                f"revoked={self.revoked}"
+                f")>")
