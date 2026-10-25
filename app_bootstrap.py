@@ -4,6 +4,7 @@ import importlib
 from collections.abc import Callable
 from typing import Any
 
+from app.damapql.auth.auth_2FA_routers import router_2fa
 from app.damapql.cache.cache import RedisState, redis_client, REDIS_NAMESPACE
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import FastAPI
@@ -118,6 +119,7 @@ def configure_core_routers(app: FastAPI) -> None:
     app.include_router(auth_router, prefix="/auth", )
 
     app.include_router(dch_router, prefix="/dch", )
+    app.include_router(router_2fa, prefix="/auth")
 
 
 def create_app(port, title, description) -> FastAPI:
