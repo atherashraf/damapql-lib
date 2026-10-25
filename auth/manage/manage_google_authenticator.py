@@ -36,6 +36,18 @@ Deactivate authenticator:
     python -m app.damapql.manage deactivate_otp_authenticator \
     --application_code LBDC --code PID
 
+# Assign permissions to the existing PID team
+python -m app.damapql.manage set_otp_permissions --application_code LBDC --code PID --permissions "lbdc:advisory:tune,lbdc:advisory:execute"
+
+# Test an already verified authenticator
+python -m app.damapql.manage test_otp_authenticator --application_code LBDC --code PID
+
+# Suspend the team
+python -m app.damapql.manage deactivate_otp_authenticator --application_code LBDC --code PID
+
+# Restore a suspended team
+python -m app.damapql.manage activate_otp_authenticator --application_code LBDC --code PID
+
 """
 
 from __future__ import annotations
@@ -149,16 +161,23 @@ def _get_authenticator(session, application_code: str, code: str, *, lock: bool 
 
 
 def _revoke_sessions(session, authenticator_id: int) -> int:
-    """Revoke all outstanding form sessions, including timestamp."""
+    """
+    Revoke all outstanding authorization sessions
+    associated with an authenticator.
+
+    Returns the number of revoked sessions.
+    """
     now = datetime.now(timezone.utc)
+
     result = session.execute(
         update(OTPAuthorizationSession)
         .where(
             OTPAuthorizationSession.authenticator_id == authenticator_id,
-            OTPAuthorizationSession.revoked.is_(False),
+            OTPAuthorizationSession.revoked_at.is_(None),
         )
-        .values(revoked=True, revoked_at=now)
+        .values(revoked_at=now)
     )
+
     return result.rowcount or 0
 
 
@@ -203,7 +222,8 @@ def create_otp_authenticator(
                 name=name,
                 encrypted_totp_secret=manager.encrypt_secret(enrollment.secret),
                 permissions=permission_list,
-                is_active=False,
+                verified_at=None,
+                suspended_at=None,
                 last_accepted_step=None,
             )
             session.add(record)
@@ -256,11 +276,7 @@ def show_otp_authenticator(
 
 
 def verify_otp_authenticator(application_code: str, code: str):
-    """Activate enrollment or test a new unused OTP for an active team.
-
-    This is an admin CLI command, NOT a form-unlock operation.
-    A successfully tested OTP consumes its time step for the whole team.
-    """
+    """Verify initial enrollment only; consumes one team-wide TOTP step."""
     application_code, code = _normalize_otp_identity(application_code, code)
     manager = _get_otp_manager()
     otp = getpass.getpass("Enter Google Authenticator 6-digit code: ").strip()
@@ -269,6 +285,10 @@ def verify_otp_authenticator(application_code: str, code: str):
     with OTPAuthenticator.managed_session(app_label="auth") as session:
         record = _get_authenticator(session, application_code, code, lock=True)
         already_active = record.is_active
+        if already_active:
+            raise ValueError("Already enrolled; use test_otp_authenticator")
+        if record.suspended_at is not None:
+            raise ValueError("Authenticator is administratively suspended")
         secret = manager.decrypt_secret(record.encrypted_totp_secret)
         step = manager.get_matched_step(
             secret=secret,
@@ -279,11 +299,10 @@ def verify_otp_authenticator(application_code: str, code: str):
         if step is None:
             raise ValueError("Invalid, expired, or previously used OTP")
         record.last_accepted_step = step
-        if not already_active:
-            record.is_active = True
+        record.verified_at = datetime.now(timezone.utc)
         session.commit()
     print(f"OTP VALID: {application_code}:{code}")
-    print("Status: ALREADY ACTIVE" if already_active else "Status: ACTIVATED")
+    print("Status: ACTIVATED")
     print("Note: this OTP step is now consumed for all team members.")
 
 
@@ -342,7 +361,8 @@ def rotate_otp_authenticator(
             record = _get_authenticator(session, application_code, code, lock=True)
             record.encrypted_totp_secret = manager.encrypt_secret(enrollment.secret)
             record.last_accepted_step = None
-            record.is_active = False
+            record.verified_at = None
+            record.suspended_at = None
             revoked_count = _revoke_sessions(session, record.id)
             session.commit()
     except Exception:
@@ -365,9 +385,7 @@ def rotate_otp_authenticator(
 def deactivate_otp_authenticator(application_code: str, code: str):
     """Administratively disable a team and revoke its form sessions.
 
-    IMPORTANT: Current model has only is_active. The verify CLI can
-    reactivate this record with a valid TOTP. To enforce admin-only
-    reactivation, add a separate enrollment/status field in the model.
+    A suspended team cannot be reactivated by submitting a TOTP.
     """
     application_code, code = _normalize_otp_identity(application_code, code)
     if input(f"Deactivate {application_code}:{code}? Type DEACTIVATE: ").strip() != "DEACTIVATE":
@@ -375,8 +393,67 @@ def deactivate_otp_authenticator(application_code: str, code: str):
         return
     with OTPAuthenticator.managed_session(app_label="auth") as session:
         record = _get_authenticator(session, application_code, code, lock=True)
-        record.is_active = False
+        record.suspended_at = datetime.now(timezone.utc)
         count = _revoke_sessions(session, record.id)
         session.commit()
     print(f"Deactivated: {application_code}:{code}; revoked sessions: {count}")
-    print("Warning: verification with a valid OTP can reactivate this record.")
+    print("Team is suspended; OTP verification cannot reactivate it.")
+
+
+def set_otp_permissions(application_code: str, code: str, permissions: str = ""):
+    """Replace team permissions. Empty permissions remove all access."""
+    application_code, code = _normalize_otp_identity(application_code, code)
+    new_permissions = _parse_otp_permissions(permissions, application_code)
+    with OTPAuthenticator.managed_session(app_label="auth") as session:
+        record = _get_authenticator(session, application_code, code, lock=True)
+        previous = list(record.permissions or [])
+        print(f"Current permissions: {previous}")
+        print(f"New permissions    : {new_permissions}")
+        if input("Replace permissions? Type SET: ").strip() != "SET":
+            print("Cancelled.")
+            return
+        record.permissions = new_permissions
+        session.commit()
+    print(f"Permissions updated for {application_code}:{code}")
+    print("Existing sessions must be checked against current team permissions.")
+
+
+def activate_otp_authenticator(application_code: str, code: str):
+    """Administratively restore a previously verified, suspended team."""
+    application_code, code = _normalize_otp_identity(application_code, code)
+    with OTPAuthenticator.managed_session(app_label="auth") as session:
+        record = _get_authenticator(session, application_code, code, lock=True)
+        if record.verified_at is None:
+            raise ValueError("Enrollment is not verified; run verify_otp_authenticator")
+        if record.suspended_at is None:
+            print("Authenticator is already active.")
+            return
+        if input(f"Restore {application_code}:{code}? Type ACTIVATE: ").strip() != "ACTIVATE":
+            print("Cancelled.")
+            return
+        record.suspended_at = None
+        session.commit()
+    print(f"Authenticator restored: {application_code}:{code}")
+
+
+def test_otp_authenticator(application_code: str, code: str):
+    """Test a fresh OTP, consuming its step without changing enrollment state."""
+    application_code, code = _normalize_otp_identity(application_code, code)
+    manager = _get_otp_manager()
+    otp = getpass.getpass("Enter Google Authenticator 6-digit code: ").strip()
+    if manager.normalize_otp(otp) is None:
+        raise ValueError("OTP must contain exactly six digits")
+    with OTPAuthenticator.managed_session(app_label="auth") as session:
+        record = _get_authenticator(session, application_code, code, lock=True)
+        if not record.is_active:
+            raise ValueError("Authenticator is not active")
+        secret = manager.decrypt_secret(record.encrypted_totp_secret)
+        step = manager.get_matched_step(
+            secret=secret, otp_code=otp, valid_window=1,
+            last_accepted_step=record.last_accepted_step,
+        )
+        if step is None:
+            raise ValueError("Invalid, expired, or previously used OTP")
+        record.last_accepted_step = step
+        session.commit()
+    print(f"OTP VALID: {application_code}:{code}; step consumed")
