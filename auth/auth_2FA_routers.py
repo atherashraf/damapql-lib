@@ -382,6 +382,28 @@ def verify_otp(
 # ============================================================
 # 2. Create persistent authorization session
 # ============================================================
+def _get_team(
+    session,
+    application_code: str,
+    team_code: str,
+):
+    application_code, team_code = _normalize_otp_identity(
+        application_code,
+        team_code,
+    )
+
+    try:
+        return _get_authenticator(
+            session,
+            application_code,
+            team_code,
+            lock=True,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticator unavailable",
+        )
 
 @router_2fa.post(
     "/create_session",
@@ -389,9 +411,7 @@ def verify_otp(
 )
 def create_session(
     payload: CreateSessionRequest,
-    current_user: UserInfo = Depends(
-        AuthUtils.get_current_user
-    ),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Verify OTP and create a persistent authorization session.
@@ -401,7 +421,14 @@ def create_session(
     - Team authenticator
     - Form code
     - Permissions at creation time
+
+    First successful OTP verification activates an authenticator
+    that is pending enrollment.
+
+    Suspended or administratively deactivated authenticators
+    cannot reactivate themselves.
     """
+
     user_id = _user_id(current_user)
     form_code = _normalize_form_code(payload.form_code)
 
@@ -409,13 +436,34 @@ def create_session(
         app_label="auth"
     ) as session:
 
-        team = _get_active_team(
+        # --------------------------------------------------
+        # 1. Retrieve authenticator with row-level lock.
+        #    Do not require is_active=True yet.
+        # --------------------------------------------------
+        team = _get_team(
             session,
             payload.application_code,
             payload.team_code,
         )
 
-        # Verify and consume OTP using tested manager methods.
+        # --------------------------------------------------
+        # 2. Validate authenticator lifecycle
+        # --------------------------------------------------
+        if team.suspended_at is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="Authenticator suspended",
+            )
+
+        if not team.is_active and team.verified_at is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="Authenticator administratively inactive",
+            )
+
+        # --------------------------------------------------
+        # 3. Verify and consume OTP exactly once
+        # --------------------------------------------------
         _consume_otp(
             session=session,
             team=team,
@@ -424,7 +472,31 @@ def create_session(
 
         now = _now()
 
-        # Revoke previous sessions for this user/form.
+        # --------------------------------------------------
+        # 4. Automatically activate pending enrollment
+        # --------------------------------------------------
+        if not team.is_active:
+            team.is_active = True
+            team.verified_at = now
+            team.updated_at = now
+
+        # --------------------------------------------------
+        # 5. Obtain current team permissions
+        # --------------------------------------------------
+        permissions = sorted(
+            set(team.permissions or [])
+        )
+
+        # Do not issue a session with no permissions.
+        if not permissions:
+            raise HTTPException(
+                status_code=403,
+                detail="No permissions assigned to this authenticator",
+            )
+
+        # --------------------------------------------------
+        # 6. Revoke previous sessions for this user/form
+        # --------------------------------------------------
         session.execute(
             update(OTPAuthorizationSession)
             .where(
@@ -435,11 +507,10 @@ def create_session(
             .values(revoked_at=now)
         )
 
+        # --------------------------------------------------
+        # 7. Generate secure authorization session token
+        # --------------------------------------------------
         raw_token = secrets.token_urlsafe(48)
-
-        permissions = sorted(
-            set(team.permissions or [])
-        )
 
         record = OTPAuthorizationSession(
             authenticator_id=team.id,
@@ -455,6 +526,11 @@ def create_session(
         )
 
         session.add(record)
+
+        # --------------------------------------------------
+        # 8. Commit activation, OTP consumption, and session
+        #    creation in one transaction
+        # --------------------------------------------------
         session.flush()
         session.commit()
 
