@@ -41,9 +41,7 @@ from app.damapql.auth.models import (
     OTPAuthorizationSession,
 )
 from app.damapql.auth.utils import AuthUtils
-
-
-
+from digitalarzengine.utils.singletons import da_logger
 
 router_2fa = APIRouter(
     prefix="/2fa",
@@ -489,10 +487,14 @@ def create_session(
 
         # Do not issue a session with no permissions.
         if not permissions:
-            raise HTTPException(
-                status_code=403,
-                detail="No permissions assigned to this authenticator",
+            # raise HTTPException(
+            #     status_code=403,
+            #     detail="No permissions assigned to this authenticator",
+            # )
+            da_logger.warning(
+                "No permissions assigned to this authenticator"
             )
+
 
         # --------------------------------------------------
         # 6. Revoke previous sessions for this user/form
