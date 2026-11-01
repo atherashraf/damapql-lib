@@ -9,17 +9,18 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.parse import quote_plus
-from typing import Any
+from typing import Any, Optional, Dict, List
 
 import geopandas as gpd
+import pandas as pd
 from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 from pyproj import Transformer
 from sqlalchemy import create_engine, select, text, inspect
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
-
-
+from starlette.background import BackgroundTask
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
@@ -484,8 +485,8 @@ async def save_map_info(request: Request, current_user: UserInfo = Depends(AuthU
 
 @dch_admin_router.post("/save_layer_info/")
 async def save_layer_info(
-    request: Request,
-    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+        request: Request,
+        current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
     """
     Update LayerInfo row fields dynamically.
@@ -493,7 +494,7 @@ async def save_layer_info(
     Expected JSON:
     {
       "pk": {"colName": "id", "colValue": 1},
-      "rowData": {"title": "Updated title", "extent": "[...]"}
+      "rowData": {"title": "Updated title", "extent": "[...]", "model_name": "NewModel"}
     }
     """
     require_dch_admin(current_user)
@@ -512,20 +513,47 @@ async def save_layer_info(
 
     try:
         with LayerInfo.managed_session() as session:
-            stmt = select(LayerInfo).where(getattr(LayerInfo, pk_col) == pk_val)
+            # 1. Eagerly load layer_accessibility so its params dict is available in session
+            stmt = (
+                select(LayerInfo)
+                .options(selectinload(LayerInfo.layer_accessibility))
+                .where(getattr(LayerInfo, pk_col) == pk_val)
+            )
             obj: LayerInfo = session.execute(stmt).scalar_one_or_none()
 
             if obj is None:
                 raise HTTPException(status_code=404, detail="LayerInfo not found")
 
             # -------------------------------------------------------------
-            # 1. Resolve Category ID from 'main' / 'sub' / combined label
+            # 2. Synchronize LayerAccessibility Params (model_name, table_name)
+            # -------------------------------------------------------------
+            if "model_name" in row_data:
+                model_name_val = row_data["model_name"]
+
+                # Update LayerInfo.model_name attribute if the column exists
+                if hasattr(obj, "model_name"):
+                    obj.model_name = model_name_val
+
+                # Update LayerAccessibility.params['model_name']
+                if obj.layer_accessibility:
+                    current_params = dict(obj.layer_accessibility.params or {})
+                    current_params["model_name"] = model_name_val
+                    obj.layer_accessibility.params = current_params
+                    flag_modified(obj.layer_accessibility, "params")
+
+            if "table_name" in row_data and obj.layer_accessibility:
+                current_params = dict(obj.layer_accessibility.params or {})
+                current_params["table_name"] = row_data["table_name"]
+                obj.layer_accessibility.params = current_params
+                flag_modified(obj.layer_accessibility, "params")
+
+            # -------------------------------------------------------------
+            # 3. Resolve Category ID from 'main' / 'sub' / combined label
             # -------------------------------------------------------------
             if "category" in row_data and "category_id" not in row_data:
                 cat_val = row_data.pop("category")
                 if cat_val:
                     cat_str = str(cat_val).strip()
-                    # Handle composite "Main - Sub" or just "Main"
                     if " - " in cat_str:
                         main_part, sub_part = [p.strip() for p in cat_str.split(" - ", 1)]
                         cat_record = session.execute(
@@ -547,10 +575,11 @@ async def save_layer_info(
             extent_updated = False
 
             # -------------------------------------------------------------
-            # 2. Field Normalization and Assignment
+            # 4. Field Normalization and Assignment for LayerInfo
             # -------------------------------------------------------------
             for key, value in row_data.items():
-                if key in IMMUTABLE_COLS or not hasattr(obj, key):
+                # Skip immutable columns, relation-level params already handled, or non-existent columns
+                if key in IMMUTABLE_COLS or key in {"model_name", "table_name"} or not hasattr(obj, key):
                     continue
 
                 # ChoiceType / Enum normalization
@@ -602,13 +631,14 @@ async def save_layer_info(
                     flag_modified(obj, key)
 
             # -------------------------------------------------------------
-            # 3. Synchronize extent_3857 if native extent was changed
+            # 5. Synchronize extent_3857 if native extent was changed
             # -------------------------------------------------------------
             if extent_updated and not getattr(obj, "extent_3857", None):
                 if hasattr(obj, "recalculate_extent_3857"):
                     obj.recalculate_extent_3857()
                     flag_modified(obj, "extent_3857")
 
+            # obj.save(session=session) flushes/commits the session and updates both records
             obj.save(session=session)
 
         # Clear vector tile cache if visual or spatial parameters changed
@@ -625,7 +655,6 @@ async def save_layer_info(
     except Exception as e:
         da_logger.exception(f"Failed to save layer info: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save layer info: {str(e)}")
-
 
 
 
@@ -1729,3 +1758,124 @@ async def create_layer_info_from_model(
     except Exception as e:
         da_logger.exception(f"Failed to create layer from model '{model_name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create layer: {str(e)}")
+
+
+
+def cleanup_temp_file(file_path: Path):
+    """Safely removes temporary files after the response completes."""
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception as e:
+        da_logger.warning(f"Failed to delete temp file {file_path}: {e}")
+
+
+class DownloadShapefileRequest(BaseModel):
+    pk_objects: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+
+
+@dch_admin_router.post("/download_shapefile/{uuid}/")
+async def download_layer_shapefile(
+    uuid: str,
+    payload: DownloadShapefileRequest = Body(default_factory=DownloadShapefileRequest),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
+    """
+    Export full layer or selected features strictly within the user's AOI
+    as a zipped ESRI Shapefile (.zip) named after the layer.
+    """
+    require_dch_admin(current_user)
+
+    try:
+        # 1. Resolve Layer Info to derive clean filename
+        layer_info = LayerQueryService.get_layer_info(uuid, by="uuid")
+        raw_name = layer_info.layer_name or layer_info.title or f"layer_{uuid[:8]}"
+
+        # Sanitize for safe filesystem / OS naming (alphanumeric + underscores)
+        base_name = re.sub(r"[^\w\-]+", "_", raw_name.strip()).strip("_") or f"layer_{uuid[:8]}"
+
+        # 2. Fetch GeoJSON strictly within the user's AOI
+        result = LayerQueryService.get_features_geojson_dispatch(
+            identifier=uuid,
+            pks=payload.pk_objects,
+            by="uuid",
+            current_user=current_user,
+        )
+
+        if isinstance(result, Response):
+            return result
+
+        geojson: GeoJSON = GeoJSON(**result) if isinstance(result, dict) else result
+        if not geojson or not geojson.features:
+            raise HTTPException(
+                status_code=404,
+                detail="No features found within your assigned Area of Interest (AOI)",
+            )
+
+        # 3. Convert GeoJSON to GeoDataFrame
+        gdf = geojson.to_gdf()
+        if gdf.empty:
+            raise HTTPException(
+                status_code=404,
+                detail="No valid spatial records found in your Area of Interest",
+            )
+
+        # 4. Shapefile attribute sanitization (DBF compliance: max 10 chars, no duplicates)
+        new_cols: Dict[str, str] = {}
+        used_names = set()
+
+        for col in gdf.columns:
+            if col == "geometry":
+                continue
+
+            clean_name = col[:10]
+            counter = 1
+            while clean_name.lower() in used_names:
+                suffix = f"_{counter}"
+                clean_name = f"{col[:10 - len(suffix)]}{suffix}"
+                counter += 1
+
+            used_names.add(clean_name.lower())
+            new_cols[col] = clean_name
+
+            # Convert datetime columns to strings
+            if pd.api.types.is_datetime64_any_dtype(gdf[col]):
+                gdf[col] = gdf[col].astype(str)
+            # Convert nested dicts/lists to JSON strings
+            elif gdf[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                gdf[col] = gdf[col].apply(lambda x: json.dumps(x) if x is not None else None)
+
+        gdf.rename(columns=new_cols, inplace=True)
+
+        # 5. Create temp directory to bundle shapefile components (.shp, .shx, .dbf, .prj)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            shp_path = temp_dir_path / f"{base_name}.shp"
+
+            # Write to ESRI Shapefile format using layer name
+            gdf.to_file(shp_path, driver="ESRI Shapefile", encoding="utf-8")
+
+            # 6. Pack components into a standalone temporary zip file
+            zip_tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+            zip_path = Path(zip_tmp.name)
+            zip_tmp.close()
+
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for file_path in temp_dir_path.glob(f"{base_name}.*"):
+                    zip_file.write(file_path, arcname=file_path.name)
+
+        # 7. Return FileResponse with layer_name.zip
+        filename = f"{base_name}.zip"
+        da_logger.info(f"Shapefile download: {filename}")
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=filename,
+            background=BackgroundTask(cleanup_temp_file, zip_path),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        da_logger.exception(f"Failed to export shapefile for layer {uuid}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export Shapefile")

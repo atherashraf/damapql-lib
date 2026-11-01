@@ -1,80 +1,28 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any, Literal, Tuple, Union
 
 import pandas as pd
 from fastapi import HTTPException, Response
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
+from app.damapql.auth.dtypes import UserInfo
+from app.damapql.auth.user_aoi_service import UserAOIService
 from app.damapql.dch.api_enum import AccessibilityType, DataModel
 from app.damapql.dch.models import LayerInfo, LayerCategory, DBQuery, LayerAccessibility
 from app.damapql.dch.schemas.geojson import GeoJSON
 
 # Supported lookup modes for resolving a layer.
 LayerLookupBy = Literal["uuid", "layer_name", "table_name"]
+PKQueryType = Union[list[dict[str, Any]], list[str], list[int], None]
 
 
 class LayerQueryService:
     """
-    Service class for layer metadata and attribute querying.
-
-    Notes
-    -----
-    - `identifier` is the lookup value.
-    - `by` decides whether identifier is:
-        - uuid
-        - layer_name
-        - table_name
-    - `data_model` and `model_type` are columns in LayerInfo,
-      so they must NOT be eager loaded with selectinload().
+    Service class for layer metadata, attribute querying, and spatial data exports.
     """
-
-    # @staticmethod
-    # def get_layer_info(identifier: str, by: LayerLookupBy = "uuid") -> LayerInfo:
-    #     """
-    #     Fetch a single layer by uuid, layer_name, or table_name.
-    #     """
-    #     with LayerInfo.managed_session() as session:
-    #         stmt = (
-    #             select(LayerInfo)
-    #             .options(
-    #                 # Only real relationships should be eager-loaded.
-    #                 selectinload(LayerInfo.layer_accessibility),
-    #                 selectinload(LayerInfo.layer_category),
-    #                 selectinload(LayerInfo.quality_level),
-    #             )
-    #         )
-    #
-    #         if by == "uuid":
-    #             stmt = stmt.where(LayerInfo.uuid == identifier)
-    #
-    #         elif by == "layer_name":
-    #             stmt = stmt.where(LayerInfo.layer_name == identifier)
-    #
-    #         elif by == "table_name":
-    #             stmt = stmt.where(
-    #                 LayerInfo.layer_accessibility.has(table_name=identifier)
-    #             )
-    #
-    #         else:
-    #             raise HTTPException(
-    #                 status_code=400,
-    #                 detail=f"Unsupported lookup type: {by}",
-    #             )
-    #
-    #         info = session.execute(stmt).scalar_one_or_none()
-    #
-    #     if not info:
-    #         raise HTTPException(
-    #             status_code=404,
-    #             detail=f"Layer not found: {identifier}",
-    #         )
-    #
-    #     return info
-
-    from sqlalchemy.orm import selectinload
 
     @staticmethod
     def get_layer_info(identifier: str, by: str):
@@ -88,13 +36,10 @@ class LayerQueryService:
                     query.join(LayerInfo.layer_accessibility)
                     .filter(LayerAccessibility.table_name == identifier)
                 )
-
             elif by == "layer_name":
                 query = query.filter(LayerInfo.layer_name == identifier)
-
             elif by == "uuid":
                 query = query.filter(LayerInfo.uuid == identifier)
-
             else:
                 raise ValueError(f"Invalid lookup type: {by}")
 
@@ -157,7 +102,6 @@ class LayerQueryService:
         payload: list[dict[str, Any]] = []
 
         for obj in layers:
-            # These are ChoiceType-backed columns, not relationships.
             if data_model and (not obj.data_model or obj.data_model.code != data_model):
                 continue
 
@@ -434,11 +378,11 @@ class LayerQueryService:
 
     @staticmethod
     def get_field_distinct_values(
-            identifier: str,
-            field_name: str,
-            limit: int = 500,
-            by: LayerLookupBy = "uuid",
-            where_clause: str | None = None,
+        identifier: str,
+        field_name: str,
+        limit: int = 500,
+        by: LayerLookupBy = "uuid",
+        where_clause: str | None = None,
     ) -> list[Any]:
         """
         Return distinct values for a single allowed attribute column.
@@ -452,7 +396,7 @@ class LayerQueryService:
 
         if field_name not in allowed_cols:
             raise HTTPException(status_code=400, detail="Invalid field name")
-        # pk_cols = info.layer_accessibility.pk_cols
+
         df = info.to_layer_df(
             cols=[field_name],
             where_clause=where_clause,
@@ -467,12 +411,12 @@ class LayerQueryService:
 
     @staticmethod
     def get_layer_attributes(
-            identifier: str,
-            cols: list[str] | None = None,
-            where_clause: str | None = None,
-            limit: int = -1,
-            offset: int = 0,
-            by: LayerLookupBy = "uuid",
+        identifier: str,
+        cols: list[str] | None = None,
+        where_clause: str | None = None,
+        limit: int = -1,
+        offset: int = 0,
+        by: LayerLookupBy = "uuid",
     ) -> dict[str, Any]:
         """
         Return attribute rows for a vector DB layer.
@@ -482,7 +426,6 @@ class LayerQueryService:
         LayerQueryService.ensure_vector_db_layer(info)
 
         safe_cols = LayerQueryService.validate_requested_columns(info, cols)
-
         total = info.count_layer_rows(where_clause=where_clause)
 
         df = info.to_layer_df(
@@ -638,9 +581,9 @@ class LayerQueryService:
 
     @staticmethod
     def get_feature_extent(
-            identifier: str,
-            pk: str | int | list[str] | list[int],
-            by: LayerLookupBy = "uuid",
+        identifier: str,
+        pk: str | int | list[str] | list[int],
+        by: LayerLookupBy = "uuid",
     ) -> dict[str, Any] | Response:
         """
         Return extent of a single feature by primary key.
@@ -700,60 +643,134 @@ class LayerQueryService:
             "srid": info.srid,
         }
 
-
+    # =========================================================================
+    # Spatial Exports & AOI Restricted Queries
+    # =========================================================================
 
     @staticmethod
-    def get_features_geojson(
-        identifier: str,
-        pk_values: list[str],
-        by: LayerLookupBy = "uuid",
-    ) -> dict[str, Any] | Response:
+    def get_aoi_spatial_filter(
+            info: LayerInfo,
+            user: UserInfo | None,
+    ) -> Tuple[str, dict[str, Any]]:
         """
-        Return multiple features as GeoJSON FeatureCollection by PK values.
+        Builds PostGIS ST_Intersects WHERE clause using the user's registered AOI geometry.
+        If the user has no AOI (NullUserAOI or unrestricted), returns an empty clause.
+        """
+        if not user:
+            return "", {}
 
-        Shape:
-        {
-            "type": "FeatureCollection",
-            "crs": "EPSG:3857",
-            "features": [
-                {
-                    "id": 1,
-                    "type": "Feature",
-                    "geometry": {...},
-                    "properties": {...}
-                }
-            ]
-        }
+        # 1. Fetch AOI object for current user
+        aoi_data = UserAOIService.get_geojson(user)
+        if not aoi_data:
+            return "", {}
 
-        Notes:
-        - Geometry is returned as-is in the source SRID.
-        - CRS is included as a non-standard GeoJSON extension.
-        - Assumes all rows in the layer share the same SRID.
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+        if not geom_col:
+            return "", {}
+
+        geom_ident = DBQuery.safe_ident(geom_col)
+        layer_srid = info.srid or 3857
+
+        # 2. Convert Pydantic model / dict / string to a standard Python dictionary
+        if hasattr(aoi_data, "model_dump"):
+            aoi_dict = aoi_data.model_dump()
+        elif hasattr(aoi_data, "dict"):
+            aoi_dict = aoi_data.dict()
+        elif isinstance(aoi_data, str):
+            try:
+                aoi_dict = json.loads(aoi_data)
+            except Exception:
+                return "", {}
+        elif isinstance(aoi_data, dict):
+            aoi_dict = aoi_data
+        else:
+            return "", {}
+
+        # 3. Detect source SRID from CRS field (default to 3857 if metric, 4326 otherwise)
+        source_srid = 3857
+        crs_val = aoi_dict.get("crs")
+        if crs_val:
+            crs_str = str(crs_val)
+            if "4326" in crs_str:
+                source_srid = 4326
+            elif "3857" in crs_str:
+                source_srid = 3857
+
+        # 4. ST_GeomFromGeoJSON expects a GEOMETRY object, NOT a FeatureCollection
+        geom_obj = None
+        if aoi_dict.get("type") == "FeatureCollection":
+            features = aoi_dict.get("features", [])
+            if not features:
+                return "", {}
+            first_feat = features[0]
+            geom_obj = first_feat.get("geometry") if isinstance(first_feat, dict) else None
+        elif aoi_dict.get("type") == "Feature":
+            geom_obj = aoi_dict.get("geometry")
+        elif "coordinates" in aoi_dict:
+            geom_obj = aoi_dict
+
+        if not geom_obj:
+            return "", {}
+
+        # Fallback check on coordinate magnitudes to confirm SRID
+        try:
+            sample_coords = geom_obj.get("coordinates", [])
+            while isinstance(sample_coords, list) and sample_coords and isinstance(sample_coords[0], list):
+                sample_coords = sample_coords[0]
+            if sample_coords and len(sample_coords) >= 2:
+                # If X coordinate is > 180, it cannot be 4326
+                if abs(float(sample_coords[0])) > 180:
+                    source_srid = 3857
+        except Exception:
+            pass
+
+        geom_str = json.dumps(geom_obj)
+
+        # 5. Build parameterized PostGIS query
+        if source_srid == layer_srid:
+            aoi_clause = (
+                f"ST_Intersects({geom_ident}, "
+                f"ST_SetSRID(ST_GeomFromGeoJSON(:user_aoi_geom), {layer_srid}))"
+            )
+        else:
+            aoi_clause = (
+                f"ST_Intersects({geom_ident}, "
+                f"ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:user_aoi_geom), {source_srid}), {layer_srid}))"
+            )
+
+        return aoi_clause, {"user_aoi_geom": geom_str}
+
+    @staticmethod
+    def get_all_features_geojson(
+        identifier: str,
+        by: LayerLookupBy = "uuid",
+        current_user: UserInfo | None = None,
+    ) -> GeoJSON | Response:
+        """
+        Return all features of a layer as a GeoJSON FeatureCollection,
+        strictly bounded by the user's Area of Interest.
         """
         info = LayerQueryService.get_layer_info(identifier, by)
         LayerQueryService.ensure_vector_db_layer(info)
 
         access = info.layer_accessibility
         geom_col = access.geometry_col
-
         if not geom_col:
             raise HTTPException(status_code=400, detail="Layer has no geometry column")
 
-        if not pk_values:
-            return {
-                "type": "FeatureCollection",
-                "crs": None,
-                "features": [],
-            }
-
-        where_sql, params = LayerQueryService.get_safe_pk_where(info, pk_values)
-
+        pk_cols = access.pk_cols or []
         engine = access.get_external_engine()
         if not engine:
             return Response(status_code=204)
 
-        table = DBQuery.safe_ident(access.table_name)
+        schema_name = (access.params or {}).get("schema", "public")
+        table = f"{DBQuery.safe_ident(schema_name)}.{DBQuery.safe_ident(access.table_name)}"
         geom = DBQuery.safe_ident(geom_col)
+
+        # Apply AOI spatial filter
+        aoi_where, params = LayerQueryService.get_aoi_spatial_filter(info, current_user)
+        where_clause = f"WHERE {aoi_where}" if aoi_where else ""
 
         sql = text(
             f"""
@@ -762,7 +779,7 @@ class LayerQueryService:
                 ST_SRID({geom}) AS __srid,
                 ST_AsGeoJSON({geom}) AS __geojson_geometry
             FROM {table}
-            WHERE {where_sql}
+            {where_clause}
             """
         )
 
@@ -772,21 +789,17 @@ class LayerQueryService:
         if not rows:
             return Response(status_code=204)
 
-        pk_cols = access.pk_cols or []
         features: list[dict[str, Any]] = []
         collection_srid = None
 
         for row in rows:
             row_dict = dict(row)
-
             geometry_json = row_dict.pop("__geojson_geometry", None)
             srid = row_dict.pop("__srid", None)
 
-            # Track collection-level SRID from first valid row
             if collection_srid is None and srid not in (None, 0):
                 collection_srid = srid
 
-            # Remove raw geometry fields from properties
             row_dict.pop(geom_col, None)
             row_dict.pop("geom", None)
             row_dict.pop("geometry", None)
@@ -794,21 +807,14 @@ class LayerQueryService:
             if geometry_json is None:
                 continue
 
-            if isinstance(geometry_json, str):
-                geometry = json.loads(geometry_json)
-            elif isinstance(geometry_json, dict):
-                geometry = geometry_json
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Unsupported geometry JSON type: {type(geometry_json)}",
-                )
+            geometry = json.loads(geometry_json) if isinstance(geometry_json, str) else geometry_json
 
-            feature_id = None
             if len(pk_cols) == 1:
                 feature_id = row_dict.get(pk_cols[0])
             elif len(pk_cols) > 1:
                 feature_id = {col: row_dict.get(col) for col in pk_cols}
+            else:
+                feature_id = None
 
             features.append(
                 {
@@ -819,80 +825,55 @@ class LayerQueryService:
                 }
             )
 
-        crs = None
-        if collection_srid not in (None, 0):
-            crs = f"EPSG:{collection_srid}"
+        crs = f"EPSG:{collection_srid}" if collection_srid not in (None, 0) else None
 
-        return {
-            "type": "FeatureCollection",
-            "crs": crs,
-            "features": features,
-        }
+        return GeoJSON(
+            type="FeatureCollection",
+            crs=crs,
+            features=features,
+        )
 
     @staticmethod
     def get_features_geojson_by_pk_objects(
-            identifier: str,
-            pk_objects: list[dict[str, Any]],
-            by: LayerLookupBy = "uuid",
+        identifier: str,
+        pk_objects: list[dict[str, Any]],
+        by: LayerLookupBy = "uuid",
+        current_user: UserInfo | None = None,
     ) -> GeoJSON | Response:
+        """
+        Return multiple features as a GeoJSON FeatureCollection by PK objects,
+        strictly bounded by the user's Area of Interest.
+        """
         info = LayerQueryService.get_layer_info(identifier, by)
         LayerQueryService.ensure_vector_db_layer(info)
 
         access = info.layer_accessibility
         geom_col = access.geometry_col
-
         if not geom_col:
             raise HTTPException(status_code=400, detail="Layer has no geometry column")
 
         pk_cols = access.pk_cols or []
-
         if not pk_cols:
-            raise HTTPException(
-                status_code=400,
-                detail="Layer has no primary key columns configured",
-            )
+            raise HTTPException(status_code=400, detail="Layer has no primary key columns configured")
 
         if not isinstance(pk_objects, list) or not pk_objects:
-            return GeoJSON(
-                type="FeatureCollection",
-                crs=None,
-                features=[],
-            )
+            return GeoJSON(type="FeatureCollection", crs=None, features=[])
 
         where_groups = []
         params: dict[str, Any] = {}
 
         for row_index, pk_object in enumerate(pk_objects):
             if not isinstance(pk_object, dict) or not pk_object:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid pk_object at index {row_index}",
-                )
+                raise HTTPException(status_code=400, detail=f"Invalid pk_object at index {row_index}")
 
             missing_pk_cols = [col for col in pk_cols if col not in pk_object]
-
             if missing_pk_cols:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Missing PK field(s) at index {row_index}: "
-                        f"{', '.join(missing_pk_cols)}"
-                    ),
-                )
-
-            extra_pk_cols = [col for col in pk_object.keys() if col not in pk_cols]
-
-            if extra_pk_cols:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Unexpected PK field(s) at index {row_index}: "
-                        f"{', '.join(extra_pk_cols)}"
-                    ),
+                    detail=f"Missing PK field(s) at index {row_index}: {', '.join(missing_pk_cols)}",
                 )
 
             clauses = []
-
             for col_index, pk_col in enumerate(pk_cols):
                 param_name = f"pk_{row_index}_{col_index}"
                 clauses.append(f"{DBQuery.safe_ident(pk_col)} = :{param_name}")
@@ -900,8 +881,16 @@ class LayerQueryService:
 
             where_groups.append("(" + " AND ".join(clauses) + ")")
 
-        engine = access.get_external_engine()
+        pk_where_clause = " OR ".join(where_groups)
+        aoi_clause, aoi_params = LayerQueryService.get_aoi_spatial_filter(info, current_user)
+        params.update(aoi_params)
 
+        if aoi_clause:
+            full_where = f"WHERE ({pk_where_clause}) AND ({aoi_clause})"
+        else:
+            full_where = f"WHERE {pk_where_clause}"
+
+        engine = access.get_external_engine()
         if not engine:
             return Response(status_code=204)
 
@@ -916,7 +905,7 @@ class LayerQueryService:
                 ST_SRID({geom}) AS __srid,
                 ST_AsGeoJSON({geom}) AS __geojson_geometry
             FROM {table}
-            WHERE {" OR ".join(where_groups)}
+            {full_where}
             """
         )
 
@@ -931,7 +920,6 @@ class LayerQueryService:
 
         for row in rows:
             row_dict = dict(row)
-
             geometry_json = row_dict.pop("__geojson_geometry", None)
             srid = row_dict.pop("__srid", None)
 
@@ -970,20 +958,155 @@ class LayerQueryService:
         )
 
     @staticmethod
+    def get_features_geojson(
+        identifier: str,
+        pk_values: list[str],
+        by: LayerLookupBy = "uuid",
+        current_user: UserInfo | None = None,
+    ) -> GeoJSON | Response:
+        """
+        Return features by a list of single/composite PK values,
+        strictly bounded by the user's Area of Interest.
+        """
+        info = LayerQueryService.get_layer_info(identifier, by)
+        LayerQueryService.ensure_vector_db_layer(info)
+
+        access = info.layer_accessibility
+        geom_col = access.geometry_col
+        if not geom_col:
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
+
+        if not pk_values:
+            return GeoJSON(type="FeatureCollection", crs=None, features=[])
+
+        where_sql, params = LayerQueryService.get_safe_pk_where(info, pk_values)
+        aoi_clause, aoi_params = LayerQueryService.get_aoi_spatial_filter(info, current_user)
+        params.update(aoi_params)
+
+        if aoi_clause:
+            full_where = f"WHERE ({where_sql}) AND ({aoi_clause})"
+        else:
+            full_where = f"WHERE {where_sql}"
+
+        engine = access.get_external_engine()
+        if not engine:
+            return Response(status_code=204)
+
+        table = DBQuery.safe_ident(access.table_name)
+        geom = DBQuery.safe_ident(geom_col)
+
+        sql = text(
+            f"""
+            SELECT
+                *,
+                ST_SRID({geom}) AS __srid,
+                ST_AsGeoJSON({geom}) AS __geojson_geometry
+            FROM {table}
+            {full_where}
+            """
+        )
+
+        with Session(engine) as session:
+            rows = session.execute(sql, params).mappings().all()
+
+        if not rows:
+            return Response(status_code=204)
+
+        pk_cols = access.pk_cols or []
+        features: list[dict[str, Any]] = []
+        collection_srid = None
+
+        for row in rows:
+            row_dict = dict(row)
+            geometry_json = row_dict.pop("__geojson_geometry", None)
+            srid = row_dict.pop("__srid", None)
+
+            if collection_srid is None and srid not in (None, 0):
+                collection_srid = srid
+
+            row_dict.pop(geom_col, None)
+            row_dict.pop("geom", None)
+            row_dict.pop("geometry", None)
+
+            if geometry_json is None:
+                continue
+
+            geometry = json.loads(geometry_json) if isinstance(geometry_json, str) else geometry_json
+
+            if len(pk_cols) == 1:
+                feature_id = row_dict.get(pk_cols[0])
+            elif len(pk_cols) > 1:
+                feature_id = {col: row_dict.get(col) for col in pk_cols}
+            else:
+                feature_id = None
+
+            features.append(
+                {
+                    "id": feature_id,
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": row_dict,
+                }
+            )
+
+        crs = f"EPSG:{collection_srid}" if collection_srid not in (None, 0) else None
+
+        return GeoJSON(
+            type="FeatureCollection",
+            crs=crs,
+            features=features,
+        )
+
+    @staticmethod
+    def get_features_geojson_dispatch(
+        identifier: str,
+        pks: PKQueryType = None,
+        by: LayerLookupBy = "uuid",
+        current_user: UserInfo | None = None,
+    ) -> GeoJSON | Response:
+        """
+        Unified dispatcher routing GeoJSON queries by provided primary key structures
+        with spatial Area of Interest (AOI) boundary enforcement.
+        """
+        if not pks:
+            return LayerQueryService.get_all_features_geojson(
+                identifier=identifier,
+                by=by,
+                current_user=current_user,
+            )
+
+        first_item = pks[0]
+        if isinstance(first_item, dict):
+            return LayerQueryService.get_features_geojson_by_pk_objects(
+                identifier=identifier,
+                pk_objects=pks,  # type: ignore[arg-type]
+                by=by,
+                current_user=current_user,
+            )
+
+        if isinstance(first_item, (str, int, float)):
+            str_pk_values = [str(val) for val in pks]
+            return LayerQueryService.get_features_geojson(
+                identifier=identifier,
+                pk_values=str_pk_values,
+                by=by,
+                current_user=current_user,
+            )
+
+        raise HTTPException(status_code=400, detail="Unsupported PK format")
+
+    @staticmethod
     def get_feature_geojson_by_value(
-            identifier: str,
-            col_name: str,
-            value: str,
-            by: LayerLookupBy = "uuid",
-            target_srid: int | None = 4326,
+        identifier: str,
+        col_name: str,
+        value: str,
+        by: LayerLookupBy = "uuid",
+        target_srid: int | None = 4326,
     ) -> dict[str, Any] | Response:
         """
         Return a single feature as GeoJSON by column/value.
-
         By default, geometry is transformed to EPSG:4326.
-        Pass target_srid=None to return geometry in the layer's native SRID.
         """
-
         info = LayerQueryService.get_layer_info(identifier, by)
         LayerQueryService.ensure_vector_db_layer(info)
 
@@ -991,36 +1114,23 @@ class LayerQueryService:
         geom_col = access.geometry_col
 
         if not geom_col:
-            raise HTTPException(
-                status_code=400,
-                detail="Layer has no geometry column",
-            )
+            raise HTTPException(status_code=400, detail="Layer has no geometry column")
 
         allowed_cols = set(access.cols_name or [])
         pk_cols = set(access.pk_cols or [])
 
         if col_name not in allowed_cols and col_name not in pk_cols:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid column: {col_name}",
-            )
+            raise HTTPException(status_code=400, detail=f"Invalid column: {col_name}")
 
         engine = access.get_external_engine()
-
         if not engine:
             return Response(status_code=204)
 
         schema_name = (access.params or {}).get("schema", "public")
-
-        table = (
-            f"{DBQuery.safe_ident(schema_name)}."
-            f"{DBQuery.safe_ident(access.table_name)}"
-        )
-
+        table = f"{DBQuery.safe_ident(schema_name)}.{DBQuery.safe_ident(access.table_name)}"
         geom = DBQuery.safe_ident(geom_col)
         target_col = DBQuery.safe_ident(col_name)
 
-        # Native geometry or transformed geometry
         output_geom = (
             f"ST_Transform({geom}, {target_srid})"
             if target_srid is not None
@@ -1049,7 +1159,6 @@ class LayerQueryService:
             return Response(status_code=204)
 
         row_dict = dict(row)
-
         geometry_json = row_dict.pop("__geojson_geometry", None)
         srid = row_dict.pop("__srid", None)
 
@@ -1071,16 +1180,11 @@ class LayerQueryService:
             )
 
         pk_columns = access.pk_cols or []
-
         feature_id = None
-
         if len(pk_columns) == 1:
             feature_id = row_dict.get(pk_columns[0])
         elif len(pk_columns) > 1:
-            feature_id = {
-                col: row_dict.get(col)
-                for col in pk_columns
-            }
+            feature_id = {col: row_dict.get(col) for col in pk_columns}
 
         return {
             "id": feature_id,

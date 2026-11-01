@@ -257,6 +257,14 @@ class LayerAccessibility(DBBase):
     # Storage Helpers
     # ================================================================
 
+    @hybrid_property
+    def model_name(self) -> Optional[str]:
+        return (self.params or {}).get("model_name")
+
+    @model_name.expression
+    def model_name(cls):
+        return cls.params.op("->>")("model_name")
+
     @property
     def s3_bucket(self) -> Optional[str]:
         if not (self.is_s3 or self.is_minio):

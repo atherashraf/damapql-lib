@@ -91,7 +91,7 @@ class DBAccessibilityParams(AccessibilityParams):
 
     conn_name: str
     table_name: str
-
+    model_name: Optional[str] = None
     columns: List[LayerColumnParam] = Field(default_factory=list)
 
     g_col: Optional[str] = None
