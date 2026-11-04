@@ -1421,30 +1421,77 @@ def reconcile_layerinfo(layer_uuid: str = None, table_name: str = None, model_na
                             ]
 
                         # Step D: EPSG:3857 Extent from DB Features
+                        # if extent and srid and srid > 0:
+                        #     if srid == 3857:
+                        #         extent_3857 = list(extent)
+                        #     else:
+                        #         extent_3857_row = conn.execute(text(f"""
+                        #             SELECT
+                        #                 ST_XMin(bounds)::float AS minx,
+                        #                 ST_YMin(bounds)::float AS miny,
+                        #                 ST_XMax(bounds)::float AS maxx,
+                        #                 ST_YMax(bounds)::float AS maxy
+                        #             FROM (
+                        #                 SELECT ST_Extent(ST_Transform({safe_geometry}, 3857))::geometry AS bounds
+                        #                 FROM {safe_table}
+                        #                 WHERE {safe_geometry} IS NOT NULL
+                        #                   AND NOT ST_IsEmpty({safe_geometry})
+                        #             ) q
+                        #             WHERE bounds IS NOT NULL
+                        #         """)).mappings().first()
+                        #
+                        #         if extent_3857_row:
+                        #             extent_3857 = [
+                        #                 extent_3857_row["minx"], extent_3857_row["miny"],
+                        #                 extent_3857_row["maxx"], extent_3857_row["maxy"]
+                        #             ]
+                        # In app/damapql/manage.py inside reconcile_layerinfo:
+
                         if extent and srid and srid > 0:
                             if srid == 3857:
                                 extent_3857 = list(extent)
                             else:
-                                extent_3857_row = conn.execute(text(f"""
-                                    SELECT
-                                        ST_XMin(bounds)::float AS minx,
-                                        ST_YMin(bounds)::float AS miny,
-                                        ST_XMax(bounds)::float AS maxx,
-                                        ST_YMax(bounds)::float AS maxy
-                                    FROM (
-                                        SELECT ST_Extent(ST_Transform({safe_geometry}, 3857))::geometry AS bounds
-                                        FROM {safe_table}
-                                        WHERE {safe_geometry} IS NOT NULL
-                                          AND NOT ST_IsEmpty({safe_geometry})
-                                    ) q
-                                    WHERE bounds IS NOT NULL
-                                """)).mappings().first()
+                                try:
+                                    # If the source is EPSG:4326, filter out coordinates outside Web Mercator's valid latitude limits
+                                    filter_domain = ""
+                                    if srid == 4326:
+                                        filter_domain = (
+                                            f" AND ST_YMax({safe_geometry}) <= 85.05112878 "
+                                            f" AND ST_YMin({safe_geometry}) >= -85.05112878 "
+                                            f" AND ST_XMax({safe_geometry}) <= 180.0 "
+                                            f" AND ST_XMin({safe_geometry}) >= -180.0 "
+                                        )
 
-                                if extent_3857_row:
-                                    extent_3857 = [
-                                        extent_3857_row["minx"], extent_3857_row["miny"],
-                                        extent_3857_row["maxx"], extent_3857_row["maxy"]
-                                    ]
+                                    ext3857_sql = f"""
+                                        SELECT
+                                            ST_XMin(bounds)::float AS minx,
+                                            ST_YMin(bounds)::float AS miny,
+                                            ST_XMax(bounds)::float AS maxx,
+                                            ST_YMax(bounds)::float AS maxy
+                                        FROM (
+                                            SELECT ST_Extent(ST_Transform({safe_geometry}, 3857))::geometry AS bounds
+                                            FROM {safe_table}
+                                            WHERE {safe_geometry} IS NOT NULL
+                                              AND NOT ST_IsEmpty({safe_geometry})
+                                              {filter_domain}
+                                        ) q
+                                        WHERE bounds IS NOT NULL
+                                    """
+                                    extent_3857_row = conn.execute(text(ext3857_sql)).mappings().first()
+
+                                    if extent_3857_row:
+                                        extent_3857 = [
+                                            extent_3857_row["minx"], extent_3857_row["miny"],
+                                            extent_3857_row["maxx"], extent_3857_row["maxy"]
+                                        ]
+                                except Exception as ext_err:
+                                    da_logger.warning(
+                                        f"Failed to calculate 3857 extent for table {actual_table_name} due to projection domain issues: {ext_err}. "
+                                        f"Falling back to default extent."
+                                    )
+                                    # Fallback extent from DCHUtils
+                                    _, fallback_3857 = DCHUtils.get_default_extents(target_srid=3857)
+                                    extent_3857 = fallback_3857
 
                     # -------------------------------------------------
                     # Fallback to DCHUtils Default Extents if Empty
