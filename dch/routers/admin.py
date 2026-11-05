@@ -1072,6 +1072,7 @@ async def commit_append_shp(request: Request, current_user: UserInfo = Depends(A
             "target": f"{target_schema_name}.{target_table}"}}
 
     except HTTPException:
+        da_logger.exception(f"Failed to commit append for layer {layer_uuid}")
         raise
 
     except Exception as e:
