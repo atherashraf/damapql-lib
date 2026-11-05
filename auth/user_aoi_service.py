@@ -82,3 +82,14 @@ class UserAOIService:
     @classmethod
     def delete(cls, user_id: int) -> None:
         cls.get_model().delete_user_aoi(user_id)
+
+    @classmethod
+    def get_wkt(cls, user_obj: UserInfo) -> str | None:
+        """
+        Return the User's Area of Interest geometry as a WKT string.
+        Delegates to the registered concrete UserAOI implementation.
+        """
+        model = cls.get_model()
+        if hasattr(model, "get_user_aoi_wkt"):
+            return model.get_user_aoi_wkt(user_obj)
+        return None

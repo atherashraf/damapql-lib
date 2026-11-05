@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
 
 import jenkspy
 import pandas as pd
@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
+from app.damapql.auth.user_aoi_service import UserAOIService
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.dtypes import AttributeTableResponse
 from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
@@ -423,58 +424,45 @@ class LayerAttributesMetaResponse(BaseModel):
     pkCols: List[str]
 
 
-@dch_layers_router.get("/layer_attributes_meta/{uuid}/",
-    summary="Get Layer Attribute Schema and Count (Vector & Raster)", )
-def get_layer_attributes_meta(uuid: str, extent_3857: Optional[str] = Query(None),
-        minio_manager: MinioManager = Depends(get_minio_manager),
-        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
+@dch_layers_router.get(
+    "/layer_attributes_meta/{uuid}/",
+    summary="Get Layer Attribute Schema and Count (Vector & Raster)",
+)
+def get_layer_attributes_meta(
+    uuid: str,
+    extent_3857: Optional[str] = Query(None),
+    minio_manager: MinioManager = Depends(get_minio_manager),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
     """
     Returns field definitions, primary keys, and total matching record count.
     Supports:
-      - Vector: DB COUNT(*) query and zero-row schema sample.
-      - Raster: MinIO-backed COG band summaries/styling classification table metadata.
+    - Vector: DB COUNT(*) query and zero-row schema sample (enforcing User AOI).
+    - Raster: MinIO-backed COG band summaries/styling classification table metadata.
     """
     with LayerInfo.managed_session() as session:
-        info: LayerInfo = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
-            LayerInfo.uuid == uuid)).scalar_one_or_none()
+        info: LayerInfo = (
+            session.execute(
+                select(LayerInfo)
+                .options(selectinload(LayerInfo.layer_accessibility))
+                .where(LayerInfo.uuid == uuid)
+            )
+            .scalar_one_or_none()
+        )
 
     if not info or not info.layer_accessibility:
-        return Response(status_code=204)
+        raise HTTPException(status_code=404, detail="Layer not found or has no accessible data source")
 
     # =========================================================================
     # 1. RASTER LAYER METADATA BRANCH (MinIO / S3 / Local)
     # =========================================================================
     if info.data_model and info.data_model.code in (DataModel.R.name, DataModel.R.value, "Raster"):
         try:
-            # # Generate the attribute summary DataFrame using the MinIO manager
-            # summary_df: pd.DataFrame = RasterStatsService.get_attribute_summary_df(
-            #     uuid=uuid, minio_manager=minio_manager
-            # )
-            #
-            #
-            # if summary_df.empty:
-            #     return {
-            #         "columns": [],
-            #         "total_count": 0,
-            #         "pkCols": [],
-            #     }
-            #
-            # # Build standard grid column schema definitions
-            # pk_cols = ["value"] if "value" in summary_df.columns else ["band"] if "band" in summary_df.columns else []
-            # grid_meta = ManageDataFrameUtils.grid_response(
-            #     summary_df.head(0), pkCols=pk_cols
-            # )
-            #
-            # return {
-            #     "columns": grid_meta.columns,
-            #     "total_count": len(summary_df),
-            #     "pkCols": pk_cols,
-            # }
             meta = RasterStatsService.get_attribute_meta(uuid=uuid, minio_manager=minio_manager)
             return meta
         except Exception as e:
-            da_logger.error(f"Error generating raster attribute summary: {e}")
-            return Response(status_code=204)
+            da_logger.error(f"Error generating raster attribute summary for {uuid}: {e}")
+            return {"columns": [], "total_count": 0, "pkCols": []}
 
     # =========================================================================
     # 2. VECTOR LAYER METADATA BRANCH (Database)
@@ -482,39 +470,74 @@ def get_layer_attributes_meta(uuid: str, extent_3857: Optional[str] = Query(None
     access = info.layer_accessibility
     engine = access.get_external_engine()
     if not engine or not access.table_name:
-        return Response(status_code=204)
+        raise HTTPException(status_code=400, detail="External database engine or table name not configured")
 
-    table = DBQuery.safe_ident(access.table_name)
-    geom_col = DBQuery.safe_ident(access.geometry_col or "geom")
+    # Safe handling of schema.table
+    table_parts = access.table_name.split(".")
+    quoted_table = ".".join(DBQuery.safe_ident(p) for p in table_parts)
+    geom_col_name = access.geometry_col or "geom"
+    quoted_geom = DBQuery.safe_ident(geom_col_name)
+
     extent_filter = parse_extent_3857(extent_3857)
+    where_clauses: list[str] = []
+    params: dict[str, Any] = {}
 
-    where_clause = ""
-    params = {}
+    target_srid = info.srid or 4326
 
+    # 1. Extent Filter
     if extent_filter:
         minx, miny, maxx, maxy = extent_filter
-        where_clause = (f" WHERE ST_Intersects({geom_col}, "
-                        f"ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {info.srid or 4326}))")
-        params = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
+        where_clauses.append(
+            f"ST_Intersects({quoted_geom}, ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {target_srid}))"
+        )
+        params.update({"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy})
 
-    # 1. Fast Total Count
-    count_sql = text(f"SELECT COUNT(*) FROM {table}{where_clause}")
-    with Session(engine) as session:
-        total_count = session.execute(count_sql, params).scalar_one()
+    # 2. User AOI Spatial Boundary Restriction
+    aoi_wkt = UserAOIService.get_wkt(current_user)
+    if aoi_wkt:
+        # WASA AOI geometries (Districts, Divisions, Subdivisions) are stored in EPSG:3857
+        aoi_srid = 3857
 
-    # 2. Extract column metadata dynamically using a 0-row sample
-    sample_sql = f"SELECT * FROM {table} LIMIT 0"
-    with Session(engine) as session:
-        sample_df = pd.read_sql(text(sample_sql), session.connection())
+        if target_srid == aoi_srid:
+            # Both layer and AOI are in EPSG:3857 -> No transform needed!
+            where_clauses.append(
+                f"ST_Intersects({quoted_geom}, ST_GeomFromText(:aoi_wkt, {aoi_srid}))"
+            )
+        else:
+            # Layer is in a different SRID (e.g. 4326), transform from 3857 to target_srid
+            where_clauses.append(
+                f"ST_Intersects({quoted_geom}, ST_Transform(ST_GeomFromText(:aoi_wkt, {aoi_srid}), {target_srid}))"
+            )
 
-    # Exclude geometry column from attribute table metadata
-    if access.geometry_col and access.geometry_col in sample_df.columns:
-        sample_df = sample_df.drop(columns=[access.geometry_col])
+        params["aoi_wkt"] = aoi_wkt
 
-    # Build standard grid column schema definitions
-    grid_meta = ManageDataFrameUtils.grid_response(sample_df, pkCols=access.pk_cols or [])
+    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-    return {"columns": grid_meta.columns, "total_count": total_count, "pkCols": access.pk_cols or [], }
+    # Execute queries using a single connection
+    with engine.connect() as conn:
+        # Fast Total Count
+        count_sql = text(f"SELECT COUNT(*) FROM {quoted_table}{where_sql}")
+        total_count = conn.execute(count_sql, params).scalar() or 0
+
+        # Zero-row schema sample
+        sample_sql = text(f"SELECT * FROM {quoted_table} LIMIT 0")
+        sample_df = pd.read_sql(sample_sql, conn)
+
+    # Exclude all potential geometry columns
+    known_geom_cols = {geom_col_name, "geom", "geometry", "the_geom", "shape"}
+    cols_to_drop = [c for c in sample_df.columns if c.lower() in known_geom_cols]
+    if cols_to_drop:
+        sample_df = sample_df.drop(columns=cols_to_drop)
+
+    # Build grid metadata
+    pk_cols = access.pk_cols or []
+    grid_meta = ManageDataFrameUtils.grid_response(sample_df, pkCols=pk_cols)
+
+    return {
+        "columns": grid_meta.columns,
+        "total_count": total_count,
+        "pkCols": pk_cols,
+    }
 
 
 @dch_layers_router.get("/layer_attributes_page/{uuid}/", summary="Get Paginated Layer Attribute Records", )

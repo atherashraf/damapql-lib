@@ -69,6 +69,13 @@ class BaseUserAOI:
         raise NotImplementedError
 
     @classmethod
+    def get_user_aoi_wkt(cls, current_user: UserInfo) -> str | None:
+        """
+        Return the user's effective AOI geometry as a WKT string.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def get_user_aoi_level(cls, user_obj: UserInfo) -> str:
         """
         Return the user's effective AOI level.
