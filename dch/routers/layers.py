@@ -184,21 +184,31 @@ def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
     return values
 
 
-@dch_layers_router.get("/layer_attributes/{uuid}/", response_model=Union[AttributeTableResponse, dict],
-    summary="Get Layer Attributes", )
-def get_layer_attributes(uuid: str, extent_3857: Optional[str] = Query(None),
-        current_user: UserInfo = Depends(AuthUtils.get_current_user),
-        minio_manager: MinioManager | None = Depends(get_minio_manager), ):
+@dch_layers_router.get(
+    "/layer_attributes/{uuid}/",
+    response_model=Union[AttributeTableResponse, dict],
+    summary="Get Layer Attributes",
+)
+def get_layer_attributes(
+    uuid: str,
+    extent_3857: Optional[str] = Query(None),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+    minio_manager: MinioManager | None = Depends(get_minio_manager),
+):
     """
-    Returns attribute table for vector layers
+    Returns attribute table for vector layers (enforcing User AOI and viewport extent)
     or summary data for raster layers.
     """
-
     with LayerInfo.managed_session() as session:
-
-        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility),
-            selectinload(LayerInfo.layer_category), selectinload(LayerInfo.quality_level), ).where(
-            LayerInfo.uuid == uuid)).scalar_one_or_none()
+        info = session.execute(
+            select(LayerInfo)
+            .options(
+                selectinload(LayerInfo.layer_accessibility),
+                selectinload(LayerInfo.layer_category),
+                selectinload(LayerInfo.quality_level),
+            )
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
 
     if info is None:
         return Response(status_code=204)
@@ -206,33 +216,69 @@ def get_layer_attributes(uuid: str, extent_3857: Optional[str] = Query(None),
     # ============================================================
     # VECTOR LAYER
     # ============================================================
+    if info.data_model and info.data_model.code == DataModel.V.name:
+        access = info.layer_accessibility
+        if not access:
+            return Response(status_code=204)
 
-    if (info.data_model and info.data_model.code == DataModel.V.name):
+        geom_col_name = access.geometry_col or "geom"
+        quoted_geom = DBQuery.safe_ident(geom_col_name)
+        target_srid = info.srid or 4326
 
+        where_clauses: list[str] = []
+
+        # 1. Viewport Extent Filter (EPSG:3857)
         extent_filter = parse_extent_3857(extent_3857)
-
         if extent_filter:
+            minx, miny, maxx, maxy = extent_filter
+            where_clauses.append(
+                f"ST_Intersects({quoted_geom}, "
+                f"ST_Transform(ST_MakeEnvelope({minx}, {miny}, {maxx}, {maxy}, 3857), {target_srid}))"
+            )
 
-            gdf = info.to_layer_gdf(extent_3857=extent_filter)
+        # 2. User AOI Spatial Boundary Restriction (EPSG:3857)
+        aoi_wkt = UserAOIService.get_wkt(current_user)
+        if aoi_wkt:
+            aoi_srid = 3857
+            if target_srid == aoi_srid:
+                where_clauses.append(
+                    f"ST_Intersects({quoted_geom}, ST_GeomFromText('{aoi_wkt}', {aoi_srid}))"
+                )
+            else:
+                where_clauses.append(
+                    f"ST_Intersects({quoted_geom}, "
+                    f"ST_Transform(ST_GeomFromText('{aoi_wkt}', {aoi_srid}), {target_srid}))"
+                )
 
-            geom_col = (info.layer_accessibility.geometry_col or "geom")
+        combined_where = " AND ".join(where_clauses) if where_clauses else None
 
-            df = pd.DataFrame(gdf.drop(columns=[geom_col], errors="ignore", ))
-
+        # Fetch data using built-in LayerInfo helpers with the combined where clause
+        if extent_filter:
+            gdf = info.to_layer_gdf(where_clause=combined_where)
+            if gdf.empty:
+                return Response(status_code=204)
+            df = pd.DataFrame(gdf.drop(columns=[geom_col_name], errors="ignore"))
         else:
-
-            df = info.to_layer_df()
+            df = info.to_layer_df(where_clause=combined_where)
 
         if not df.empty:
-            return {"payload": (ManageDataFrameUtils.grid_response(df, pkCols=(info.layer_accessibility.pk_cols), ))}
+            return {
+                "payload": ManageDataFrameUtils.grid_response(
+                    df, pkCols=access.pk_cols
+                )
+            }
+
+        return Response(status_code=204)
 
     # ============================================================
     # RASTER LAYER
     # ============================================================
-
-    elif (info.data_model and info.data_model.code == DataModel.R.name):
-
-        return {"payload": (RasterStatsService.get_attribute_summary_grid(uuid=uuid, minio_manager=minio_manager, ))}
+    elif info.data_model and info.data_model.code == DataModel.R.name:
+        return {
+            "payload": RasterStatsService.get_attribute_summary_grid(
+                uuid=uuid, minio_manager=minio_manager
+            )
+        }
 
     return Response(status_code=204)
 
@@ -540,78 +586,100 @@ def get_layer_attributes_meta(
     }
 
 
-@dch_layers_router.get("/layer_attributes_page/{uuid}/", summary="Get Paginated Layer Attribute Records", )
-def get_layer_attributes_page(uuid: str, limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
-        extent_3857: Optional[str] = Query(None), current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
+@dch_layers_router.get(
+    "/layer_attributes_page/{uuid}/",
+    summary="Get Paginated Layer Attribute Records",
+)
+def get_layer_attributes_page(
+    uuid: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    extent_3857: Optional[str] = Query(None),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
     """
-    Returns a chunked slice of attribute rows (LIMIT/OFFSET).
+    Returns a chunked slice of attribute rows (LIMIT/OFFSET),
+    strictly enforcing User AOI boundaries and extent filters.
     """
     with LayerInfo.managed_session() as session:
-        info = session.execute(select(LayerInfo).options(selectinload(LayerInfo.layer_accessibility)).where(
-            LayerInfo.uuid == uuid)).scalar_one_or_none()
+        info = session.execute(
+            select(LayerInfo)
+            .options(selectinload(LayerInfo.layer_accessibility))
+            .where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
 
     if not info or not info.layer_accessibility:
         return Response(status_code=204)
 
     access = info.layer_accessibility
     engine = access.get_external_engine()
-    if not engine:
+    if not engine or not access.table_name:
         return Response(status_code=204)
 
-    table = DBQuery.safe_ident(access.table_name)
-    geom_col = DBQuery.safe_ident(access.geometry_col or "geom")
-    extent_filter = parse_extent_3857(extent_3857)
+    # 1. Safe Schema & Column Formatting
+    table_parts = access.table_name.split(".")
+    quoted_table = ".".join(DBQuery.safe_ident(p) for p in table_parts)
+    geom_col_name = access.geometry_col or "geom"
+    quoted_geom = DBQuery.safe_ident(geom_col_name)
 
-    # 1. Allowed column attributes (Guaranteed geometry exclusion)
+    # 2. Resolve Non-Geometry Projection Columns
     allowed_cols = set(access.cols_name or [])
-
-    # Exclude geometry column explicitly
-    if access.geometry_col and access.geometry_col in allowed_cols:
-        allowed_cols.remove(access.geometry_col)
+    known_geom_cols = {geom_col_name.lower(), "geom", "geometry", "the_geom", "shape"}
+    allowed_cols = {c for c in allowed_cols if c.lower() not in known_geom_cols}
 
     if allowed_cols:
         cols_sql = ", ".join(DBQuery.safe_ident(c) for c in allowed_cols)
     else:
-        # Fallback: query table columns dynamically if cols_name is omitted, minus geom
-        sample_sql = f"SELECT * FROM {table} LIMIT 0"
-        with Session(engine) as session:
-            sample_df = pd.read_sql(text(sample_sql), session.connection())
-        non_geom_cols = [c for c in sample_df.columns if c != access.geometry_col]
+        with engine.connect() as conn:
+            sample_df = pd.read_sql(text(f"SELECT * FROM {quoted_table} LIMIT 0"), conn)
+        non_geom_cols = [c for c in sample_df.columns if c.lower() not in known_geom_cols]
         cols_sql = ", ".join(DBQuery.safe_ident(c) for c in non_geom_cols)
 
-    # Primary key deterministic sorting
+    # 3. Deterministic Primary Key Sorting
     pk_cols = access.pk_cols or []
     order_by = ""
     if pk_cols:
         safe_pks = ", ".join(DBQuery.safe_ident(c) for c in pk_cols)
         order_by = f" ORDER BY {safe_pks}"
 
-    where_clause = ""
-    params = {"limit": limit, "offset": offset}
+    where_clauses: list[str] = []
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    target_srid = info.srid or 4326
 
+    # 4. Viewport Extent Filter
+    extent_filter = parse_extent_3857(extent_3857)
     if extent_filter:
         minx, miny, maxx, maxy = extent_filter
-        where_clause = (f" WHERE ST_Intersects({geom_col}, "
-                        f"ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {info.srid or 4326}))")
+        where_clauses.append(
+            f"ST_Intersects({quoted_geom}, ST_Transform(ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 3857), {target_srid}))"
+        )
         params.update({"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy})
 
-    sql = text(f"SELECT {cols_sql} FROM {table}{where_clause}{order_by} LIMIT :limit OFFSET :offset")
+    # 5. User AOI Boundary Restriction (Enforce parity with metadata endpoint)
+    aoi_wkt = UserAOIService.get_wkt(current_user)
+    if aoi_wkt:
+        aoi_srid = 3857
+        if target_srid == aoi_srid:
+            where_clauses.append(f"ST_Intersects({quoted_geom}, ST_GeomFromText(:aoi_wkt, {aoi_srid}))")
+        else:
+            where_clauses.append(f"ST_Intersects({quoted_geom}, ST_Transform(ST_GeomFromText(:aoi_wkt, {aoi_srid}), {target_srid}))")
+        params["aoi_wkt"] = aoi_wkt
 
-    with Session(engine) as session:
-        df = pd.read_sql(sql, session.connection(), params=params)
+    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    sql = text(f"SELECT {cols_sql} FROM {quoted_table}{where_sql}{order_by} LIMIT :limit OFFSET :offset")
+
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params=params)
 
     if df.empty:
         return {"payload": []}
 
-    # 2. Convert all datetime/timestamp columns safely to ISO strings
+    # 6. Format Dates and Nulls
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 3. Clean numeric rounding & replace NaN/NaT with None
     df = df.round(2)
     cleaned_df = df.astype(object).where(pd.notnull(df), None)
 
     return {"payload": cleaned_df.to_dict(orient="records")}
-
-
