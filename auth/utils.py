@@ -425,7 +425,7 @@ class AuthUtils:
     def get_optional_user(
             token: str | None = Depends(optional_oauth2_scheme),
     ) -> UserInfo | None:
-        da_logger.debug(f"Optional token: {token}")
+        # da_logger.debug(f"Optional token: {token}")
         if not token:
             return None
 
