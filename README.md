@@ -81,6 +81,7 @@ project-root
     │   ├── application.py
     │   ├── app_bootstrap.py
     │   ├── auth
+    │   ├── config_registry      <-- Pluggable domain registry & boundary contracts
     │   ├── dch
     │   └── tests
     ├── survey
@@ -92,6 +93,7 @@ Example imports:
 ```python
 from app.damapql.auth import models
 from app.damapql.dch import routers
+from app.damapql.config_registry import BaseBoundaryHierarchy, BoundaryModeConfig
 ```
 
 The subtree option is preferable when DAMapQL should be versioned and distributed as part of the host application.
@@ -114,6 +116,8 @@ This follows the Dependency Inversion Principle:
 - The host application supplies concrete implementations.
 - Application extensions inject those implementations into DAMapQL.
 - DAMapQL never needs to import a particular host application directly.
+
+---------------------------------------------------------------------------------------------------------------
 
 ### Minimal `main.py`
 
@@ -142,7 +146,7 @@ The application can also be started from the command line:
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8998
 ```
-
+-------------------------------------------------------------------------
 ### Application extensions
 
 An application extension can register:
@@ -186,7 +190,7 @@ def configure_survey_extension(app: FastAPI) -> None:
 Register the extension entry points in the host project's `settings.py`:
 
 ```python
-DAMAPQL_APP_EXTENSIONS = [
+DAMAPQL_APP_EXTENSIONS: list[str] = [
     "app.app_extension:configure_wasa_extension",
     "app.app_extension:configure_survey_extension",
 ]
@@ -252,6 +256,163 @@ DAMAPQL_APP_EXTENSIONS = [
 ```
 
 The reusable bootstrap remains inside the DAMapQL Git subtree. Each host project supplies only its own extension module and settings entries.
+
+
+------------------------------------------------------
+### Pluggable Registries (config_registry)
+To prevent domain-specific hierarchies and business logic from leaking into core query engines, DAMapQL provides an Inversion-of-Control registry framework:
+
+```
+app/damapql/config_registry/
+├── base.py                   # Generic BaseConfigRegistry[T]
+├── boundaries/               # Multi-level administrative / jurisdiction hierarchies
+│   ├── base.py               # BaseBoundaryHierarchy & NullBoundaryHierarchy
+│   ├── schemas.py            # BoundaryModeConfig, BoundaryLevelConfig
+│   ├── service.py            # Database-safe boundary resolution & spatial clauses
+│   └── router.py             # Generic endpoints (/modes/, /options/)
+└── ...                       # Future configurable domains
+```
+#### 1. Concrete Hierarchy Registration
+```python
+# app/wasa/config/boundaries.py
+from app.damapql.config_registry import (
+    BaseBoundaryHierarchy,
+    BoundaryModeConfig,
+    BoundaryLevelConfig,
+)
+
+class WASABoundaryHierarchy(BaseBoundaryHierarchy):
+    @classmethod
+    def get_modes(cls) -> list[BoundaryModeConfig]:
+        return [
+            BoundaryModeConfig(
+                mode_key="wasa",
+                label="WASA Jurisdiction",
+                levels=[
+                    BoundaryLevelConfig(
+                        level=1,
+                        name="district",
+                        label="District",
+                        table_name="district",
+                        pk_col="id",
+                        label_col="name",
+                        where_clause="is_wasa_operated = True",
+                    ),
+                    BoundaryLevelConfig(
+                        level=2,
+                        name="wasa_division",
+                        label="WASA Division",
+                        table_name="wasa_division",
+                        pk_col="id",
+                        label_col="name",
+                        parent_fk_col="dist_id",
+                    ),
+                    BoundaryLevelConfig(
+                        level=3,
+                        name="wasa_subdivision",
+                        label="WASA Subdivision",
+                        table_name="wasa_subdivision",
+                        pk_col="id",
+                        label_col="name",
+                        parent_fk_col="wasa_div_id",
+                    ),
+                ],
+            ),
+            BoundaryModeConfig(
+                mode_key="province",
+                label="Administrative Boundaries",
+                levels=[
+                    BoundaryLevelConfig(level=1, name="district", label="District", table_name="district"),
+                    BoundaryLevelConfig(level=2, name="tehsil", label="Tehsil", table_name="tehsil", parent_fk_col="dist_id"),
+                    BoundaryLevelConfig(level=3, name="union_council", label="Union Council", table_name="union_council", parent_fk_col="teh_id"),
+                ],
+            ),
+        ]
+```
+#### 2. Wiring Extensions in app_extension.py
+Inject implementations and expose standard configuration endpoints:
+```python
+# app/wasa/app_extension.py
+from fastapi import FastAPI
+from app.damapql.auth.user_aoi import BaseUserAOI
+from app.damapql.config_registry import (
+    BaseBoundaryHierarchy,
+    boundary_config_router,
+)
+from app.wasa.models.admin import UserAOI
+from app.wasa.config.boundaries import WASABoundaryHierarchy
+from app.wasa.routers import wasa_router, society_router, pwasa_router
+
+
+def configure_wasa_extension(app: FastAPI) -> None:
+    """Register WASA implementations, boundary registries, and routers."""
+    
+    # 1. Register User Area of Interest (AOI)
+    BaseUserAOI.register_implementation(UserAOI)
+
+    # 2. Register Pluggable Multi-tier Boundary Hierarchy
+    BaseBoundaryHierarchy.register_implementation(WASABoundaryHierarchy)
+
+    # 3. Mount Registry Router (exposes /api/damapql/config/boundaries/*)
+    app.include_router(
+        boundary_config_router,
+        prefix="/api/damapql",
+    )
+
+    # 4. Mount Application Routers
+    app.include_router(wasa_router, prefix="/wasa")
+    app.include_router(society_router, prefix="/wasa/society")
+    app.include_router(pwasa_router, prefix="/pwasa")
+```
+Register the extension entry points in the host project's settings.py:
+```python
+DAMAPQL_APP_EXTENSIONS = [
+    "app.wasa.app_extension:configure_wasa_extension",
+]
+
+```
+
+----------------------------------------------------
+
+### User AOI & Spatial Security Enforcements
+DAMapQL enforces user-level spatial security across metadata inspections, data queries, and file downloads.
+
+#### 1. Registering an external UserAOI implementation
+DAMapQL defines the application-independent BaseUserAOI contract. A host application implements the contract using its own declarative database base:
+
+```python
+from app.damapql.auth.user_aoi import BaseUserAOI
+from app.wasa.utils.adapters.db import WASABase
+
+class UserAOI(BaseUserAOI, WASABase):
+    __tablename__ = "user_aoi"
+    # Concrete application spatial hierarchy fields (dist_id, wasa_div_id, etc.)
+```
+
+The extension injects the concrete class , i.e. app_extension
+```python
+BaseUserAOI.register_implementation(UserAOI)
+```
+
+#### 2. Area of Interest (AOI) Spatial Filtering
+All feature exports (GeoJSON, Shapefile .zip, attribute chunk queries) automatically evaluate against the authenticated user's operational bounds:
+```text
+Client Request
+      │
+      ▼
+LayerQueryService.get_features_geojson_dispatch()
+      │
+      ├─► UserAOIService.get_geojson(current_user)
+      │
+      └─► Injects PostGIS Spatial Intersect:
+          ST_Intersects(
+              geom,
+              ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:user_aoi_geom), 4326), {srid})
+          )
+```
+If an application does not register an implementation, BaseUserAOI falls back to NullUserAOI, granting unrestricted spatial access.
+
+---------------------------------------------------
 
 ### Registering an external `UserAOI` implementation
 

@@ -9,7 +9,8 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
-from app.damapql.auth.user_aoi_service import UserAOIService
+from app.damapql.config_registry import UserAOIService
+
 from app.damapql.dch.api_enum import AccessibilityType, DataModel
 from app.damapql.dch.models import LayerInfo, LayerCategory, DBQuery, LayerAccessibility
 from app.damapql.dch.schemas.geojson import GeoJSON

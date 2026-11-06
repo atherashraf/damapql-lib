@@ -15,11 +15,9 @@ from jwt import ExpiredSignatureError, InvalidTokenError
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.models import User, Profile, Role, Department, Organization
+# from app.damapql.config_registry.aoi.service import UserAOIService
 from app.damapql.utils.crypto import CryptoUtils
 from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES
-from app.damapql.auth.user_aoi_service import (
-    UserAOIService,
-)
 
 JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 JWT_REFRESH_SECRET_KEY = os.environ["JWT_REFRESH_SECRET_KEY"]
@@ -73,10 +71,7 @@ class AuthUtils:
 
     @staticmethod
     def get_current_user(
-            token: Annotated[
-                str,
-                Depends(oauth2_scheme),
-            ],
+            token: Annotated[str, Depends(oauth2_scheme)],
     ) -> UserInfo:
         try:
             payload = AuthUtils.decode_token(token)
@@ -98,12 +93,11 @@ class AuthUtils:
                     detail="User not found",
                 )
 
+            # Lazy import breaks the circular dependency with config_registry
+            from app.damapql.config_registry.aoi.service import UserAOIService
             return UserAOIService.attach(user)
 
-        except (
-                ExpiredSignatureError,
-                InvalidTokenError,
-        ):
+        except (ExpiredSignatureError, InvalidTokenError):
             da_logger.error("Could not validate credentials")
             raise HTTPException(
                 status_code=401,

@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette import status
 from typing_extensions import Annotated
 
-from app.damapql.auth.user_aoi_service import UserAOIService
+
 from app.damapql.settings import ACCESS_TOKEN_EXPIRE_MINUTES
 from app.damapql.utils.adapters.deps import get_sync_session
 from app.damapql.utils.crypto import CryptoUtils
@@ -35,7 +35,7 @@ from .manager.email_manager import EmailUtils
 from .manager.role_manager import UserRoleManager
 from .models import Profile, Role, User
 from .utils import AuthUtils, oauth2_scheme
-
+from ..config_registry import UserAOIService
 
 auth_router = APIRouter(tags=["auth"])
 

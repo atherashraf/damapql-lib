@@ -5,12 +5,12 @@ import pandas as pd
 from digitalarzengine.utils.singletons import da_logger
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import select, text, inspect, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
-from app.damapql.auth.user_aoi_service import UserAOIService
 from app.damapql.auth.utils import AuthUtils
+from app.damapql.config_registry import UserAOIService
 from app.damapql.dch.dtypes import AttributeTableResponse
 from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
 from app.damapql.dch.schemas.geojson import GeoJSON
@@ -19,6 +19,8 @@ from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from app.damapql.utils.adapters.deps import get_minio_manager
 from digitalarzengine.io.managers.minio_manager import MinioManager
+
+from app.damapql.utils.adapters.model_utils import ModelUtils
 
 dch_layers_router = APIRouter(tags=["dch"])
 
@@ -470,6 +472,195 @@ class LayerAttributesMetaResponse(BaseModel):
     pkCols: List[str]
 
 
+
+
+
+
+def parse_extent_3857(extent_3857: str | None) -> list[float] | None:
+    if not extent_3857:
+        return None
+    try:
+        values = [float(v) for v in extent_3857.split(",")]
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid extent_3857")
+
+    if len(values) != 4:
+        raise HTTPException(status_code=400, detail="extent_3857 must have 4 values")
+    return values
+
+
+
+def _apply_spatial_filter(
+    query: Any,
+    model: Any,
+    layer_name: Optional[str],
+    spatial_id: Optional[str | int],
+):
+    """
+    Applies spatial or relational boundaries:
+    - If layer is 'wasa_subdivision' and model has 'wasa_sub_div_id' / 'sub_div_id', uses fast B-Tree index.
+    - If layer is 'wasa_division' and model has 'wasa_div_id' / 'div_id', uses fast B-Tree index.
+    - If layer is 'district' and model has 'dist_id' / 'district_id', uses fast B-Tree index.
+    - Otherwise, performs PostGIS GiST index intersection if geometry column exists,
+      transforming boundary geometry to match model's SRID.
+    """
+    if not layer_name or spatial_id is None:
+        return query
+
+    try:
+        pk_val = int(spatial_id)
+    except (ValueError, TypeError):
+        pk_val = spatial_id
+
+    layer_name_clean = layer_name.lower().strip()
+
+    # -------------------------------------------------------------------------
+    # 1. Relational Fast-Path: Use B-Tree Index When Direct Foreign Keys Exist
+    # -------------------------------------------------------------------------
+    if layer_name_clean in ("wasa_subdivision", "subdivision"):
+        for attr in ("wasa_sub_div_id", "wasa_subdiv_id", "sub_div_id", "subdiv_id"):
+            if hasattr(model, attr):
+                return query.where(getattr(model, attr) == pk_val)
+
+    elif layer_name_clean in ("wasa_division", "division"):
+        for attr in ("wasa_div_id", "div_id", "division_id"):
+            if hasattr(model, attr):
+                return query.where(getattr(model, attr) == pk_val)
+
+    elif layer_name_clean == "district":
+        for attr in ("dist_id", "district_id"):
+            if hasattr(model, attr):
+                return query.where(getattr(model, attr) == pk_val)
+
+    # -------------------------------------------------------------------------
+    # 2. Check Geometry Column on Model
+    # -------------------------------------------------------------------------
+    mapper = inspect(model, raiseerr=False)
+    if mapper is None or "geom" not in mapper.columns:
+        return query
+
+    BOUNDARY_TABLE_MAP = {
+        "district": ("district", "id"),
+        "tehsil": ("tehsil", "id"),
+        "union_council": ("union_council", "id"),
+        "wasa_division": ("wasa_division", "id"),
+        "wasa_subdivision": ("wasa_subdivision", "id"),
+        "subdivision": ("wasa_subdivision", "id"),
+        "division": ("wasa_division", "id"),
+    }
+
+    config = BOUNDARY_TABLE_MAP.get(layer_name_clean)
+    if not config:
+        return query
+
+    table_name, pk_col_name = config
+    try:
+        boundary_model = ModelUtils.get_model_by_tablename(table_name)
+    except (ValueError, Exception):
+        da_logger.warning(f"No ORM model for table '{table_name}'. Skipping spatial filter.")
+        return query
+
+    pk_column = getattr(boundary_model, pk_col_name, getattr(boundary_model, "id", None))
+    if pk_column is None:
+        return query
+
+    boundary_geom_subquery = (
+        select(boundary_model.geom)
+        .where(pk_column == pk_val)
+        .scalar_subquery()
+    )
+
+    # Reproject boundary subquery to match the target model's geometry SRID
+    return query.where(
+        model.geom.isnot(None),
+        func.ST_Intersects(
+            model.geom,
+            func.ST_Transform(boundary_geom_subquery, func.ST_SRID(model.geom)),
+        ),
+    )
+
+BOUNDARY_TABLE_MAP = {
+    "district": "district",
+    "tehsil": "tehsil",
+    "union_council": "union_council",
+    "wasa_division": "wasa_division",
+    "wasa_subdivision": "wasa_subdivision",
+    "subdivision": "wasa_subdivision",
+    "division": "wasa_division",
+}
+
+def _build_spatial_sql_filter(
+    quoted_geom: str,
+    target_srid: int,
+    layer_name: Optional[str],
+    spatial_id: Optional[str | int],
+    boundary_geom: Optional[str],
+    available_cols: set[str],
+) -> tuple[Optional[str], dict[str, Any]]:
+    """
+    Builds SQL WHERE subclause and parameter bindings:
+    1. If boundary_geom (GeoJSON) is passed, transforms & intersects directly.
+    2. If relational FK column exists in table columns, uses B-Tree comparison.
+    3. Otherwise, falls back to PostGIS ST_Intersects subquery against boundary table.
+    """
+    params: dict[str, Any] = {}
+
+    # Case A: Boundary geometry string/GeoJSON passed directly
+    if boundary_geom:
+        clause = (
+            f"ST_Intersects({quoted_geom}, "
+            f"ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:boundary_geom), 4326), {target_srid}))"
+        )
+        params["boundary_geom"] = boundary_geom
+        return clause, params
+
+    if not layer_name or spatial_id is None:
+        return None, {}
+
+    try:
+        pk_val = int(spatial_id)
+    except (ValueError, TypeError):
+        pk_val = spatial_id
+
+    layer_name_clean = layer_name.lower().strip()
+
+    # Case B: Relational B-Tree fast path if table has matching foreign key column
+    fk_field_map = {
+        "wasa_subdivision": ["wasa_sub_div_id", "wasa_subdiv_id", "sub_div_id", "subdiv_id"],
+        "subdivision": ["wasa_sub_div_id", "wasa_subdiv_id", "sub_div_id", "subdiv_id"],
+        "wasa_division": ["wasa_div_id", "div_id", "division_id"],
+        "division": ["wasa_div_id", "div_id", "division_id"],
+        "district": ["dist_id", "district_id"],
+    }
+
+    candidate_cols = fk_field_map.get(layer_name_clean, [])
+    for col in candidate_cols:
+        if col.lower() in available_cols:
+            safe_col = DBQuery.safe_ident(col)
+            params["spatial_pk_val"] = pk_val
+            return f"{safe_col} = :spatial_pk_val", params
+
+    # Case C: Spatial intersection with boundary table geometry
+    target_boundary_table = BOUNDARY_TABLE_MAP.get(layer_name_clean)
+    if not target_boundary_table:
+        return None, {}
+
+    quoted_b_table = DBQuery.safe_ident(target_boundary_table)
+    params["spatial_pk_val"] = pk_val
+
+    clause = f"""ST_Intersects(
+        {quoted_geom},
+        (
+            SELECT ST_Transform(geom, {target_srid})
+            FROM {quoted_b_table}
+            WHERE id = :spatial_pk_val
+            LIMIT 1
+        )
+    )"""
+
+    return clause, params
+
+
 @dch_layers_router.get(
     "/layer_attributes_meta/{uuid}/",
     summary="Get Layer Attribute Schema and Count (Vector & Raster)",
@@ -477,15 +668,12 @@ class LayerAttributesMetaResponse(BaseModel):
 def get_layer_attributes_meta(
     uuid: str,
     extent_3857: Optional[str] = Query(None),
+    layer_name: Optional[str] = Query(None),
+    spatial_id: Optional[str] = Query(None),
+    boundary_geom: Optional[str] = Query(None),
     minio_manager: MinioManager = Depends(get_minio_manager),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
-    """
-    Returns field definitions, primary keys, and total matching record count.
-    Supports:
-    - Vector: DB COUNT(*) query and zero-row schema sample (enforcing User AOI).
-    - Raster: MinIO-backed COG band summaries/styling classification table metadata.
-    """
     with LayerInfo.managed_session() as session:
         info: LayerInfo = (
             session.execute(
@@ -499,38 +687,29 @@ def get_layer_attributes_meta(
     if not info or not info.layer_accessibility:
         raise HTTPException(status_code=404, detail="Layer not found or has no accessible data source")
 
-    # =========================================================================
-    # 1. RASTER LAYER METADATA BRANCH (MinIO / S3 / Local)
-    # =========================================================================
     if info.data_model and info.data_model.code in (DataModel.R.name, DataModel.R.value, "Raster"):
         try:
-            meta = RasterStatsService.get_attribute_meta(uuid=uuid, minio_manager=minio_manager)
-            return meta
+            return RasterStatsService.get_attribute_meta(uuid=uuid, minio_manager=minio_manager)
         except Exception as e:
             da_logger.error(f"Error generating raster attribute summary for {uuid}: {e}")
             return {"columns": [], "total_count": 0, "pkCols": []}
 
-    # =========================================================================
-    # 2. VECTOR LAYER METADATA BRANCH (Database)
-    # =========================================================================
     access = info.layer_accessibility
     engine = access.get_external_engine()
     if not engine or not access.table_name:
         raise HTTPException(status_code=400, detail="External database engine or table name not configured")
 
-    # Safe handling of schema.table
     table_parts = access.table_name.split(".")
     quoted_table = ".".join(DBQuery.safe_ident(p) for p in table_parts)
     geom_col_name = access.geometry_col or "geom"
     quoted_geom = DBQuery.safe_ident(geom_col_name)
 
-    extent_filter = parse_extent_3857(extent_3857)
-    where_clauses: list[str] = []
+    target_srid = info.srid or 4326
+    where_clauses: list[str] = [f"{quoted_geom} IS NOT NULL"]
     params: dict[str, Any] = {}
 
-    target_srid = info.srid or 4326
-
-    # 1. Extent Filter
+    # 1. Viewport Extent Filter
+    extent_filter = parse_extent_3857(extent_3857)
     if extent_filter:
         minx, miny, maxx, maxy = extent_filter
         where_clauses.append(
@@ -541,41 +720,43 @@ def get_layer_attributes_meta(
     # 2. User AOI Spatial Boundary Restriction
     aoi_wkt = UserAOIService.get_wkt(current_user)
     if aoi_wkt:
-        # WASA AOI geometries (Districts, Divisions, Subdivisions) are stored in EPSG:3857
         aoi_srid = 3857
-
         if target_srid == aoi_srid:
-            # Both layer and AOI are in EPSG:3857 -> No transform needed!
-            where_clauses.append(
-                f"ST_Intersects({quoted_geom}, ST_GeomFromText(:aoi_wkt, {aoi_srid}))"
-            )
+            where_clauses.append(f"ST_Intersects({quoted_geom}, ST_GeomFromText(:aoi_wkt, {aoi_srid}))")
         else:
-            # Layer is in a different SRID (e.g. 4326), transform from 3857 to target_srid
             where_clauses.append(
                 f"ST_Intersects({quoted_geom}, ST_Transform(ST_GeomFromText(:aoi_wkt, {aoi_srid}), {target_srid}))"
             )
-
         params["aoi_wkt"] = aoi_wkt
+
+    # 3. Dynamic Boundary Spatial/Relational Filter
+    available_cols = {c.lower() for c in (access.cols_name or [])}
+    spatial_clause, spatial_params = _build_spatial_sql_filter(
+        quoted_geom=quoted_geom,
+        target_srid=target_srid,
+        layer_name=layer_name,
+        spatial_id=spatial_id,
+        boundary_geom=boundary_geom,
+        available_cols=available_cols,
+    )
+    if spatial_clause:
+        where_clauses.append(spatial_clause)
+        params.update(spatial_params)
 
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-    # Execute queries using a single connection
     with engine.connect() as conn:
-        # Fast Total Count
         count_sql = text(f"SELECT COUNT(*) FROM {quoted_table}{where_sql}")
         total_count = conn.execute(count_sql, params).scalar() or 0
 
-        # Zero-row schema sample
         sample_sql = text(f"SELECT * FROM {quoted_table} LIMIT 0")
         sample_df = pd.read_sql(sample_sql, conn)
 
-    # Exclude all potential geometry columns
-    known_geom_cols = {geom_col_name, "geom", "geometry", "the_geom", "shape"}
+    known_geom_cols = {geom_col_name.lower(), "geom", "geometry", "the_geom", "shape"}
     cols_to_drop = [c for c in sample_df.columns if c.lower() in known_geom_cols]
     if cols_to_drop:
         sample_df = sample_df.drop(columns=cols_to_drop)
 
-    # Build grid metadata
     pk_cols = access.pk_cols or []
     grid_meta = ManageDataFrameUtils.grid_response(sample_df, pkCols=pk_cols)
 
@@ -595,12 +776,11 @@ def get_layer_attributes_page(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     extent_3857: Optional[str] = Query(None),
+    layer_name: Optional[str] = Query(None),
+    spatial_id: Optional[str] = Query(None),
+    boundary_geom: Optional[str] = Query(None),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
-    """
-    Returns a chunked slice of attribute rows (LIMIT/OFFSET),
-    strictly enforcing User AOI boundaries and extent filters.
-    """
     with LayerInfo.managed_session() as session:
         info = session.execute(
             select(LayerInfo)
@@ -616,13 +796,11 @@ def get_layer_attributes_page(
     if not engine or not access.table_name:
         return Response(status_code=204)
 
-    # 1. Safe Schema & Column Formatting
     table_parts = access.table_name.split(".")
     quoted_table = ".".join(DBQuery.safe_ident(p) for p in table_parts)
     geom_col_name = access.geometry_col or "geom"
     quoted_geom = DBQuery.safe_ident(geom_col_name)
 
-    # 2. Resolve Non-Geometry Projection Columns
     allowed_cols = set(access.cols_name or [])
     known_geom_cols = {geom_col_name.lower(), "geom", "geometry", "the_geom", "shape"}
     allowed_cols = {c for c in allowed_cols if c.lower() not in known_geom_cols}
@@ -635,18 +813,17 @@ def get_layer_attributes_page(
         non_geom_cols = [c for c in sample_df.columns if c.lower() not in known_geom_cols]
         cols_sql = ", ".join(DBQuery.safe_ident(c) for c in non_geom_cols)
 
-    # 3. Deterministic Primary Key Sorting
     pk_cols = access.pk_cols or []
     order_by = ""
     if pk_cols:
         safe_pks = ", ".join(DBQuery.safe_ident(c) for c in pk_cols)
         order_by = f" ORDER BY {safe_pks}"
 
-    where_clauses: list[str] = []
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
     target_srid = info.srid or 4326
+    where_clauses: list[str] = [f"{quoted_geom} IS NOT NULL"]
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
 
-    # 4. Viewport Extent Filter
+    # 1. Viewport Extent Filter
     extent_filter = parse_extent_3857(extent_3857)
     if extent_filter:
         minx, miny, maxx, maxy = extent_filter
@@ -655,15 +832,31 @@ def get_layer_attributes_page(
         )
         params.update({"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy})
 
-    # 5. User AOI Boundary Restriction (Enforce parity with metadata endpoint)
+    # 2. User AOI Restriction
     aoi_wkt = UserAOIService.get_wkt(current_user)
     if aoi_wkt:
         aoi_srid = 3857
         if target_srid == aoi_srid:
             where_clauses.append(f"ST_Intersects({quoted_geom}, ST_GeomFromText(:aoi_wkt, {aoi_srid}))")
         else:
-            where_clauses.append(f"ST_Intersects({quoted_geom}, ST_Transform(ST_GeomFromText(:aoi_wkt, {aoi_srid}), {target_srid}))")
+            where_clauses.append(
+                f"ST_Intersects({quoted_geom}, ST_Transform(ST_GeomFromText(:aoi_wkt, {aoi_srid}), {target_srid}))"
+            )
         params["aoi_wkt"] = aoi_wkt
+
+    # 3. Dynamic Boundary Spatial/Relational Filter
+    available_cols = {c.lower() for c in (access.cols_name or [])}
+    spatial_clause, spatial_params = _build_spatial_sql_filter(
+        quoted_geom=quoted_geom,
+        target_srid=target_srid,
+        layer_name=layer_name,
+        spatial_id=spatial_id,
+        boundary_geom=boundary_geom,
+        available_cols=available_cols,
+    )
+    if spatial_clause:
+        where_clauses.append(spatial_clause)
+        params.update(spatial_params)
 
     where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     sql = text(f"SELECT {cols_sql} FROM {quoted_table}{where_sql}{order_by} LIMIT :limit OFFSET :offset")
@@ -674,7 +867,6 @@ def get_layer_attributes_page(
     if df.empty:
         return {"payload": []}
 
-    # 6. Format Dates and Nulls
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
