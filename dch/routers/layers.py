@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
-from app.damapql.config_registry import UserAOIService
+from app.damapql.config_registry import UserAOIService, BoundaryHierarchyService
 from app.damapql.dch.dtypes import AttributeTableResponse
 from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
 from app.damapql.dch.schemas.geojson import GeoJSON
@@ -589,76 +589,58 @@ BOUNDARY_TABLE_MAP = {
     "division": "wasa_division",
 }
 
+
+
 def _build_spatial_sql_filter(
     quoted_geom: str,
     target_srid: int,
-    layer_name: Optional[str],
-    spatial_id: Optional[str | int],
-    boundary_geom: Optional[str],
-    available_cols: set[str],
+    layer_name: Optional[str] = None,
+    spatial_id: Optional[str | int] = None,
+    available_cols: Optional[set[str]] = None,
+    boundary_geom: Optional[str] = None,  # <- Add this or **kwargs
+    **kwargs,
 ) -> tuple[Optional[str], dict[str, Any]]:
     """
-    Builds SQL WHERE subclause and parameter bindings:
-    1. If boundary_geom (GeoJSON) is passed, transforms & intersects directly.
-    2. If relational FK column exists in table columns, uses B-Tree comparison.
-    3. Otherwise, falls back to PostGIS ST_Intersects subquery against boundary table.
+    Builds the dynamic navigation filter clause.
+    1. First tries relational lookup if the layer table has matching foreign key columns.
+    2. Falls back to PostGIS spatial intersection using the boundary geometry retrieved via BoundaryHierarchyService.
     """
-    params: dict[str, Any] = {}
-
-    # Case A: Boundary geometry string/GeoJSON passed directly
-    if boundary_geom:
-        clause = (
-            f"ST_Intersects({quoted_geom}, "
-            f"ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:boundary_geom), 4326), {target_srid}))"
-        )
-        params["boundary_geom"] = boundary_geom
-        return clause, params
-
-    if not layer_name or spatial_id is None:
+    if not layer_name or not spatial_id:
         return None, {}
 
-    try:
-        pk_val = int(spatial_id)
-    except (ValueError, TypeError):
-        pk_val = spatial_id
+    available_cols = available_cols or set()
+    clean_layer = str(layer_name).lower().replace(" ", "").replace("_", "")
 
-    layer_name_clean = layer_name.lower().strip()
-
-    # Case B: Relational B-Tree fast path if table has matching foreign key column
-    fk_field_map = {
-        "wasa_subdivision": ["wasa_sub_div_id", "wasa_subdiv_id", "sub_div_id", "subdiv_id"],
-        "subdivision": ["wasa_sub_div_id", "wasa_subdiv_id", "sub_div_id", "subdiv_id"],
-        "wasa_division": ["wasa_div_id", "div_id", "division_id"],
-        "division": ["wasa_div_id", "div_id", "division_id"],
-        "district": ["dist_id", "district_id"],
+    # 1. Check for explicit relational columns (e.g. dist_id, district_id, subdivision_id)
+    candidate_cols = {
+        f"{clean_layer}_id",
+        f"{clean_layer}id",
+        f"id_{clean_layer}",
+        f"{str(layer_name).lower()}_id",
     }
 
-    candidate_cols = fk_field_map.get(layer_name_clean, [])
-    for col in candidate_cols:
-        if col.lower() in available_cols:
-            safe_col = DBQuery.safe_ident(col)
-            params["spatial_pk_val"] = pk_val
-            return f"{safe_col} = :spatial_pk_val", params
+    matched_col = None
+    for col in available_cols:
+        col_clean = col.lower().replace(" ", "").replace("_", "")
+        if col.lower() in candidate_cols or col_clean in candidate_cols:
+            matched_col = col
+            break
 
-    # Case C: Spatial intersection with boundary table geometry
-    target_boundary_table = BOUNDARY_TABLE_MAP.get(layer_name_clean)
-    if not target_boundary_table:
-        return None, {}
+    if matched_col:
+        return f"{DBQuery.safe_ident(matched_col)} = :nav_spatial_id", {"nav_spatial_id": spatial_id}
 
-    quoted_b_table = DBQuery.safe_ident(target_boundary_table)
-    params["spatial_pk_val"] = pk_val
-
-    clause = f"""ST_Intersects(
-        {quoted_geom},
-        (
-            SELECT ST_Transform(geom, {target_srid})
-            FROM {quoted_b_table}
-            WHERE id = :spatial_pk_val
-            LIMIT 1
+    # 2. Spatial Fallback via BoundaryHierarchyService
+    boundary_wkt = BoundaryHierarchyService.get_boundary_wkt(layer_name, spatial_id)
+    if boundary_wkt:
+        boundary_srid = 3857
+        # Automatically transform boundary to the exact SRID of the layer's geometry column
+        clause = (
+            f"ST_Intersects({quoted_geom}, "
+            f"ST_Transform(ST_GeomFromText(:nav_boundary_wkt, {boundary_srid}), ST_SRID({quoted_geom})))"
         )
-    )"""
+        return clause, {"nav_boundary_wkt": boundary_wkt}
 
-    return clause, params
+    return None, {}
 
 
 @dch_layers_router.get(
@@ -736,7 +718,6 @@ def get_layer_attributes_meta(
         target_srid=target_srid,
         layer_name=layer_name,
         spatial_id=spatial_id,
-        boundary_geom=boundary_geom,
         available_cols=available_cols,
     )
     if spatial_clause:
@@ -851,7 +832,6 @@ def get_layer_attributes_page(
         target_srid=target_srid,
         layer_name=layer_name,
         spatial_id=spatial_id,
-        boundary_geom=boundary_geom,
         available_cols=available_cols,
     )
     if spatial_clause:
