@@ -5,7 +5,7 @@ import json
 import math
 import re
 import uuid
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 
 import lxml.etree as ET
 from digitalarzengine.utils.singletons import da_logger
@@ -26,7 +26,9 @@ from settings import DEFAULT_EXTENT, DEFAULT_SRID
 
 class DCHUtils:
     @staticmethod
-    def gzip_data(data: str) -> str:
+    def gzip_data(data: Union[str,Dict]) -> str:
+        if isinstance(data, dict):
+            data = json.dumps(data)
         compressed_data_buffer = io.BytesIO()
         with gzip.GzipFile(fileobj=compressed_data_buffer, mode="wb") as gzipf:
             gzipf.write(data.encode("utf-8"))

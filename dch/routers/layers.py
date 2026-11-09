@@ -122,7 +122,7 @@ async def get_wfs(
 
     return {
         "payload": DCHUtils.gzip_data(geojson_obj.model_dump_json(by_alias=True)),
-        "meta": {"format": "geojson", "limit": limit, "offset": offset, "count": len(gdf_4326)},
+        "meta": {"format": "application/gzip", "limit": limit, "offset": offset, "count": len(gdf_4326)},
     }
 
 

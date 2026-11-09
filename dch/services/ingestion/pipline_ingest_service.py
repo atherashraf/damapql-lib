@@ -64,9 +64,14 @@ from app.damapql.dch.services.ingestion.raster_ingest_service import (
     RasterIngestResult,
     RasterIngestService,
 )
-from app.damapql.dch.services.ingestion.vector_ingest_service import (
+# from app.damapql.dch.services.ingestion.vector_ingest_service import (
+#     VectorIngestResult,
+#     VectorIngestService,
+# )
+from app.damapql.dch.services.ingestion.vector import (
     VectorIngestResult,
     VectorIngestService,
+    VectorStorageEngineType,
 )
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.settings import DCH_APP_NAME, MEDIA_BASE, MINIO_BUCKET_NAME
@@ -128,39 +133,20 @@ class PipelineLayerPayload(BaseModel):
     """
     title: str = Field(..., min_length=2, max_length=255, description="Layer title.")
     category: CategorySpec = Field(..., description="Target category specification.")
-    source_path: Optional[str] = Field(
-        None,
-        description="Filesystem path or URI to the input file.",
-    )
+    source_path: Optional[str] = Field(None, description="Filesystem path or URI to the input file.")
     inline_records: Optional[Union[List[Dict[str, Any]], Dict[str, Any]]] = Field(
-        None,
-        description="Raw JSON array or dictionary to convert to Parquet.",
+        None, description="Raw JSON array or dictionary to convert to Parquet."
     )
-    data_model: Optional[PipelineDataModel] = Field(
-        None,
-        description="Data model identifier. If None, inferred automatically.",
-    )
-    temporal: Optional[str] = Field(
-        None,
-        pattern=r"^\d{4}-\d{2}-\d{2}$",
-        description="ISO 8601 temporal acquisition date (YYYY-MM-DD).",
-    )
-    model_type: Optional[str] = Field(
-        None,
-        description="Domain taxonomy classification tag.",
-    )
-    target: TargetPersistence = Field(
-        default=TargetPersistence.LAKEHOUSE,
-        description="Storage persistence routing destination.",
-    )
-    metadata_extra: Optional[Dict[str, Any]] = Field(
-        default_factory=dict,
-        description="Supplemental metadata attributes.",
-    )
+    data_model: Optional[PipelineDataModel] = Field(None, description="Data model identifier. If None, inferred automatically.")
+    temporal: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="ISO 8601 temporal acquisition date (YYYY-MM-DD).")
+    model_type: Optional[str] = Field(None, description="Domain taxonomy classification tag.")
+    target: TargetPersistence = Field(default=TargetPersistence.LAKEHOUSE, description="Storage persistence routing destination.")
+    # Optional explicit engine override for Vector layers (postgis, flatgeobuf, geoparquet, geopackage)
+    vector_engine: Optional[VectorStorageEngineType] = Field(default=None, description="Direct vector engine override.")
+    metadata_extra: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Supplemental metadata attributes.")
 
     @model_validator(mode="after")
     def validate_source_presence(self) -> PipelineLayerPayload:
-        """Validates that at least one data source is specified."""
         if not self.source_path and self.inline_records is None:
             raise ValueError("Either 'source_path' or 'inline_records' must be supplied.")
         return self
@@ -177,19 +163,9 @@ class PipelineBatchRequest(BaseModel):
         layers: Non-empty list of layer payload definitions to execute.
     """
     pipeline_name: str = Field(..., description="Identifier for this pipeline run.")
-    atomic: bool = Field(
-        default=False,
-        description="Whether to enforce atomic transaction boundaries across all layers.",
-    )
-    bucket_name: str = Field(
-        default=MINIO_BUCKET_NAME,
-        description="Destination object storage bucket name.",
-    )
-    layers: List[PipelineLayerPayload] = Field(
-        ...,
-        min_length=1,
-        description="Collection of layer specifications to ingest.",
-    )
+    atomic: bool = Field(default=False, description="Whether to enforce atomic transaction boundaries across all layers.")
+    bucket_name: str = Field(default=MINIO_BUCKET_NAME, description="Destination object storage bucket name.")
+    layers: List[PipelineLayerPayload] = Field(..., min_length=1, description="Collection of layer specifications to ingest.")
 
 
 # =============================================================================
@@ -718,7 +694,7 @@ class PipelineIngestService:
     def ingest_single_layer(
         cls,
         session: Session,
-        layer_payload: Any,
+        layer_payload: PipelineLayerPayload,
         uploaded_by: Optional[int],
         minio_manager: Optional[MinioManager],
         bucket_name: str,
@@ -758,6 +734,7 @@ class PipelineIngestService:
             else date.today()
         )
 
+        # 1. RASTER ASSETS
         if data_model == DataModel.R.name:
             r_res: RasterIngestResult = RasterIngestService.ingest_from_path(
                 session=session,
@@ -780,19 +757,32 @@ class PipelineIngestService:
                 format="COG",
             )
 
+        # 2. VECTOR ASSETS (Resolved across PostGIS, FlatGeobuf, GeoParquet, GeoPackage)
         elif data_model == DataModel.V.name:
-            persist_to_db = (getattr(layer_payload, "target", None) == "database")
+            # Engine Resolution Logic:
+            # 1. Explicit vector_engine on payload
+            # 2. If target == DATABASE -> POSTGIS
+            # 3. If target == LAKEHOUSE -> FLATGEOBUF (or GEOPARQUET if indicated)
+            if layer_payload.vector_engine:
+                engine_type = layer_payload.vector_engine
+            elif layer_payload.target == TargetPersistence.DATABASE:
+                engine_type = VectorStorageEngineType.POSTGIS
+            else:
+                engine_type = VectorStorageEngineType.FLATGEOBUF
+
             v_res: VectorIngestResult = VectorIngestService.ingest_from_path(
                 session=session,
-                minio_manager=minio_manager,
+                vector_path=layer_payload.source_path,
                 title=layer_payload.title,
                 category_id=category_id,
-                vector_path=layer_payload.source_path,
+                engine_type=engine_type,
                 temporal=layer_payload.temporal,
                 model_type=layer_payload.model_type,
                 uploaded_by=uploaded_by,
-                persist_to_db=persist_to_db,
+                symbology=layer_payload.metadata_extra.get("symbology") if layer_payload.metadata_extra else None,
+                minio_manager=minio_manager,
                 bucket_name=bucket_name,
+                extra_engine_params=layer_payload.metadata_extra,
             )
             return LayerIngestSummary(
                 title=layer_payload.title,
@@ -802,9 +792,10 @@ class PipelineIngestService:
                 layer_info_id=v_res.layer_info_id,
                 layer_access_id=v_res.layer_access_id,
                 records_count=v_res.feature_count,
-                format="PostGIS" if persist_to_db else "GeoParquet",
+                format=v_res.format,
             )
 
+        # 3. TABULAR / TELEMETRY JSON
         elif data_model == DataModel.T.name:
             return cls.process_tabular_json(
                 session=session,
@@ -819,6 +810,7 @@ class PipelineIngestService:
                 bucket_name=bucket_name,
             )
 
+        # 4. UNSTRUCTURED DOCUMENTS
         elif data_model == DataModel.D.name:
             return cls.process_document_file(
                 session=session,
@@ -842,7 +834,7 @@ class PipelineIngestService:
     def execute_pipeline(
         cls,
         session: Session,
-        request: Any,
+        request: PipelineBatchRequest,
         uploaded_by: Optional[int] = None,
         minio_manager: Optional[MinioManager] = None,
     ) -> PipelineBatchResult:

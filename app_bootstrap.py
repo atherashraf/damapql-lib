@@ -14,6 +14,7 @@ from app.damapql.auth.routers import auth_router
 from app.damapql.config_registry import boundary_config_router
 from app.damapql.dch.admin_setup import create_dch_admin
 from app.damapql.dch.routers import dch_router
+from app.damapql.dch.routers.temp_layer_router import dch_temp_router
 from app.damapql.settings import (DCH_DB_KEY, DCH_SECRET_KEY, )
 
 AppExtension = Callable[[FastAPI], None]
@@ -121,6 +122,7 @@ def configure_core_routers(app: FastAPI) -> None:
     app.include_router(dch_router, prefix="/dch", )
     app.include_router(router_2fa, prefix="/auth")
     app.include_router(boundary_config_router,prefix="")
+    app.include_router(dch_temp_router, prefix="",)
 
 
 def create_app(port, title, description) -> FastAPI:

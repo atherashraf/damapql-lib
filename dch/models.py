@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Optional, Union
+from datetime import datetime
 
 import pandas as pd
 import sqlalchemy as db
@@ -976,3 +977,47 @@ class MapInfo(DBBase):
             else:
                 df = pd.DataFrame({col: [] for col in rs.keys()})
             return df
+
+
+class TempLayerInfo(DBBase):
+    """
+    Dedicated catalog for user-uploaded temporary scratchpads, meeting previews,
+    and ephemeral GIS datasets. Completely decoupled from permanent `LayerInfo`.
+    """
+    __tablename__ = "temp_layer_info"
+
+    id = db.Column(db.BIGINT, primary_key=True, autoincrement=True)
+    uuid = db.Column(db.VARCHAR(100), unique=True, nullable=False, index=True)
+    title = db.Column(db.VARCHAR(255), nullable=False)
+
+    # User Scoping pointing directly to auth_user table
+    user_id = db.Column(
+        db.BIGINT,
+        db.ForeignKey("auth_user.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Geometry & Spatial Extents
+    geom_type = db.Column(db.VARCHAR(50), nullable=False)  # Point, LineString, Polygon
+    srid = db.Column(db.INTEGER, default=4326)
+    extent = db.Column(db.JSON, nullable=True)               # [minx, miny, maxx, maxy] (EPSG:4326)
+    extent_3857 = db.Column(db.JSON, nullable=True)          # Web Mercator bounds for OpenLayers fitting
+    feature_count = db.Column(db.INTEGER, default=0)
+
+    # Storage Metadata (FlatGeobuf in MinIO / Local Disk)
+    format = db.Column(db.VARCHAR(50), default="FlatGeobuf")
+    storage_params = db.Column(db.JSON, nullable=False, default=dict)
+
+    # Client-Side Symbology (IFeatureStyle)
+    layer_styling = db.Column(db.JSON, nullable=True)
+
+    # Lifespan & Automatic Expiry
+    created_at = db.Column(db.TIMESTAMP, default=datetime.utcnow, nullable=False)
+    expires_at = db.Column(db.TIMESTAMP, nullable=True)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expires_at:
+            return datetime.utcnow() > self.expires_at
+        return False
