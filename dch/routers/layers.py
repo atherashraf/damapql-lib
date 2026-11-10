@@ -329,6 +329,8 @@ def get_layer_attributes(
     extent_3857: Optional[str] = Query(None),
     layer_name: Optional[str] = Query(None),
     spatial_id: Optional[str] = Query(None),
+    boundary_geom: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, description="Optional cap to prevent memory overflows"),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
     minio_manager: MinioManager | None = Depends(get_minio_manager),
 ):
@@ -350,17 +352,48 @@ def get_layer_attributes(
     if info is None:
         return Response(status_code=204)
 
+    # ============================================================
     # VECTOR LAYER
+    # ============================================================
     if info.data_model and info.data_model.code == DataModel.V.name:
         access = info.layer_accessibility
         if not access:
             return Response(status_code=204)
 
+        engine = access.get_external_engine()
+        if not engine or not access.table_name:
+            return Response(status_code=204)
+
+        # 1. Safe Schema & Column Identifiers
+        table_parts = access.table_name.split(".")
+        quoted_table = ".".join(DBQuery.safe_ident(p) for p in table_parts)
         geom_col_name = access.geometry_col or "geom"
         quoted_geom = DBQuery.safe_ident(geom_col_name)
+
+        # 2. Exclude geometry from selected columns
+        allowed_cols = set(access.cols_name or [])
+        known_geom_cols = {geom_col_name.lower(), "geom", "geometry", "the_geom", "shape"}
+        allowed_cols = {c for c in allowed_cols if c.lower() not in known_geom_cols}
+
+        if allowed_cols:
+            cols_sql = ", ".join(DBQuery.safe_ident(c) for c in allowed_cols)
+        else:
+            with engine.connect() as conn:
+                sample_df = pd.read_sql(text(f"SELECT * FROM {quoted_table} LIMIT 0"), conn)
+            non_geom_cols = [c for c in sample_df.columns if c.lower() not in known_geom_cols]
+            cols_sql = ", ".join(DBQuery.safe_ident(c) for c in non_geom_cols)
+
+        # 3. Deterministic Sorting
+        pk_cols = access.pk_cols or []
+        order_by = ""
+        if pk_cols:
+            safe_pks = ", ".join(DBQuery.safe_ident(c) for c in pk_cols)
+            order_by = f" ORDER BY {safe_pks}"
+
         target_srid = info.srid or 4326
         available_cols = {c.lower() for c in (access.cols_name or [])}
 
+        # 4. Scope & Boundary WHERE clauses
         where_clauses, params = _apply_layer_scope_clauses(
             quoted_geom=quoted_geom,
             target_srid=target_srid,
@@ -371,26 +404,36 @@ def get_layer_attributes(
             extent_3857=extent_3857,
         )
 
-        combined_where = " AND ".join(where_clauses) if where_clauses else None
+        limit_clause = ""
+        if limit:
+            limit_clause = " LIMIT :limit"
+            params["limit"] = limit
 
-        if extent_3857:
-            gdf = info.to_layer_gdf(where_clause=combined_where)
-            if gdf.empty:
-                return Response(status_code=204)
-            df = pd.DataFrame(gdf.drop(columns=[geom_col_name], errors="ignore"))
-        else:
-            df = info.to_layer_df(where_clause=combined_where)
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = text(f"SELECT {cols_sql} FROM {quoted_table}{where_sql}{order_by}{limit_clause}")
 
-        if not df.empty:
-            return {
-                "payload": ManageDataFrameUtils.grid_response(
-                    df, pkCols=access.pk_cols
-                )
-            }
+        # 5. Execute with proper parameter binding
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params=params)
 
-        return Response(status_code=204)
+        if df.empty:
+            return Response(status_code=204)
 
+        # Clean datetime and format grid
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        df = df.round(2)
+        return {
+            "payload": ManageDataFrameUtils.grid_response(
+                df, pkCols=access.pk_cols
+            )
+        }
+
+    # ============================================================
     # RASTER LAYER
+    # ============================================================
     elif info.data_model and info.data_model.code == DataModel.R.name:
         return {
             "payload": RasterStatsService.get_attribute_summary_grid(
