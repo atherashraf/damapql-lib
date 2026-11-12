@@ -2,7 +2,7 @@ import os
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Query
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from starlette.status import HTTP_400_BAD_REQUEST
@@ -11,7 +11,8 @@ from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.dch.api_enum import ModelType
 from app.damapql.dch.dtypes import UploadRasterResponse
-from app.damapql.dch.models import LayerInfo
+from app.damapql.dch.models import LayerInfo, TempLayerInfo
+from app.damapql.dch.routers.temp_layer_router import _resolve_cached_artifact
 from app.damapql.dch.services.ingestion.raster_ingest_service import RasterIngestService
 from app.damapql.dch.services.raster_stats_service import RasterStatsService
 from app.damapql.utils.adapters.deps import get_sync_session, get_minio_manager
@@ -139,8 +140,32 @@ async def get_pixel_value(uuid: str, long: float, lat: float):
     return RasterStatsService.get_pixel_value(uuid, long, lat)
 
 
+
 @dch_raster_router.get("/get_raster_info/{uuid}/")
-def get_raster_info(uuid: str):
+def get_raster_info(
+    uuid: str,
+    is_temp: bool = Query(False),
+    session: Session = Depends(get_sync_session),
+):
+    if is_temp:
+        record = session.query(TempLayerInfo).filter(TempLayerInfo.uuid == uuid).first()
+        if not record:
+            raise HTTPException(status_code=404, detail="Temporary raster layer not found")
+
+        params = record.storage_params or {}
+        return JSONResponse(
+            content={
+                "payload": {
+                    "uuid": record.uuid,
+                    "title": record.title,
+                    "band_count": params.get("band_count", 1),
+                    "stats": params.get("stats", []),
+                    "extent_3857": record.extent_3857,
+                    "style": record.layer_styling,
+                }
+            }
+        )
+
     result = RasterStatsService.get_raster_info(uuid)
     return JSONResponse(content={"payload": result.payload})
 
@@ -170,82 +195,180 @@ def get_raster_style_label(value, layer_styling):
         return None
 
 
+
+
+
 @dch_raster_router.get("/raster_pixel/{uuid}")
-async def get_raster_pixel_value(uuid: str, lon: float, lat: float,
-                                 minio_manager: MinioManager = Depends(get_minio_manager)):
-    with LayerInfo.managed_session() as session:
+async def get_raster_pixel_value(
+    uuid: str,
+    lon: float,
+    lat: float,
+    is_temp: bool = Query(False),
+    minio_manager: MinioManager = Depends(get_minio_manager),
+):
+    try:
+        cog_raster = None
+        layer_styling = None
+
+        # =====================================================================
+        # BRANCH 1: Temporary Raster Layer (TempLayerInfo)
+        # =====================================================================
+        if is_temp:
+            with TempLayerInfo.managed_session() as session:
+                temp_info = session.query(TempLayerInfo).filter_by(uuid=uuid).one_or_none()
+
+                if temp_info is None:
+                    return {
+                        "success": False,
+                        "message": "Temporary raster layer not found",
+                        "uuid": uuid,
+                        "lon": lon,
+                        "lat": lat,
+                        "value": None,
+                    }
+
+                layer_styling = temp_info.layer_styling
+                raster_path = _resolve_cached_artifact(
+                    temp_info,
+                    minio_manager,
+                    default_ext="_cog.tif",
+                )
+                cog_raster = COGRaster.open_from_local(raster_path)
+
+        # =====================================================================
+        # BRANCH 2: Permanent Catalog Raster Layer (LayerInfo)
+        # =====================================================================
+        else:
+            with LayerInfo.managed_session() as session:
+                info = session.query(LayerInfo).filter_by(uuid=uuid).one_or_none()
+
+                if info is None or info.data_model not in ["R", "Raster"]:
+                    return {
+                        "success": False,
+                        "message": "Raster layer not found",
+                        "uuid": uuid,
+                        "lon": lon,
+                        "lat": lat,
+                        "value": None,
+                    }
+
+                layer_styling = info.layer_styling
+                params = info.layer_accessibility.accessibility_params or {}
+
+                if info.layer_accessibility.is_minio:
+                    cog_raster = COGRaster.open_from_minio(
+                        params,
+                        minio_manager=minio_manager,
+                        expires_minutes=30,
+                    )
+                else:
+                    file_path = params.file_path
+                    if not file_path:
+                        return {
+                            "success": False,
+                            "message": "Raster storage parameters missing in database",
+                            "uuid": uuid,
+                            "lon": lon,
+                            "lat": lat,
+                            "value": None,
+                        }
+
+                    if not os.path.isabs(file_path):
+                        file_path = os.path.join(MEDIA_DIR, file_path.lstrip("/\\"))
+
+                    cog_raster = COGRaster.open_cog(file_path)
+
+        if cog_raster is None:
+            return {
+                "success": False,
+                "message": "Unable to open raster dataset",
+                "uuid": uuid,
+                "lon": lon,
+                "lat": lat,
+                "value": None,
+            }
+
+        # =====================================================================
+        # SHARED PIXEL SAMPLING & RESPONSE FORMATTING
+        # =====================================================================
+        pixel = cog_raster.get_pixel_value_at_long_lat(lon, lat)
+
+        if pixel is None:
+            return {
+                "success": False,
+                "message": "No pixel value found at this location",
+                "uuid": uuid,
+                "lon": lon,
+                "lat": lat,
+                "value": None,
+            }
+
+        value = pixel
         try:
-            info = session.query(LayerInfo).filter_by(uuid=uuid).one_or_none()
+            if hasattr(pixel, "data"):
+                value = pixel.data.tolist()
+            elif isinstance(pixel, dict):
+                value = pixel
+            elif hasattr(pixel, "tolist"):
+                value = pixel.tolist()
+        except Exception:
+            value = str(pixel)
 
-            if info is None or info.data_model not in ["R", "Raster"]:
-                return {"success": False, "message": "Raster layer not found", "uuid": uuid, "lon": lon, "lat": lat,
-                        "value": None, }
+        raw_value = value
+        if isinstance(value, list) and len(value):
+            raw_value = value[0]
 
-            # file_path = info.layer_accessibility.file_path
-            # cog_raster = COGRaster.open_cog(file_path)
+        try:
+            raw_value = float(raw_value)
+        except Exception:
+            pass
 
-            params = info.layer_accessibility.accessibility_params or {}
-            if info.layer_accessibility.is_minio:
-                # MinIO Storage: Use the new COGRaster.open_from_minio method
-                cog_raster = COGRaster.open_from_minio(params, minio_manager=minio_manager, expires_minutes=30, )
-            else:
-                # Local File Storage Fallback
-                file_path = params.file_path
-                if not file_path:
-                    return {"success": False, "message": "Raster storage parameters missing in database", "uuid": uuid,
-                            "lon": lon, "lat": lat, "value": None, }
+        # Check explicit raster NoData and extreme float sentinel values
+        is_nodata = False
+        if isinstance(raw_value, float):
+            if raw_value < -1.0e30 or (
+                cog_raster.nodata is not None
+                and not (cog_raster.nodata != cog_raster.nodata)  # not NaN
+                and abs(raw_value - float(cog_raster.nodata)) < 1e-6
+            ) or (raw_value != raw_value):  # NaN check
+                is_nodata = True
 
-                if not os.path.isabs(file_path):
-                    file_path = os.path.join(MEDIA_DIR, file_path.lstrip("/\\"))
+        if is_nodata:
+            return {
+                "success": False,
+                "message": "NoData pixel",
+                "uuid": uuid,
+                "lon": lon,
+                "lat": lat,
+                "value": None,
+                "label": None,
+            }
 
-                cog_raster = COGRaster.open_cog(file_path)
+        label = get_raster_style_label(raw_value, layer_styling)
 
-            pixel = cog_raster.get_pixel_value_at_long_lat(lon, lat)
+        return {
+            "success": True,
+            "uuid": uuid,
+            "lon": lon,
+            "lat": lat,
+            "value": raw_value,
+            "raw_value": value,
+            "label": label,
+            "styled_value": {
+                "value": raw_value,
+                "label": label,
+            },
+        }
 
-            if pixel is None:
-                return {"success": False, "message": "No pixel value found at this location", "uuid": uuid, "lon": lon,
-                        "lat": lat, "value": None, }
-
-            # rio-tiler point() may return object/dict-like result depending version
-            value = pixel
-
-            try:
-                if hasattr(pixel, "data"):
-                    value = pixel.data.tolist()
-                elif isinstance(pixel, dict):
-                    value = pixel
-                elif hasattr(pixel, "tolist"):
-                    value = pixel.tolist()
-            except Exception:
-                value = str(pixel)
-
-            # return {
-            #     "success": True,
-            #     "uuid": uuid,
-            #     "lon": lon,
-            #     "lat": lat,
-            #     "value": value,
-            # }
-            raw_value = value
-
-            if isinstance(value, list) and len(value):
-                raw_value = value[0]
-
-            try:
-                raw_value = float(raw_value)
-            except Exception:
-                pass
-
-            if isinstance(raw_value, float) and raw_value < -1.0e30:
-                return {"success": False, "message": "NoData pixel", "uuid": uuid, "lon": lon, "lat": lat,
-                        "value": None, "label": None, }
-
-            label = get_raster_style_label(raw_value, info.layer_styling)
-
-            return {"success": True, "uuid": uuid, "lon": lon, "lat": lat, "value": raw_value, "raw_value": value,
-                    "label": label, "styled_value": {"value": raw_value, "label": label, }, }
-
-        except Exception as e:
-            da_logger.exception(f"[RasterPixelError] uuid={uuid}, lon={lon}, lat={lat} — {e}")
-
-            return {"success": False, "message": str(e), "uuid": uuid, "lon": lon, "lat": lat, "value": None, }
+    except Exception as e:
+        da_logger.exception(
+            f"[RasterPixelError] uuid={uuid}, lon={lon}, lat={lat}, is_temp={is_temp} — {e}"
+        )
+        return {
+            "success": False,
+            "message": str(e),
+            "uuid": uuid,
+            "lon": lon,
+            "lat": lat,
+            "value": None,
+        }
