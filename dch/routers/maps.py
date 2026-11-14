@@ -40,8 +40,7 @@ def require_dch_admin(current_user: UserInfo):
     response_model=LayerInfoListResponse,
     summary="Get All Layer Info"
 )
-async def get_all_layer_info(current_user: UserInfo =
-                             Depends(AuthUtils.get_current_user)):
+async def get_all_layer_info(current_user: UserInfo = Depends(AuthUtils.get_current_user)):
     require_dch_admin(current_user)
     with LayerInfo.managed_session() as session:
         category_label = case(
@@ -57,8 +56,9 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.layer_name,
                 category_label,
                 LayerAccessibility.accessibility_type,
+                LayerInfo.format,
                 LayerAccessibility.params["table_name"].as_string().label("table_name"),
-                LayerAccessibility.params['model_name'].as_string().label('model_name'),
+                LayerAccessibility.params["model_name"].as_string().label("model_name"),
                 LayerInfo.srid,
                 LayerInfo.extent,
                 LayerInfo.extent_3857,
@@ -69,7 +69,6 @@ async def get_all_layer_info(current_user: UserInfo =
                 LayerInfo.layer_styling,
                 LayerInfo.data_url,
                 LayerInfo.date_range_url,
-
             )
             .join(LayerAccessibility, LayerAccessibility.id == LayerInfo.layer_access_id)
             .join(LayerCategory, LayerCategory.id == LayerInfo.category_id, isouter=True)
@@ -88,8 +87,9 @@ async def get_all_layer_info(current_user: UserInfo =
             "layer_name",
             "category",
             "accessibility_type",
+            "format",
             "table_name",
-            'model_name',
+            "model_name",
             "srid",
             "extent",
             "extent_3857",
@@ -100,7 +100,6 @@ async def get_all_layer_info(current_user: UserInfo =
             "layer_styling",
             "data_url",
             "date_range_url",
-
         ]
         df = df[column_order]
     return {"payload": ManageDataFrameUtils.grid_response(df, pkCols=["uuid"])}
