@@ -24,10 +24,102 @@ class AccessibilityType(APIEnum):
 
 
 class DataModel(APIEnum):
-    R = 'Raster'
-    V = 'Vector'
-    URL= 'URL'
-    Application= 'Application'
+    R = "Raster"
+    V = "Vector"
+    T = "Tabular"
+    D = "Document"
+    URL = "URL"
+    Application = "Application"
+
+
+class ModelType(APIEnum):
+    # Vector models
+    Tin = "TIN"
+    Network = "Network"
+    Geom = "Geometry"
+    Contour = "Contour"
+
+    # Raster models
+    Satellite = "Satellite"
+    DEM = "Digital Elevation Model"
+    DSM = "Digital Surface Model"
+    Surface = "Surface"
+    Classification = "Classification"
+
+    # Tabular models
+    Table = "Table"
+    Telemetry = "Telemetry"
+
+    # Document models
+    PDF = "PDF"
+    DOC = "Word Document"
+    Txt = "Text Document"
+    Latex = "LaTeX Document"
+
+    # General / shared
+    Application = "Application"
+    Api = "Api"
+    Other = "Other"
+
+    @classmethod
+    def vector_types(cls) -> list["ModelType"]:
+        """Returns ModelTypes applicable to Vector datasets."""
+        return [
+            cls.Geom,
+            cls.Network,
+            cls.Contour,
+            cls.Tin,
+            cls.Other,
+        ]
+
+    @classmethod
+    def raster_types(cls) -> list["ModelType"]:
+        """Returns ModelTypes applicable to Raster datasets."""
+        return [
+            cls.Satellite,
+            cls.DEM,
+            cls.DSM,
+            cls.Surface,
+            cls.Classification,
+            cls.Other,
+        ]
+
+    @classmethod
+    def tabular_types(cls) -> list["ModelType"]:
+        """Returns ModelTypes applicable to Tabular datasets."""
+        return [
+            cls.Table,
+            cls.Telemetry,
+            cls.Other,
+        ]
+
+    @classmethod
+    def document_types(cls) -> list["ModelType"]:
+        """Returns ModelTypes applicable to Document assets."""
+        return [
+            cls.PDF,
+            cls.DOC,
+            cls.Txt,
+            cls.Latex,
+            cls.Other,
+        ]
+
+    @classmethod
+    def by_data_model(cls, data_model: str | None = None) -> list[dict[str, str]]:
+        """Returns [{key, value}] choices filtered by DataModel ('V', 'R', 'T', 'D', or all)."""
+        normalized = (data_model or "").strip().upper()
+        if normalized in ("V", "VECTOR"):
+            items = cls.vector_types()
+        elif normalized in ("R", "RASTER"):
+            items = cls.raster_types()
+        elif normalized in ("T", "TABULAR"):
+            items = cls.tabular_types()
+        elif normalized in ("D", "DOCUMENT"):
+            items = cls.document_types()
+        else:
+            items = list(cls)
+
+        return [{"key": item.name, "value": item.value} for item in items]
 
 
 class GeomType(APIEnum):
@@ -37,24 +129,6 @@ class GeomType(APIEnum):
     MultiPoint = "MultiPoint"
     MultiLineString = "MultiLineString"
     MultiPolygon = "MultiPolygon"
-
-
-
-class ModelType(APIEnum):
-    # vector model
-    Tin = 'TIN'
-    Network = 'Network'
-    Geom = 'Geometry'
-    Contour = 'Contour'
-    # raster model
-    Satellite = 'Satellite'
-    DEM = 'Digital Elevation Model'
-    DSM = 'Digital Surface Model'
-    Surface = 'Surface'
-    Classification = 'Classification'
-    Application = 'Application'
-    Api = 'Api'
-    Other = 'Other'
 
 
 class ApplicationURLType(str, Enum):

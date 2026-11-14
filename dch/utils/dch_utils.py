@@ -5,6 +5,8 @@ import json
 import math
 import re
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Union, Dict
 
 import lxml.etree as ET
@@ -25,6 +27,41 @@ from settings import DEFAULT_EXTENT, DEFAULT_SRID
 
 
 class DCHUtils:
+
+    @staticmethod
+    def build_versioned_object_name(
+            *,
+            file_name: str,
+            category_main: str,
+            model_type: str,
+            uuid_str: str,
+            category_sub: str | None = None,
+            ext: str | None = None,
+            dt: datetime | None = None,
+    ) -> str:
+        """
+        Builds an immutable, traceable, chronologically sortable MinIO object key:
+          <category_main>[/<category_sub>]/<model_type>/<slug>_<uuid>_YYYYMMDD_HHMMSS_fff.<ext>
+        """
+        now = dt or datetime.now(timezone.utc)
+        ms = now.microsecond // 1000
+        ts = f"{now.strftime('%Y%m%d_%H%M%S')}_{ms:03d}"
+
+        raw_path = Path(file_name)
+        resolved_ext = (ext or raw_path.suffix.lstrip(".")).lower()
+        stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw_path.stem).strip("_").lower() or "layer"
+
+        def clean_part(val: str) -> str:
+            return re.sub(r"[^a-zA-Z0-9_-]+", "_", val.strip()).strip("/")
+
+        parts = [clean_part(category_main)]
+        if category_sub and category_sub.strip():
+            parts.append(clean_part(category_sub))
+        parts.append(clean_part(model_type))
+        parts.append(f"{stem}_{clean_part(uuid_str)}_{ts}.{resolved_ext}")
+
+        return "/".join(p for p in parts if p)
+
     @staticmethod
     def gzip_data(data: Union[str,Dict]) -> str:
         if isinstance(data, dict):

@@ -24,7 +24,7 @@ from app.damapql.dch.dtypes import (DBConnectionType, LayerAccessibilityType, La
                                     S3AccessibilityParams, FileAccessibilityParams, LayerCategoryType, LayerInfoType,
                                     LayerQualityLevelType, MapInfoType, )
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
-from app.damapql.settings import IS_LOCAL, MEDIA_BASE
+from app.damapql.settings import IS_LOCAL, MEDIA_BASE, DCH_DATA_DB_KEY
 from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import ExternalEngineRegistry, get_minio_manager
 from app.damapql.utils.adapters.services.db_query import DBQuery
@@ -103,6 +103,52 @@ class DBConnection(DBBase):
 
     def __str__(self):
         return self.name
+
+    @classmethod
+    def get_or_create_from_db_key(cls, db_key: str = DCH_DATA_DB_KEY) -> DBConnection:
+        """
+        Resolves or auto-registers a DBConnection record in `dch_db_connection`
+        from a configured key in `settings.DATABASES` (e.g. DCH_DATA_DB_KEY).
+        """
+        from app.damapql.settings import DCH_DATA_DB_KEY
+        from settings import DATABASES
+
+        target_key = db_key or DCH_DATA_DB_KEY
+        if target_key not in DATABASES:
+            raise KeyError(f"Database key '{target_key}' is not configured in settings.DATABASES.")
+
+        db_config = DATABASES[target_key]
+        db_name = db_config["name"]
+        host = "localhost" if os.environ.get("DATA_HOST") == db_config["host"] and IS_LOCAL else db_config["host"]
+        con_name = cls.get_connection_name(db_name, host)
+
+        with cls.managed_session() as session:
+            try:
+                db_conn = session.execute(
+                    select(cls).where(cls.name == con_name)
+                ).scalar_one_or_none()
+
+                if db_conn is None:
+                    encrypted_password = CryptoUtils().encrypt_txt(db_config["password"])
+                    db_conn = cls(
+                        name=con_name,
+                        params={
+                            "engine": db_config.get("engine", "postgresql"),
+                            "host": host,
+                            "port": str(db_config.get("port", "5432")),
+                            "user": db_config["user"],
+                            "password": encrypted_password,
+                            "name": db_name,
+                        },
+                    )
+                    session.add(db_conn)
+                    session.commit()
+                    session.refresh(db_conn)
+
+                return db_conn
+            except SQLAlchemyError:
+                session.rollback()
+                raise
 
     @classmethod
     def create_from_dict(cls, db_config: dict) -> DBConnection:
@@ -477,18 +523,37 @@ class LayerAccessibility(DBBase):
         return (self.params or {}).get("pk_cols", [], )
 
     @property
-    def cols_name(self) -> list:
+    def cols_name(self) -> list[str]:
+        cols = (self.params or {}).get("columns") or []
+        if isinstance(cols, str):
+            import json
+            try:
+                cols = json.loads(cols)
+            except Exception:
+                return []
 
-        cols = (self.params or {}).get("columns", [], )
-
-        return [column["name"] for column in cols if column.get("name")]
+        result: list[str] = []
+        for column in cols:
+            if isinstance(column, dict) and column.get("name"):
+                result.append(column["name"])
+            elif isinstance(column, str) and column:
+                result.append(column)
+        return result
 
     @property
     def cols_type(self) -> list:
+        cols = (self.params or {}).get("columns") or []
+        if isinstance(cols, str):
+            import json
+            try:
+                cols = json.loads(cols)
+            except Exception:
+                return []
 
-        cols = (self.params or {}).get("columns", [], )
-
-        return [column.get("d_type") for column in cols]
+        return [
+            column.get("d_type", "string") if isinstance(column, dict) else "string"
+            for column in cols
+        ]
 
     @property
     def geometry_col(self) -> Optional[str]:

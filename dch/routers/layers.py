@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.damapql.auth.dtypes import UserInfo
 from app.damapql.auth.utils import AuthUtils
 from app.damapql.config_registry import UserAOIService, BoundaryHierarchyService
+from app.damapql.dch.api_enum import ModelType
 from app.damapql.dch.dtypes import AttributeTableResponse
 from app.damapql.dch.models import LayerInfo, DataModel, DBQuery, LayerCategory
 from app.damapql.dch.schemas.geojson import GeoJSON
@@ -793,3 +794,8 @@ def get_layer_attributes_page(
     cleaned_df = df.astype(object).where(pd.notnull(df), None)
 
     return {"payload": cleaned_df.to_dict(orient="records")}
+
+
+@dch_layers_router.get("/model_types/")
+def get_model_types(data_model: Optional[str] = Query(None)):
+    return ModelType.by_data_model(data_model)

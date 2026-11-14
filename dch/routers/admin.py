@@ -7,13 +7,15 @@ import re
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any, Optional, Dict, List
 
 import geopandas as gpd
 import pandas as pd
-from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
+from digitalarzengine.io.managers.minio_manager import MinioManager
+from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query, Form, File, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from pyproj import Transformer
@@ -33,6 +35,7 @@ from app.damapql.dch.models import (
 )
 from app.damapql.dch.routers.admin_dependencies import require_dch_admin
 from app.damapql.dch.schemas.geojson import GeoJSON
+from app.damapql.dch.services.ingestion.vector import VectorIngestService, VectorStorageEngineType
 from app.damapql.dch.services.layer_query_services import LayerQueryService
 from app.damapql.dch.services.upload_package_service import DCHUploadPackageService
 from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
@@ -44,7 +47,7 @@ from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.manage import reconcile_layerinfo, create_layerinfo_from_app_models
 from app.damapql.settings import DCH_MEDIA_DIR, DCH_DATA_DB_KEY, DCH_APP_NAME
 from app.damapql.utils.adapters.db import DBBase
-from app.damapql.utils.adapters.deps import get_sync_session
+from app.damapql.utils.adapters.deps import get_sync_session, get_minio_manager
 from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.crypto import CryptoUtils
 from digitalarzengine.io.managers.db_manager import GeoDBManager
@@ -582,11 +585,23 @@ async def save_layer_info(
                 if key in IMMUTABLE_COLS or key in {"model_name", "table_name"} or not hasattr(obj, key):
                     continue
 
+
                 # ChoiceType / Enum normalization
                 if key == "data_model":
-                    value = DataModel.get_name(value)
+                    if value in DataModel.__members__:
+                        value = DataModel[value].name
+                    else:
+                        value = DataModel.get_name(value)
                 elif key.lower() == "model_type":
-                    value = ModelType.get_name(value)
+                    if value in ModelType.__members__:
+                        value = ModelType[value].name
+                    else:
+                        value = ModelType.get_name(value)
+                elif key == "category_id":
+                    value = int(value) if value not in (None, "") else None
+                elif key == "temporal_res":
+                    if isinstance(value, str):
+                        value = datetime.date.fromisoformat(value.strip()[:10]) if value.strip() else None
 
                 # List / Array Fields
                 elif key in LIST_FIELDS:
@@ -718,93 +733,96 @@ async def check_table_name(
 # Updated Upload Handler
 # ------------------------------------------------------------------
 
+# ------------------------------------------------------------------
+# Updated Vector / Shapefile Upload Handler (PostGIS + Managed Storage)
+# ------------------------------------------------------------------
 @dch_admin_router.post("/upload_shp_file/")
-async def upload_shp_file(
-        request: Request,
-        current_user: dict = Depends(AuthUtils.require_role("app_manager")),
+def upload_shp_file(
+    files: List[UploadFile] = File(
+        ...,
+        description="Shapefile components (.shp, .shx, .dbf, .prj) or .zip/.geojson/.fgb/.gpkg/.parquet",
+    ),
+    layer_category_id: int = Form(...),
+    title: Optional[str] = Form(None),
+    table_name: Optional[str] = Form(None),
+    storage_engine: VectorStorageEngineType = Form(VectorStorageEngineType.POSTGIS),
+    symbology: Optional[str] = Form(None),
+    temporal: Optional[str] = Form(None),
+    model_type: str = Form(ModelType.Geom.name),
+    db: Session = Depends(get_sync_session),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+    minio_manager: Optional[MinioManager] = Depends(get_minio_manager),
 ):
-    form = await request.form()
-    layer_category_id = form.get("layer_category_id")
-    custom_table_name = form.get("table_name")
+    require_dch_admin(current_user)
 
-    if not layer_category_id:
-        raise HTTPException(status_code=400, detail="layer_category_id is required")
-
-    upload_service = DCHUploadSessionService(media_dir=DCH_MEDIA_DIR, logger=da_logger)
-    package_service = DCHUploadPackageService(upload_service=upload_service)
-
-    upload_id = None
-    success = False
-
-    try:
-        upload_id, session_dir, saved_files = await upload_service.save_files_from_form(
-            form=form, upload_type="shapefile", metadata={"purpose": "vector_import"}
+    valid_files = [f for f in files if f and f.filename]
+    if not valid_files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one shapefile component or archive is required.",
         )
 
-        shape_info = package_service.resolve_shapefile(upload_id)
-        shp_fp = shape_info["main_file"]
-        filename_without_ext = shape_info["base_name"]
-
-        # Enforce prefix and safe <=54 character table name without double prefixing
-        raw_name = (custom_table_name or filename_without_ext).strip()
-        table_name = DCHUtils.format_table_name(raw_name, max_len=54)
-
-        engine = DBBase.get_engine(db_key=DCH_DATA_DB_KEY)
-        target_schema_name = "public"
-
-        # If table name already taken, fall back automatically to unique short_table_name with UUID
-        with engine.connect() as conn:
-            inspector = inspect(conn)
-            if table_name in [t.lower() for t in inspector.get_table_names(schema=target_schema_name)]:
-                table_name = DCHUtils.short_table_name(filename_without_ext, max_len=54)
-
-        gdf = gpd.read_file(shp_fp)
-        gdf.rename_geometry("geom", inplace=True)
-        gdf.columns = gdf.columns.str.lower()
-
-        cols_to_drop = [c for c in ["objectid", "fid", "id", "dch_id"] if c in gdf.columns]
-        if cols_to_drop:
-            gdf.drop(columns=cols_to_drop, inplace=True)
-
-        gdf.to_postgis(
-            table_name,
-            con=engine,
-            schema=target_schema_name,
-            if_exists="fail",
-            index=False,
+    # Validate and default model_type to ModelType.Geom.name ("Geom")
+    resolved_model_type = (model_type or "").strip() or ModelType.Geom.name
+    if resolved_model_type not in ModelType.__members__:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model_type '{resolved_model_type}'.",
         )
 
-        with engine.begin() as conn:
-            conn.execute(
-                text(f"""
-                    ALTER TABLE "{target_schema_name}"."{table_name}" 
-                    ADD COLUMN dch_id SERIAL PRIMARY KEY;
-                """)
+    # Derive fallback title from .shp or first uploaded file stem
+    shp_candidate = next(
+        (f.filename for f in valid_files if f.filename.lower().endswith(".shp")),
+        valid_files[0].filename,
+    )
+    default_title = (
+        Path(shp_candidate).stem.replace("_", " ").replace("-", " ").strip()
+        or "Vector Layer"
+    )
+    resolved_title = (title or default_title).strip()
+
+    parsed_symbology: Optional[Dict[str, Any]] = None
+    if symbology and symbology.strip():
+        try:
+            parsed_symbology = json.loads(symbology)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid JSON provided for 'symbology'.",
             )
 
-        uuid = DCHUtils.get_uuid1()
-        DCHUtils.create_vector_layer_info(
-            engine, table_name, uuid=uuid, layer_category_id=layer_category_id
-        )
+    extra_engine_params: Dict[str, Any] = {}
+    if table_name and table_name.strip():
+        extra_engine_params["table_name"] = table_name.strip()
 
-        success = True
-        return {
-            "payload": {
-                "msg": "Shapefile uploaded and imported successfully",
-                "uuid": uuid,
-                "table": table_name,
-                "upload_id": upload_id,
-            }
+    result = VectorIngestService.ingest_upload(
+        session=db,
+        files=valid_files,
+        title=resolved_title,
+        category_id=layer_category_id,
+        engine_type=storage_engine,
+        temporal=temporal,
+        model_type=resolved_model_type,
+        uploaded_by=getattr(current_user, "id", None),
+        symbology=parsed_symbology,
+        require_crs=True,
+        enforce_single_geom=True,
+        minio_manager=minio_manager,
+        extra_engine_params=extra_engine_params or None,
+    )
+
+    return {
+        "payload": {
+            "msg": f"Vector layer ingested successfully ({result.format})",
+            "uuid": result.uuid,
+            "table": result.table_name,
+            "format": result.format,
+            "engine": result.engine.value,
+            "feature_count": result.feature_count,
+            "geom_type": result.geom_type,
+            "srid": result.srid,
         }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        da_logger.exception(f"PostGIS import error during shapefile upload: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if success and upload_id:
-            upload_service.cleanup_session(upload_id)
+    }
 
 # ---------------------------------------------------------------------
 # Shapefile upload -> PREVIEW append into existing table
@@ -1880,3 +1898,4 @@ async def download_layer_shapefile(
     except Exception as e:
         da_logger.exception(f"Failed to export shapefile for layer {uuid}: {e}")
         raise HTTPException(status_code=500, detail="Failed to export Shapefile")
+

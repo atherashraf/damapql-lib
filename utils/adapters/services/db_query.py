@@ -371,56 +371,89 @@ class DBQuery:
 
     @staticmethod
     def _build_mvt_sql(
-        stmt: Union[str, Select],
-        z: int,
-        x: int,
-        y: int,
-        geom_col: str = "geom",
-        layer_name: str = "default_layer",
-        buffer: int = 64,
-        extent: int = 4096,
-        resolution: float = 0
+            stmt: Union[str, Select],
+            z: int,
+            x: int,
+            y: int,
+            geom_col: str = "geom",
+            layer_name: str = "default_layer",
+            buffer: int = 64,
+            extent: int = 4096,
+            resolution: float = 0,
+            srid: Optional[int] = None,
     ) -> str:
-        """Constructs unified PostGIS ST_AsMVT SQL string."""
+        """
+        Constructs unified PostGIS ST_AsMVT SQL supporting any source CRS:
+        - SRID 3857: zero reprojection overhead, direct GIST index filter.
+        - Any other SRID (4326, UTM, etc.): transforms tile envelope to source SRID
+          for GIST index lookup, then transforms to 3857 before metric simplification.
+        - SRID 0 (unregistered): safely falls back to 4326 via ST_SetSRID.
+        """
         raw_sql = DBQuery._compile_stmt(stmt)
         sanitized_sql = DBQuery._quote_raw_select_stmt(raw_sql)
-        clean_geom = geom_col.replace('"', '').strip()
+        clean_geom = geom_col.replace('"', "").strip()
         geom_ref = f't."{clean_geom}"'
 
-        geom_expression = f"ST_Simplify({geom_ref}, {resolution})" if resolution > 0 else geom_ref
+        if srid == 3857:
+            # Fast path: native Web Mercator (no ST_Transform needed)
+            native_geom = geom_ref
+            tile_bbox_in_src_crs = "bounds.envelope"
+            geom_3857 = geom_ref
+        elif srid and srid > 0:
+            # Known non-3857 SRID (e.g., 4326, 32642, 32643)
+            native_geom = f"ST_SetSRID({geom_ref}, {srid})"
+            tile_bbox_in_src_crs = f"ST_Transform(bounds.envelope, {srid})"
+            geom_3857 = f"ST_Transform({native_geom}, 3857)"
+        else:
+            # Dynamic per-geometry SRID resolution (handles 3857, 4326, UTM, and SRID=0)
+            resolved_srid = f"COALESCE(NULLIF(ST_SRID({geom_ref}), 0), 4326)"
+            native_geom = f"ST_SetSRID({geom_ref}, {resolved_srid})"
+            tile_bbox_in_src_crs = (
+                f"CASE WHEN {resolved_srid} = 3857 THEN bounds.envelope "
+                f"ELSE ST_Transform(bounds.envelope, {resolved_srid}) END"
+            )
+            geom_3857 = (
+                f"CASE WHEN {resolved_srid} = 3857 THEN {geom_ref} "
+                f"ELSE ST_Transform({native_geom}, 3857) END"
+            )
+
+        if resolution > 0:
+            geom_expression = f"ST_SimplifyPreserveTopology({geom_3857}, {resolution})"
+        else:
+            geom_expression = geom_3857
 
         return f"""
-            WITH 
-            bounds AS (
-              SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
-            ),
-            subquery AS (
-              {sanitized_sql}
-            ),
-            mvt_geoms AS (
-              SELECT 
-                ST_AsMVTGeom(
-                    ST_Transform({geom_expression}, 3857), 
-                    bounds.envelope, 
+                WITH 
+                bounds AS (
+                  SELECT ST_TileEnvelope({z}, {x}, {y}) AS envelope
+                ),
+                subquery AS (
+                  {sanitized_sql}
+                ),
+                mvt_geoms AS (
+                  SELECT 
+                    ST_AsMVTGeom(
+                        {geom_expression}, 
+                        bounds.envelope, 
+                        {extent}, 
+                        {buffer}, 
+                        true
+                    ) AS mvt_geom,
+                    t.*
+                  FROM subquery AS t, bounds
+                  WHERE {geom_ref} IS NOT NULL
+                    AND {geom_ref} && {tile_bbox_in_src_crs}
+                    AND ST_Intersects({native_geom}, {tile_bbox_in_src_crs})
+                )
+                SELECT ST_AsMVT(
+                    mvt_geoms, 
+                    '{layer_name}', 
                     {extent}, 
-                    {buffer}, 
-                    true
-                ) AS mvt_geom,
-                t.*
-              FROM subquery AS t, bounds
-              WHERE ST_Intersects(
-                  ST_Transform({geom_ref}, 3857), 
-                  bounds.envelope
-              )
-            )
-            SELECT ST_AsMVT(
-                mvt_geoms, 
-                '{layer_name}', 
-                {extent}, 
-                'mvt_geom'
-            ) 
-            FROM mvt_geoms;
-        """
+                    'mvt_geom'
+                ) 
+                FROM mvt_geoms
+                WHERE mvt_geom IS NOT NULL;
+            """
 
     @staticmethod
     def _build_geojson_sql(
@@ -466,7 +499,8 @@ class DBQuery:
         layer_name: str = "default_layer",
         buffer: int = 64,
         extent: int = 4096,
-        resolution: float = 0
+        resolution: float = 0,
+        srid: Optional[int] = None,
     ) -> bytes:
         """Generates Mapbox Vector Tile (MVT) binary protocol buffer data via PostGIS."""
         if session.get_bind().dialect.name != "postgresql":

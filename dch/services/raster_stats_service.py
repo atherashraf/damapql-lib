@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from app.damapql.dch.dtypes import AttributeTablePayload
 from app.damapql.dch.models import LayerInfo, DataModel
-from app.damapql.dch.services.raster_access_service import RasterAccessService
+from app.damapql.dch.services.layer_accessibility.raster_access_service import RasterAccessService
 from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
 from digitalarzengine.io.managers.minio_manager import MinioManager
 from digitalarzengine.processing.raster.band_process import BandProcess

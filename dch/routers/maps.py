@@ -416,15 +416,35 @@ async def get_layer_info(
 ):
     with LayerInfo.managed_session() as session:
         info = session.execute(
-            select(LayerInfo).where(LayerInfo.uuid == uuid)
+            select(LayerInfo)
+            .options(
+                selectinload(LayerInfo.layer_category),
+                selectinload(LayerInfo.layer_accessibility),
+            )
+            .where(LayerInfo.uuid == uuid)
         ).scalar_one_or_none()
 
         if info:
+            data_model_code = info.data_model.code if info.data_model else None
+            data_model_val = info.data_model.value if info.data_model else None
+            model_type_code = info.model_type.code if info.model_type else None
+            model_type_val = info.model_type.value if info.model_type else None
+            access = info.layer_accessibility
+
             return {
                 "payload": {
+                    "id": info.id,
                     "uuid": info.uuid,
                     "title": info.title,
-                    "dataModel": info.data_model.code if info.data_model else None,
+                    "layer_name": info.layer_name,
+                    "category_id": info.category_id,
+                    "category": (
+                        f"{info.layer_category.main} - {info.layer_category.sub}"
+                        if info.layer_category and info.layer_category.sub
+                        else (info.layer_category.main if info.layer_category else None)
+                    ),
+                    # Keep existing camelCase keys for map engine compatibility
+                    "dataModel": data_model_code,
                     "geomType": list(info.geom_type) if info.geom_type is not None else [],
                     "zoomRange": info.zoom_range or [0, 30],
                     "extent3857": info.extent_3857,
@@ -433,6 +453,25 @@ async def get_layer_info(
                     "layerSetting": info.layer_setting or {},
                     "format": info.format,
                     "dateRangeURL": info.date_range_url,
+                    # Additional snake_case LayerInfo metadata for Designer & Admin editing
+                    "data_model": data_model_code,
+                    "data_model_label": data_model_val,
+                    "model_type": model_type_code,
+                    "model_type_label": model_type_val,
+                    "srid": info.srid,
+                    "extent": info.extent,
+                    "geom_type": list(info.geom_type) if info.geom_type is not None else [],
+                    "zoom_range": info.zoom_range or [0, 30],
+                    "temporal_res": info.temporal_res.isoformat() if info.temporal_res else None,
+                    "data_url": info.data_url,
+                    "date_range_url": info.date_range_url,
+                    "accessibility_type": (
+                        access.accessibility_type.code
+                        if access and access.accessibility_type
+                        else None
+                    ),
+                    "table_name": (access.params or {}).get("table_name") if access else None,
+                    "model_name": info.model_name or ((access.params or {}).get("model_name") if access else None),
                 }
             }
 

@@ -584,3 +584,40 @@ class LayerInfoService:
         }
         db.flush()
         return existing_layer, True
+
+    @staticmethod
+    def build_layer_object_name(
+            *,
+            file_name: str,
+            model_type: str,
+            uuid_str: str,
+            db=None,
+            layer_category_id: Optional[int] = None,
+            category: Optional[LayerCategory] = None,
+            ext: str | None = None,
+    ) -> str:
+        if category is None:
+            if db is None or layer_category_id is None:
+                raise ValueError("Either 'category' or ('db' and 'layer_category_id') must be provided")
+            category = db.get(LayerCategory, layer_category_id)
+            if not category:
+                raise ValueError(f"Invalid category id: {layer_category_id}")
+
+        if getattr(category, "main", None):
+            category_main = category.main
+            category_sub = getattr(category, "sub", None)
+        elif getattr(category, "parent", None):
+            category_main = category.parent.name
+            category_sub = category.name
+        else:
+            category_main = getattr(category, "main_category", None) or getattr(category, "name", "general")
+            category_sub = getattr(category, "sub_category", None)
+
+        return DCHUtils.build_versioned_object_name(
+            file_name=file_name,
+            category_main=category_main,
+            category_sub=category_sub,
+            model_type=model_type,
+            uuid_str=uuid_str,
+            ext=ext,
+        )
