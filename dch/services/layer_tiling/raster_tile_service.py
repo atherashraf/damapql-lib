@@ -111,7 +111,11 @@ class RasterTileService:
                 if custom_color_map is not None:
                     color_map = custom_color_map
                 elif info.layer_styling:
-                    color_map = COGRaster.create_color_map(info.layer_styling)
+                    try:
+                        color_map = COGRaster.create_color_map(info.layer_styling)
+                    except Exception as style_err:
+                        da_logger.warning(f"Ignoring invalid raster layer_styling for {uuid}: {style_err}")
+                        color_map = None
                 else:
                     color_map = None
 

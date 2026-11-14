@@ -7,14 +7,14 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, List, Any
 
 import lxml.etree as ET
 from digitalarzengine.utils.singletons import da_logger
 from geopandas import GeoDataFrame
 from pyproj import Transformer
 from shapely.geometry import box
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.engine import Engine
 
 from app.damapql.dch.api_enum import DataModel, ModelType
@@ -27,6 +27,86 @@ from settings import DEFAULT_EXTENT, DEFAULT_SRID
 
 
 class DCHUtils:
+
+    @classmethod
+    def get_spatial_tables_info(
+            cls,
+            engine: Engine,
+            schema: Optional[str] = None,
+    ) -> List[dict[str, Optional[Any]]]:
+        """
+        List spatial tables from a SQLAlchemy Engine along with their primary
+        geometry column, concrete geometry type, and SRID.
+        """
+        inspector = inspect(engine)
+        spatial_db = SpatialDB(engine)
+        spatial_tables: List[dict[str, Optional[Any]]] = []
+
+        with engine.connect() as conn:
+            for tbl_name in inspector.get_table_names(schema=schema):
+                try:
+                    table = spatial_db.get_table(tbl_name, schema=schema)
+                except TypeError:
+                    table = spatial_db.get_table(tbl_name)
+
+                if table is None:
+                    continue
+
+                geom_cols = [
+                    col for col in table.columns
+                    if "geometry" in str(col.type).lower()
+                ]
+                if not geom_cols:
+                    continue
+
+                geom_col = geom_cols[0]
+                raw_geom_type = getattr(geom_col.type, "geometry_type", None)
+                geom_type_upper = str(raw_geom_type).upper() if raw_geom_type else None
+
+                raw_srid = getattr(geom_col.type, "srid", None)
+                srid: Optional[int] = int(raw_srid) if raw_srid not in (-1, 0, None) else None
+
+                needs_geom_sample = not geom_type_upper or geom_type_upper in (
+                    "GEOMETRY",
+                    "GEOMETRYCOLLECTION",
+                )
+                needs_srid_sample = srid is None
+
+                if needs_geom_sample or needs_srid_sample:
+                    qualified_tbl = cls._quote_table(schema, tbl_name)
+                    sample_sql = text(
+                        f'SELECT ST_GeometryType("{geom_col.name}") AS geom_type, '
+                        f'ST_SRID("{geom_col.name}") AS srid '
+                        f'FROM {qualified_tbl} '
+                        f'WHERE "{geom_col.name}" IS NOT NULL LIMIT 1'
+                    )
+                    try:
+                        row = conn.execute(sample_sql).first()
+                        if row is not None:
+                            if needs_geom_sample and row.geom_type:
+                                geom_type_upper = str(row.geom_type).upper().removeprefix("ST_")
+                            if needs_srid_sample and row.srid not in (-1, 0, None):
+                                srid = int(row.srid)
+                    except Exception:
+                        pass
+
+                spatial_tables.append({
+                    "table_name": tbl_name,
+                    "geom_col": geom_col.name,
+                    "geom_type": geom_type_upper,
+                    "srid": srid,
+                })
+
+        return spatial_tables
+
+    @classmethod
+    def get_spatial_table_names(
+            cls,
+            engine: Engine,
+            schema: Optional[str] = None,
+    ) -> List[str]:
+        """List all table names containing geometry columns."""
+        return [item["table_name"] for item in cls.get_spatial_tables_info(engine=engine, schema=schema)]
 
     @staticmethod
     def build_versioned_object_name(
@@ -287,6 +367,9 @@ class DCHUtils:
             user=None,
             schema: Optional[str] = None,
             db_conn_name: Optional[str] = None,
+            title: Optional[str] = None,
+            model_type: Optional[str] = None,
+            symbology: Optional[str] = None
     ) -> bool:
         """
         Create LayerAccessibility + LayerInfo for a vector table.
@@ -398,13 +481,31 @@ class DCHUtils:
                 da_logger.error(f"Failed to create LayerAccessibility for table: {table_name}")
                 return False
 
+
+
+            resolved_title = (title or "").strip() or cls.create_title(layer_name)
+            resolved_model_type = (
+                model_type
+                if (model_type and hasattr(ModelType, model_type))
+                else ModelType.Geom.name
+            )
+
             lf = LayerInfo()
             lf.uuid = uuid
-            lf.title = cls.create_title(layer_name)
+            lf.title = resolved_title
             lf.layer_name = layer_name
             lf.layer_access_id = la.id
             lf.category_id = int(layer_category_id) if layer_category_id is not None else None
             lf.quality_level_id = 5
+            lf.format = "POSTGIS"
+
+            if symbology:
+                try:
+                    lf.layer_styling = (
+                        json.loads(symbology) if isinstance(symbology, str) else symbology
+                    )
+                except Exception as style_err:
+                    da_logger.warning(f"Invalid symbology JSON for {table_name}: {style_err}")
 
             if gdf.empty:
                 da_logger.warning(
@@ -464,7 +565,7 @@ class DCHUtils:
                     lf.geom_type = []
 
             lf.data_model = DataModel.V.name
-            lf.model_type = ModelType.Geom.name
+            lf.model_type = resolved_model_type
             lf.uploaded_by = cls._get_user_id(user)
 
             lf.save()
@@ -474,148 +575,6 @@ class DCHUtils:
             da_logger.exception(f"ERROR in create_vector_layer_info: {str(e)}")
             return False
 
-    # @classmethod
-    # def create_vector_layer_info(
-    #         cls,
-    #         engine: Engine,
-    #         table_name: str,
-    #         uuid: Optional[str] = None,
-    #         layer_category_id=None,
-    #         user=None,
-    #         schema: Optional[str] = None,
-    #         db_conn_name: Optional[str] = None,
-    # ) -> bool:
-    #     """
-    #     Create LayerAccessibility + LayerInfo for a vector table.
-    #     Engine-only version. No GeoDBManager, no db-key string.
-    #     """
-    #     if uuid is None:
-    #         uuid = cls.get_uuid1()
-    #
-    #     try:
-    #         spatial_db = SpatialDB(engine)
-    #
-    #         # Use schema-aware table existence if your SpatialDB supports it
-    #         if not spatial_db.is_table(table_name):
-    #             da_logger.error(f"Table does not exist: {table_name}")
-    #             return False
-    #
-    #         table = spatial_db.get_table(table_name)
-    #
-    #         geometry_cols = [
-    #             col for col in list(table.columns)
-    #             if "geometry" in str(col.type).lower()
-    #         ]
-    #         if not geometry_cols:
-    #             da_logger.error(f"No geometry column found in table: {table_name}")
-    #             return False
-    #
-    #         geom_col = geometry_cols[0]
-    #
-    #         # Build column dictionary here
-    #         columns = {col.name: str(col.type) for col in table.columns}
-    #
-    #         primary_cols = [key.name for key in inspect(table).primary_key]
-    #
-    #         if len(primary_cols) == 0:
-    #             quoted_table = cls._quote_table(schema, table_name)
-    #
-    #             if "dch_id" not in table.columns:
-    #                 stmt = f"ALTER TABLE {quoted_table} ADD COLUMN dch_id SERIAL PRIMARY KEY"
-    #                 spatial_db.execute_ddl(stmt)
-    #             else:
-    #                 stmt = f"""
-    #                 ALTER TABLE {quoted_table}
-    #                 DROP CONSTRAINT IF EXISTS {table_name}_pkey;
-    #                 ALTER TABLE {quoted_table}
-    #                 ADD PRIMARY KEY (dch_id);
-    #                 """
-    #                 spatial_db.execute_ddl(stmt)
-    #
-    #             table = spatial_db.get_table(table_name)
-    #             columns = {col.name: str(col.type) for col in table.columns}
-    #             primary_cols = ["dch_id"]
-    #
-    #         elif "id" in table.columns:
-    #             primary_cols = ["id"]
-    #
-    #         da_logger.debug(f"{table_name}, primary_key, {primary_cols}")
-    #
-    #         srid = getattr(geom_col.type, "srid", None)
-    #         if srid in (-1, 0, None):
-    #             srid = spatial_db.get_geom_srid(table_name, geom_col.name)
-    #
-    #         if srid in (-1, 0, None):
-    #             da_logger.error(f"Could not determine SRID for {table_name}.{geom_col.name}")
-    #             return False
-    #
-    #         quoted_table = cls._quote_table(schema, table_name)
-    #         query = f"SELECT * FROM {quoted_table}"
-    #
-    #         gdf = spatial_db.execute_query_as_gdf(
-    #             query=query,
-    #             geom_col=geom_col.name,
-    #             srid=srid,
-    #         )
-    #
-    #         if gdf.empty:
-    #             da_logger.error(f"Table {table_name} returned no rows.")
-    #             return False
-    #
-    #         layer_name = table_name[:table_name.rfind("_")] if uuid in table_name else table_name
-    #         layer_name = layer_name.replace("tbl", "")
-    #         if db_conn_name is None:
-    #             db_config = DBBase.engine_to_db_config(engine)
-    #             db_conn = DBConnection.create_from_dict(db_config)
-    #         else:
-    #             with DBConnection.managed_session() as db:
-    #                 qs = select(DBConnection).where(DBConnection.name == db_conn_name)
-    #                 result = db.execute(qs)
-    #                 db_conn: DBConnection = result.scalar_one_or_none()
-    #
-    #         la = LayerAccessibility.create_db_accessibility(
-    #             table_name=table_name if schema is None else f"{schema}.{table_name}",
-    #             db_conn=db_conn,
-    #             columns=columns,
-    #             pk_cols=primary_cols
-    #         )
-    #
-    #         lf = LayerInfo()
-    #         lf.uuid = uuid
-    #         lf.title = cls.create_title(layer_name)
-    #         lf.layer_name = layer_name
-    #         lf.layer_access_id = la.id
-    #         lf.category_id = int(layer_category_id) if layer_category_id is not None else None
-    #         lf.quality_level_id = 5
-    #
-    #         try:
-    #             lf.srid = int(gdf.crs.to_epsg()) if gdf.crs and gdf.crs.to_epsg() else int(srid)
-    #         except Exception:
-    #             lf.srid = int(srid)
-    #
-    #         try:
-    #             lf.proj4 = gdf.crs.to_proj4() if gdf.crs else None
-    #         except Exception:
-    #             lf.proj4 = None
-    #
-    #         lf.extent = gdf.total_bounds.tolist()
-    #
-    #         try:
-    #             lf.extent_3857 = gdf.to_crs(crs=3857).total_bounds.tolist()
-    #         except Exception:
-    #             lf.extent_3857 = None
-    #
-    #         lf.data_model = DataModel.V.name
-    #         lf.model_type = ModelType.Geom.name
-    #         lf.geom_type = list(set(gdf.geom_type.tolist()))
-    #         lf.uploaded_by = cls._get_user_id(user)
-    #
-    #         lf.save()
-    #         return True
-    #
-    #     except Exception as e:
-    #         da_logger.exception(f"ERROR in create_vector_layer_info: {str(e)}")
-    #         return False
 
     @staticmethod
     def raster_symbolizer_parser(sld: str, summary_data, is_float: bool):

@@ -1,5 +1,3 @@
-
-
 import base64
 import io
 import json
@@ -12,13 +10,12 @@ from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any, Optional, Dict, List
 
-import geopandas as gpd
 import pandas as pd
 from digitalarzengine.io.managers.minio_manager import MinioManager
 from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query, Form, File, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
-from pyproj import Transformer
+
 from sqlalchemy import create_engine, select, text, inspect
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
@@ -31,7 +28,7 @@ from app.damapql.dch.api_enum import ModelType, ApplicationURLType
 from app.damapql.dch.dtypes import DBConnectionCreate
 from app.damapql.dch.models import (
     AccessibilityType, DBConnection, DBQuery, DataModel, LayerAccessibility, LayerInfo,
-    LayerCategory, MapInfo, LayerQualityLevel
+    LayerCategory, MapInfo
 )
 from app.damapql.dch.routers.admin_dependencies import require_dch_admin
 from app.damapql.dch.schemas.geojson import GeoJSON
@@ -40,8 +37,7 @@ from app.damapql.dch.services.layer_query_services import LayerQueryService
 from app.damapql.dch.services.upload_package_service import DCHUploadPackageService
 from app.damapql.dch.services.upload_session_service import DCHUploadSessionService
 from app.damapql.dch.services.vector_append_service import DCHVectorAppendService
-from app.damapql.dch.services.layer_info_services import LayerInfoService
-from app.damapql.dch.utils.df_utils import ManageDataFrameUtils
+
 
 from app.damapql.dch.utils.dch_utils import DCHUtils
 from app.damapql.manage import reconcile_layerinfo, create_layerinfo_from_app_models
@@ -50,7 +46,6 @@ from app.damapql.utils.adapters.db import DBBase
 from app.damapql.utils.adapters.deps import get_sync_session, get_minio_manager
 from app.damapql.utils.adapters.model_utils import ModelUtils
 from app.damapql.utils.crypto import CryptoUtils
-from digitalarzengine.io.managers.db_manager import GeoDBManager
 from digitalarzengine.utils.singletons import da_logger
 
 # ---------------------------------------------------------------------
@@ -129,9 +124,7 @@ def test_db_connection(payload: DBConnectionCreate, current_user: UserInfo = Dep
 def add_db_connection(payload: DBConnectionCreate, current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
     """
     Save an external DB connection definition in the system.
-
     Password is encrypted before storing.
-
     Protected endpoint.
     """
     require_dch_admin(current_user)
@@ -152,29 +145,27 @@ def add_db_connection(payload: DBConnectionCreate, current_user: UserInfo = Depe
 
 
 @dch_admin_router.get("/db_table_list/{db_id}/")
-async def db_table_list(db_id: str, db=Depends(get_sync_session),
-        current_user: UserInfo = Depends(AuthUtils.get_current_user), ):
+async def db_table_list(
+    db_id: str,
+    db=Depends(get_sync_session),
+    current_user: UserInfo = Depends(AuthUtils.get_current_user),
+):
     """
-    Return the list of spatial tables from a configured external DB connection.
-
-    Protected endpoint.
+    Return the list of spatial tables (with geometry type & SRID) from a configured external DB connection.
     """
     require_dch_admin(current_user)
 
-    # obj: DBConnection = DBConnection.query().filter_by(id=db_id).first()
     qs = select(DBConnection).where(DBConnection.id == db_id)
-    result = db.execute(qs)
-    obj: DBConnection = result.scalar_one_or_none()
+    obj: DBConnection = db.execute(qs).scalar_one_or_none()
     if obj is None:
         raise HTTPException(status_code=404, detail="DB connection not found")
 
     try:
         engine = obj.get_sqlalchemy_engine()
-        db_manager = GeoDBManager(engine)
-        table_names = db_manager.get_spatial_table_names()
+        tables_info = DCHUtils.get_spatial_tables_info(engine=engine)
 
-        da_logger.debug(f"Spatial table names for db_id={db_id}: {table_names}")
-        return {"payload": table_names}
+        da_logger.debug(f"Spatial tables for db_id={db_id}: {tables_info}")
+        return {"payload": tables_info}
     except Exception as e:
         da_logger.exception(f"Failed to fetch table list: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch spatial table list")
@@ -182,9 +173,12 @@ async def db_table_list(db_id: str, db=Depends(get_sync_session),
 
 @dch_admin_router.get("/save_db_layer_info/{db_id}/{table_name}/{layer_category_id}/")
 async def save_db_layer_info(
-    db_id: str,
+    db_id: int,
     table_name: str,
-    layer_category_id: int,  # <-- Type hint ensures FastAPI casts and validates as integer
+    layer_category_id: int,
+    title: Optional[str] = None,
+    model_type: Optional[str] = None,
+    symbology: Optional[str] = None,
     db=Depends(get_sync_session),
     current_user: UserInfo = Depends(AuthUtils.get_current_user),
 ):
@@ -197,16 +191,31 @@ async def save_db_layer_info(
 
     try:
         engine = obj.get_sqlalchemy_engine()
+        layer_uuid = DCHUtils.get_uuid1()
 
         is_created = DCHUtils.create_vector_layer_info(
             engine=engine,
             table_name=table_name,
+            uuid=layer_uuid,
             layer_category_id=layer_category_id,
             user=current_user,
             db_conn_name=obj.name,
+            title=title,
+            model_type=model_type,
+            symbology=symbology,
         )
 
-        return {"payload": {"msg": "Layer info created" if is_created else "Failed to create Layer Info"}}
+        if not is_created:
+            raise HTTPException(status_code=400, detail="Failed to create Layer Info")
+
+        return {
+            "payload": {
+                "msg": "Layer info created",
+                "uuid": layer_uuid,
+            }
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         da_logger.exception(f"Failed to save DB layer info: {e}")
         raise HTTPException(status_code=500, detail="Failed to save DB layer info")
