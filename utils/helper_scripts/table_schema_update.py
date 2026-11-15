@@ -161,6 +161,25 @@ class TableSchemaUpdater:
 
         return False
 
+    @staticmethod
+    def _normalize_type_sql(type_sql: str) -> str:
+        t = type_sql.strip().upper()
+        aliases = {
+            "INT": "INTEGER",
+            "INT4": "INTEGER",
+            "INT8": "BIGINT",
+            "INT2": "SMALLINT",
+            "BOOL": "BOOLEAN",
+            "FLOAT8": "DOUBLE PRECISION",
+            "FLOAT": "DOUBLE PRECISION",
+            "CHARACTER VARYING": "VARCHAR",
+        }
+        for src, dst in aliases.items():
+            if t == src or t.startswith(f"{src}(") or t.startswith(f"{src}["):
+                t = dst + t[len(src):]
+                break
+        return t
+
     def sync_table(self, table_obj, rename_map=None):
         rename_map = rename_map or {}
         inverse_rename_map = {v: k for k, v in rename_map.items()}
@@ -208,9 +227,64 @@ class TableSchemaUpdater:
             elif not model_unique and db_unique:
                 self.drop_unique_constraint(table_name, col_name)
 
+        # 3c. COLUMN TYPES / LENGTHS
+        for column in table_obj.columns:
+            col_name = column.name
+            if col_name not in existing_cols:
+                continue
+
+            db_type = existing_cols[col_name].get("type")
+            if db_type is None:
+                continue
+
+            model_type_sql = self._normalize_type_sql(self.column_type_sql(column))
+            db_type_sql = self._normalize_type_sql(db_type.compile(dialect=self.engine.dialect))
+
+            if model_type_sql != db_type_sql:
+                # Auto-widen VARCHAR/STRING without prompting; prompt on other type changes
+                model_len = getattr(column.type, "length", None)
+                db_len = getattr(db_type, "length", None)
+                is_safe_widen = (
+                        isinstance(model_len, int)
+                        and isinstance(db_len, int)
+                        and model_len > db_len
+                        and model_type_sql.split("(")[0] == db_type_sql.split("(")[0]
+                )
+
+                if is_safe_widen or self.ask_user(
+                        f"ALTER type of '{table_name}.{col_name}' from {db_type_sql} to {model_type_sql}?"
+                ):
+                    self.alter_column_type(table_name, column)
+
         # 4. CLEANUP ORPHANS
         model_col_names = {c.name for c in table_obj.columns}
         for db_col in list(existing_cols.keys()):
             if db_col not in model_col_names:
                 # This will ask to drop 'area_acers' if it wasn't renamed
                 self.drop_column(table_name, db_col)
+
+    def alter_column_type(self, table_name, column):
+        target_type_sql = self.column_type_sql(column)
+
+        if self.dialect == "postgresql":
+            sql = (
+                f'ALTER TABLE "{table_name}" '
+                f'ALTER COLUMN "{column.name}" TYPE {target_type_sql} '
+                f'USING "{column.name}"::{target_type_sql}'
+            )
+        elif self.dialect in ("mysql", "mariadb"):
+            null_stmt = "NULL" if column.nullable else "NOT NULL"
+            sql = (
+                f"ALTER TABLE `{table_name}` "
+                f"MODIFY COLUMN `{column.name}` {target_type_sql} {null_stmt}"
+            )
+        else:
+            self.log(
+                f"⏭️ Type alteration not supported for dialect '{self.dialect}' on {table_name}.{column.name}",
+                level="warning",
+            )
+            return
+
+        with self.engine.begin() as conn:
+            conn.execute(text(sql))
+        self.log(f"📐 Updated type for {table_name}.{column.name} -> {target_type_sql}")

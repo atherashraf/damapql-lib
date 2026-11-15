@@ -241,6 +241,25 @@ class RasterIngestService:
         return access
 
     @staticmethod
+    def _truncate_layer_name(raw_name: str, max_len: int = 100) -> str:
+        """
+        Ensures `layer_name` fits within VARCHAR(100) while preserving any
+        trailing unique suffix (e.g., _<uuid>_<YYYYMMDD>_<HHMMSS>_<ms>).
+        """
+        if len(raw_name) <= max_len:
+            return raw_name
+
+        # Preserve trailing unique identifier/timestamp suffix if present
+        parts = raw_name.rsplit("_", 4)
+        if len(parts) == 5:
+            stem = parts[0]
+            suffix = "_" + "_".join(parts[1:])
+            if len(suffix) < max_len:
+                return f"{stem[: max_len - len(suffix)]}{suffix}"
+
+        return raw_name[:max_len]
+
+    @staticmethod
     def create_layer_info(
         session: Session,
         *,
@@ -255,6 +274,7 @@ class RasterIngestService:
         raster: COGRaster,
     ) -> LayerInfo:
         """Persists spatial catalog LayerInfo metadata records bound directly to the access record."""
+        # safe_layer_name = RasterIngestService._truncate_layer_name(layer_name, max_len=100)
         envelope = raster.get_envelop()
         layer_info = LayerInfo(
             uuid=uuid_str,

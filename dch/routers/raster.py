@@ -150,18 +150,15 @@ async def add_raster_layer_info(
     # ============================================================
     # APPLY INITIAL SYMBOLOGY (IF PROVIDED)
     # ============================================================
+    da_logger.info(f"Applying initial symbology for raster {result.uuid}", symbology)
     if symbology:
         try:
-            parsed_style = (
-                json.loads(symbology) if isinstance(symbology, str) else symbology
+            RasterStatsService.apply_initial_symbology(
+                uuid=result.uuid,
+                symbology=symbology,
+                minio_manager=minio_manager,
+                session=session,
             )
-            layer_info = session.execute(
-                select(LayerInfo).where(LayerInfo.uuid == result.uuid)
-            ).scalar_one_or_none()
-
-            if layer_info is not None:
-                layer_info.layer_styling = parsed_style
-                session.commit()
         except Exception as style_err:
             da_logger.warning(
                 f"Failed to apply initial symbology for raster {result.uuid}: {style_err}"
@@ -184,6 +181,7 @@ def get_raster_info(
     uuid: str,
     is_temp: bool = Query(False),
     session: Session = Depends(get_sync_session),
+    minio_manager: MinioManager | None = Depends(get_minio_manager),
 ):
     if is_temp:
         record = session.query(TempLayerInfo).filter(TempLayerInfo.uuid == uuid).first()
@@ -204,7 +202,11 @@ def get_raster_info(
             }
         )
 
-    result = RasterStatsService.get_raster_info(uuid)
+    result = RasterStatsService.get_raster_info(
+        uuid=uuid,
+        minio_manager=minio_manager,
+        session=session,
+    )
     return JSONResponse(content={"payload": result.payload})
 
 

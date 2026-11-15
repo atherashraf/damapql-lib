@@ -179,9 +179,9 @@ class ModelHelpersMixin:
     @classmethod
     @contextmanager
     def managed_session(
-        cls,
-        session: Session = None,
-        app_label: str = None,
+            cls,
+            session: Session = None,
+            app_label: str = None,
     ) -> Generator[Session, None, None]:
         db_key = cls.get_db_key(app_label)
         if session:

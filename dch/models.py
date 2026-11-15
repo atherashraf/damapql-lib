@@ -623,7 +623,7 @@ class LayerInfo(DBBase):
     uuid = Column(db.VARCHAR(40), nullable=False, unique=True)
     app_label = Column(db.VARCHAR(100), nullable=False, default="dch")
     title = Column(db.String, nullable=False)
-    layer_name = Column(db.VARCHAR(100), nullable=False, unique=True)
+    layer_name = Column(db.VARCHAR(255), nullable=False, unique=True)
 
     srid = Column(db.INTEGER, nullable=True)
     proj4 = Column(db.TEXT, nullable=True)
@@ -682,7 +682,7 @@ class LayerInfo(DBBase):
         return pk_col
 
     @classmethod
-    def get_layer_info_by_uuid(cls, uuid: str) -> Optional[LayerInfo]:
+    def get_layer_info_by_uuid(cls, uuid: str,session:Session=None) -> Optional[LayerInfo]:
         with cls.managed_session() as session:
             stmt = (select(cls).options(selectinload(cls.layer_accessibility), selectinload(cls.layer_category),
                                         selectinload(cls.quality_level), ).where(cls.uuid == uuid))

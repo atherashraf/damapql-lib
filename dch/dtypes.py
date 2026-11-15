@@ -113,9 +113,7 @@ class MinioAccessibilityParams(AccessibilityParams):
     object_name: str
 
     spectral_resolution: Optional[int] = None
-    spatial_resolution: Optional[
-        Union[float, Tuple[float, float]]
-    ] = None
+    spatial_resolution: Optional[Union[float, Tuple[float, float], List[float]]] = None
     radiometric_resolution: Optional[str] = None
 
     @property
@@ -129,7 +127,7 @@ class S3AccessibilityParams(AccessibilityParams):
     object_name: str
 
     spectral_resolution: Optional[int] = None
-    spatial_resolution: Optional[Union[float, List[float]]] = None
+    spatial_resolution: Optional[Union[float, Tuple[float, float], List[float]]] = None
     radiometric_resolution: Optional[str] = None
 
     @property
@@ -251,7 +249,13 @@ class LayerAccessibilityType(BaseModel):
         elif acc_type is not None:
             acc_type = str(acc_type)
 
-        if acc_type in ("S3", "MinIO") or (
+        acc_type_lower = (acc_type or "").lower()
+        param_type = str(v.get("type", "")).lower()
+
+        if acc_type_lower == "minio" or param_type == "minio":
+            return MinioAccessibilityParams(**v)
+
+        if acc_type_lower == "s3" or param_type == "s3" or (
                 "bucket" in v and "object_name" in v
         ):
             return S3AccessibilityParams(**v)

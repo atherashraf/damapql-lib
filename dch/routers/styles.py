@@ -107,15 +107,15 @@ async def save_style(request: Request, uuid: str, map_uuid: str,
     # -------------------------------------------------------------
 
     with LayerInfo.managed_session() as session:
-
-        obj = session.execute(select(LayerInfo).where(LayerInfo.uuid == uuid)).scalar_one_or_none()
+        obj = session.execute(
+            select(LayerInfo).where(LayerInfo.uuid == uuid)
+        ).scalar_one_or_none()
 
         if obj is None:
             return Response(status_code=204)
 
         obj.layer_styling = layer_styling
-
-        obj.save(session=session, )
+        session.commit()
 
     # -------------------------------------------------------------
     # INVALIDATE MVT CACHE
